@@ -190,8 +190,12 @@ impl Document {
 // ---------------------------------------------------------------------------
 
 /// A group of items drawn together at a given depth.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
+    /// Optional human-readable name, shown in the editor's layer tree.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+
     /// Z order. Lower values are painted first (further back).
     #[serde(default)]
     pub z: f32,
@@ -242,6 +246,10 @@ pub struct ClipGroup {
 /// open outline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Path {
+    /// Optional human-readable name, shown in the editor's layer tree.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+
     pub start: Point,
     #[serde(default)]
     pub segments: Vec<Segment>,
@@ -256,10 +264,17 @@ fn is_false(value: &bool) -> bool {
 impl Path {
     pub fn new(start: Point) -> Self {
         Self {
+            name: String::new(),
             start,
             segments: Vec::new(),
             closed: false,
         }
+    }
+
+    /// Sets the human-readable name used by the editor's layer tree.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn line_to(mut self, to: Point) -> Self {
@@ -404,6 +419,7 @@ mod tests {
         Document {
             version: FORMAT_VERSION,
             layers: vec![Layer {
+                name: String::new(),
                 z: 5.0,
                 items: vec![Item::Path(PathItem {
                     path: Path::new([10.0, 20.0])
@@ -449,14 +465,17 @@ mod tests {
     fn layers_are_sorted_by_z() {
         let mut doc = Document::new();
         doc.layers.push(Layer {
+            name: String::new(),
             z: 10.0,
             items: vec![],
         });
         doc.layers.push(Layer {
+            name: String::new(),
             z: -1.0,
             items: vec![],
         });
         doc.layers.push(Layer {
+            name: String::new(),
             z: 2.0,
             items: vec![],
         });
@@ -470,6 +489,7 @@ mod tests {
         let doc = Document {
             version: FORMAT_VERSION,
             layers: vec![Layer {
+                name: String::new(),
                 z: 0.0,
                 items: vec![
                     Item::Path(PathItem {

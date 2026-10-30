@@ -17,6 +17,8 @@ use vector_anim_app::editor::{
 };
 use vector_anim_app::model::Document;
 use vector_anim_app::render::build_scene;
+use vector_anim_app::sidebar::SidebarPlugin;
+use vector_anim_app::style_panel::StylePanelPlugin;
 
 const BACKGROUND: Color = Color::srgb_u8(0x1a, 0x1d, 0x24);
 
@@ -33,6 +35,8 @@ fn main() {
         }))
         .add_plugins(VelloPlugin::default())
         .add_plugins(EditorPlugin)
+        .add_plugins(SidebarPlugin)
+        .add_plugins(StylePanelPlugin)
         .add_systems(Startup, setup)
         .run();
 }

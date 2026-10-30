@@ -19,6 +19,16 @@ use vello::peniko::{Color, Fill};
 use crate::model::{Bounds, ClipGroup, Document, Item, Path, PathItem, Segment, Style};
 use crate::render::{build_scene, path_to_bez_path};
 
+/// Width of the layer sidebar on the right, in screen pixels.
+///
+/// The document is fitted into the remaining area to the left of it.
+pub const SIDEBAR_WIDTH: f32 = 260.0;
+
+/// Height of the style panel along the bottom, in screen pixels.
+///
+/// The document is fitted into the remaining area above it.
+pub const BOTTOM_BAR_HEIGHT: f32 = 200.0;
+
 /// Bounds of the loaded document, used to fit it to the window.
 ///
 /// Kept fixed for the session so that dragging a point does not rescale the
@@ -73,7 +83,13 @@ struct Drag {
 #[derive(Resource)]
 pub struct EditorState {
     pub document: Document,
+    /// The selected path, either a painted item or a clip mask.
     pub selected: Option<PathAddress>,
+    /// The selected control point of [`Self::selected`], if any.
+    pub selected_handle: Option<Handle>,
+    /// Incremented whenever the object tree changes shape (an item is removed),
+    /// so the sidebar knows to rebuild its rows.
+    pub structure_revision: u64,
     drag: Option<Drag>,
 }
 
@@ -82,8 +98,20 @@ impl EditorState {
         Self {
             document,
             selected: None,
+            selected_handle: None,
+            structure_revision: 0,
             drag: None,
         }
+    }
+
+    /// Selects `address` (or clears the selection when it is `None`).
+    ///
+    /// Any in-progress drag and control-point selection are dropped, so the
+    /// selection always starts from a clean state.
+    pub fn select(&mut self, address: Option<PathAddress>) {
+        self.selected = address;
+        self.selected_handle = None;
+        self.drag = None;
     }
 }
 
@@ -96,16 +124,28 @@ impl Plugin for EditorPlugin {
     }
 }
 
-/// Centers the document in the window and scales it to fill 90% of the view.
+/// Centers the document in the area left of the sidebar and above the style
+/// panel, scaling it to fill 90% of that area.
 pub fn fit_transform(bounds: Bounds, viewport_width: f32, viewport_height: f32) -> Transform {
+    // The sidebar covers the right edge and the style panel the bottom edge,
+    // so fit into what remains.
+    let available_width = (viewport_width - SIDEBAR_WIDTH).max(1.0);
+    let available_height = (viewport_height - BOTTOM_BAR_HEIGHT).max(1.0);
     let doc_width = bounds.width().max(f32::EPSILON);
     let doc_height = bounds.height().max(f32::EPSILON);
-    let scale = 0.9 * (viewport_width / doc_width).min(viewport_height / doc_height);
+    let scale = 0.9 * (available_width / doc_width).min(available_height / doc_height);
 
-    // Document Y points down, so shifting the document's centre to the screen
-    // centre means moving the entity *up* by `scale * centre.y`.
+    // Document Y points down, so shifting the document's centre to the content
+    // area's centre means moving the entity *up* by `scale * centre.y`. That
+    // centre sits half a sidebar left of the window centre and half a panel
+    // above it.
     let center = bounds.center();
-    Transform::from_xyz(-scale * center[0], scale * center[1], 0.0).with_scale(Vec3::splat(scale))
+    Transform::from_xyz(
+        -scale * center[0] - SIDEBAR_WIDTH * 0.5,
+        scale * center[1] + BOTTOM_BAR_HEIGHT * 0.5,
+        0.0,
+    )
+    .with_scale(Vec3::splat(scale))
 }
 
 fn fit_document(
@@ -166,7 +206,13 @@ fn handle_input(
 ) {
     if keys.just_pressed(KeyCode::Escape) {
         editor.selected = None;
+        editor.selected_handle = None;
         editor.drag = None;
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Delete) {
+        delete_selection(&mut editor);
         return;
     }
 
@@ -176,6 +222,16 @@ fn handle_input(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
+
+    if cursor.x >= window.width() - SIDEBAR_WIDTH || cursor.y >= window.height() - BOTTOM_BAR_HEIGHT
+    {
+        // The pointer is over the sidebar or the style panel, where the UI
+        // handles clicks. Still finish a drag that was released there.
+        if mouse.just_released(MouseButton::Left) {
+            editor.drag = None;
+        }
+        return;
+    }
 
     let view = ViewMapping::new(bounds.0, window.width(), window.height());
     let point = view.screen_to_document(cursor);
@@ -190,11 +246,13 @@ fn handle_input(
             && let Some(handle) = find_handle(path, point, view.document_per_pixel() * 8.0)
         {
             editor.drag = Some(Drag { address, handle });
+            editor.selected_handle = Some(handle);
             started_drag = true;
         }
 
         if !started_drag {
             editor.selected = pick_path(&editor.document, point, view.document_per_pixel() * 3.0);
+            editor.selected_handle = None;
             editor.drag = None;
         }
     }
@@ -230,7 +288,7 @@ fn refresh_scene(
     if let Some(address) = &editor.selected
         && let Some(path) = path_at(&editor.document, address)
     {
-        draw_control_overlay(&mut scene, path, scale);
+        draw_control_overlay(&mut scene, path, scale, editor.selected_handle);
     }
 
     if let Ok(mut scene_component) = scenes.single_mut() {
@@ -265,6 +323,33 @@ fn path_at_mut<'a>(document: &'a mut Document, address: &PathAddress) -> Option<
     }
 }
 
+/// Resolves an address to the style applied to the path it names.
+pub fn style_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Style> {
+    match address {
+        PathAddress::Item { layer, items } => {
+            path_item_at(document, *layer, items).map(|item| &item.style)
+        }
+        PathAddress::Clip { layer, items } => {
+            clip_group_at(document, *layer, items).map(|group| &group.style)
+        }
+    }
+}
+
+/// Resolves an address to the mutable style applied to the path it names.
+pub fn style_at_mut<'a>(
+    document: &'a mut Document,
+    address: &PathAddress,
+) -> Option<&'a mut Style> {
+    match address {
+        PathAddress::Item { layer, items } => {
+            path_item_at_mut(document, *layer, items).map(|item| &mut item.style)
+        }
+        PathAddress::Clip { layer, items } => {
+            clip_group_at_mut(document, *layer, items).map(|group| &mut group.style)
+        }
+    }
+}
+
 /// Resolves a chain of item indices to the list of items it selects.
 ///
 /// Every index except the last must address a clip group, since clip groups are
@@ -280,6 +365,23 @@ fn items_at<'a>(mut items: &'a [Item], indices: &[usize]) -> Option<&'a [Item]> 
 }
 
 fn items_at_mut<'a>(mut items: &'a mut [Item], indices: &[usize]) -> Option<&'a mut [Item]> {
+    for &index in indices {
+        match items.get_mut(index)? {
+            Item::Clip(group) => items = &mut group.targets,
+            Item::Path(_) => return None,
+        }
+    }
+    Some(items)
+}
+
+/// Resolves a chain of item indices to the mutable list that contains the last
+/// index, so the addressed item can be removed.
+fn items_vec_at_mut<'a>(
+    document: &'a mut Document,
+    layer: usize,
+    indices: &[usize],
+) -> Option<&'a mut Vec<Item>> {
+    let mut items = &mut document.layers.get_mut(layer)?.items;
     for &index in indices {
         match items.get_mut(index)? {
             Item::Clip(group) => items = &mut group.targets,
@@ -605,6 +707,97 @@ fn to_kurbo_point(point: [f32; 2]) -> KurboPoint {
 }
 
 // ---------------------------------------------------------------------------
+// Deletion
+// ---------------------------------------------------------------------------
+
+/// Deletes the selected control point, or the selected object when no control
+/// point is selected.
+fn delete_selection(editor: &mut EditorState) {
+    if let Some(handle) = editor.selected_handle.take() {
+        // A control point is selected: only it is deleted, even when the
+        // handle happens to sit on top of another object.
+        if let Some(address) = editor.selected.clone()
+            && let Some(path) = path_at_mut(&mut editor.document, &address)
+            && delete_handle(path, handle)
+        {
+            editor.drag = None;
+            editor.structure_revision += 1;
+        }
+        return;
+    }
+
+    let Some(address) = editor.selected.take() else {
+        return;
+    };
+    if remove_object(&mut editor.document, &address) {
+        editor.structure_revision += 1;
+    }
+    editor.drag = None;
+}
+
+/// Removes one control point from `path`.
+///
+/// Returns `false` when the handle cannot be deleted on its own:
+///
+/// * the start of a closed path is also the loop's join,
+/// * an open path's start has no successor to become the new start,
+/// * a line segment has no control points to remove.
+fn delete_handle(path: &mut Path, handle: Handle) -> bool {
+    match handle {
+        Handle::Start => {
+            if path.closed || path.segments.is_empty() {
+                return false;
+            }
+            // The first segment's endpoint becomes the new start.
+            let first = path.segments.remove(0);
+            path.start = segment_to(&first);
+            true
+        }
+        Handle::LineTo(index) | Handle::CubicTo(index) => {
+            if index >= path.segments.len() {
+                return false;
+            }
+            path.segments.remove(index);
+            true
+        }
+        Handle::CubicCtrl1(index) | Handle::CubicCtrl2(index) => {
+            let Some(segment) = path.segments.get_mut(index) else {
+                return false;
+            };
+            if matches!(segment, Segment::Cubic { .. }) {
+                // Dropping a control point straightens the segment.
+                let to = segment_to(segment);
+                *segment = Segment::Line { to };
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Removes the item named by `address` from the document.
+///
+/// A clip address names the clip mask of its group, so removing it removes the
+/// whole group together with its targets.
+fn remove_object(document: &mut Document, address: &PathAddress) -> bool {
+    let (layer, indices) = match address {
+        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
+    };
+    let Some((last, parents)) = indices.split_last() else {
+        return false;
+    };
+    let Some(items) = items_vec_at_mut(document, layer, parents) else {
+        return false;
+    };
+    if *last >= items.len() {
+        return false;
+    }
+    items.remove(*last);
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Overlay
 // ---------------------------------------------------------------------------
 
@@ -612,7 +805,12 @@ fn to_kurbo_point(point: [f32; 2]) -> KurboPoint {
 ///
 /// Sizes are given in screen pixels and converted to document units so the
 /// overlay stays legible at any zoom.
-fn draw_control_overlay(scene: &mut Scene, path: &Path, scale: f32) {
+fn draw_control_overlay(
+    scene: &mut Scene,
+    path: &Path,
+    scale: f32,
+    selected_handle: Option<Handle>,
+) {
     let scale = scale.max(f32::EPSILON);
     let pixels = |amount: f32| f64::from(amount / scale);
 
@@ -641,10 +839,14 @@ fn draw_control_overlay(scene: &mut Scene, path: &Path, scale: f32) {
         }
     }
 
-    let radius = pixels(4.0);
-    for (_, position) in handles(path) {
+    for (handle, position) in handles(path) {
+        // The selected control point is the one the Delete key will remove, so
+        // make it stand out.
+        let selected = selected_handle == Some(handle);
+        let radius = pixels(if selected { 5.5 } else { 4.0 });
+        let fill = if selected { &accent } else { &handle_fill };
         let circle = Circle::new(to_kurbo_point(position), radius);
-        scene.fill(Fill::NonZero, Affine::IDENTITY, &handle_fill, None, &circle);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, fill, None, &circle);
         scene.stroke(
             &KurboStroke::new(pixels(1.5)),
             Affine::IDENTITY,
@@ -691,6 +893,7 @@ mod tests {
             version: 1,
             layers: vec![
                 Layer {
+                    name: String::new(),
                     z: 0.0,
                     items: vec![Item::Path(PathItem {
                         path: rect(0.0, 0.0, 100.0, 100.0),
@@ -698,6 +901,7 @@ mod tests {
                     })],
                 },
                 Layer {
+                    name: String::new(),
                     z: 10.0,
                     items: vec![Item::Path(PathItem {
                         path: rect(50.0, 50.0, 150.0, 150.0),
@@ -729,6 +933,7 @@ mod tests {
         let document = Document {
             version: 1,
             layers: vec![Layer {
+                name: String::new(),
                 z: 0.0,
                 items: vec![Item::Clip(ClipGroup {
                     clip: rect(0.0, 0.0, 100.0, 100.0),
@@ -757,6 +962,7 @@ mod tests {
         let document = Document {
             version: 1,
             layers: vec![Layer {
+                name: String::new(),
                 z: 0.0,
                 items: vec![Item::Clip(ClipGroup {
                     clip: rect(0.0, 0.0, 100.0, 100.0),
@@ -798,6 +1004,7 @@ mod tests {
         let document = Document {
             version: 1,
             layers: vec![Layer {
+                name: String::new(),
                 z: 0.0,
                 items: vec![Item::Clip(ClipGroup {
                     clip: rect(0.0, 0.0, 100.0, 100.0),
@@ -833,6 +1040,7 @@ mod tests {
         let mut document = Document {
             version: 1,
             layers: vec![Layer {
+                name: String::new(),
                 z: 0.0,
                 items: vec![Item::Clip(ClipGroup {
                     clip: rect(0.0, 0.0, 100.0, 100.0),
@@ -883,6 +1091,7 @@ mod tests {
         let document = Document {
             version: 1,
             layers: vec![Layer {
+                name: String::new(),
                 z: 0.0,
                 items: vec![Item::Path(PathItem {
                     path: Path::new([0.0, 50.0]).line_to([100.0, 50.0]),
@@ -909,7 +1118,11 @@ mod tests {
         };
         let view = ViewMapping::new(bounds, 900.0, 900.0);
 
-        let center = view.screen_to_document(Vec2::new(450.0, 450.0));
+        // The content is centered in the window area left of the sidebar and
+        // above the style panel.
+        let content_center_x = (900.0 - SIDEBAR_WIDTH) * 0.5;
+        let content_center_y = (900.0 - BOTTOM_BAR_HEIGHT) * 0.5;
+        let center = view.screen_to_document(Vec2::new(content_center_x, content_center_y));
         assert!((center[0] - 200.0).abs() < 1e-4);
         assert!((center[1] - 100.0).abs() < 1e-4);
 
@@ -1003,5 +1216,88 @@ mod tests {
                 to: [5.0, 5.0]
             }
         );
+    }
+
+    #[test]
+    fn deleting_an_anchor_removes_its_segment() {
+        let mut path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([20.0, 0.0]);
+
+        assert!(delete_handle(&mut path, Handle::LineTo(0)));
+        assert_eq!(path.start, [0.0, 0.0]);
+        assert_eq!(path.segments, vec![Segment::Line { to: [20.0, 0.0] }]);
+    }
+
+    #[test]
+    fn deleting_a_control_point_straightens_the_segment() {
+        let mut path = Path::new([0.0, 0.0]).cubic_to([10.0, 0.0], [20.0, 0.0], [30.0, 0.0]);
+
+        assert!(delete_handle(&mut path, Handle::CubicCtrl1(0)));
+        assert_eq!(path.segments, vec![Segment::Line { to: [30.0, 0.0] }]);
+    }
+
+    #[test]
+    fn deleting_a_start_point_promotes_the_next_anchor() {
+        let mut path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([20.0, 0.0]);
+
+        assert!(delete_handle(&mut path, Handle::Start));
+        assert_eq!(path.start, [10.0, 0.0]);
+        assert_eq!(path.segments, vec![Segment::Line { to: [20.0, 0.0] }]);
+
+        // A closed path's start is its join, so it cannot be removed on its
+        // own.
+        let mut closed = Path::new([0.0, 0.0]).line_to([10.0, 0.0]).closed();
+        assert!(!delete_handle(&mut closed, Handle::Start));
+    }
+
+    #[test]
+    fn deleting_objects_removes_them_from_the_tree() {
+        let mut document = Document {
+            version: 1,
+            layers: vec![Layer {
+                name: "Layer".into(),
+                z: 0.0,
+                items: vec![
+                    Item::Path(PathItem {
+                        path: rect(0.0, 0.0, 10.0, 10.0),
+                        style: Style::default(),
+                    }),
+                    Item::Clip(ClipGroup {
+                        clip: rect(0.0, 0.0, 10.0, 10.0),
+                        style: Style::default(),
+                        targets: vec![Item::Path(PathItem {
+                            path: rect(0.0, 0.0, 5.0, 5.0),
+                            style: Style::default(),
+                        })],
+                    }),
+                ],
+            }],
+        };
+
+        // A nested target is removed from its parent clip group.
+        assert!(remove_object(
+            &mut document,
+            &PathAddress::Item {
+                layer: 0,
+                items: vec![1, 0],
+            }
+        ));
+        let Item::Clip(group) = &document.layers[0].items[1] else {
+            panic!("expected a clip group");
+        };
+        assert!(group.targets.is_empty());
+
+        // A clip address removes the whole group.
+        assert!(remove_object(
+            &mut document,
+            &PathAddress::Clip {
+                layer: 0,
+                items: vec![1],
+            }
+        ));
+        assert_eq!(document.layers[0].items.len(), 1);
     }
 }
