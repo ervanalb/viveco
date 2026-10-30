@@ -1,0 +1,216 @@
+{
+  "version": 1,
+  "layers": [
+    {
+      "z": 0.0,
+      "items": [
+        {
+          "kind": "path",
+          "path": {
+            "start": [0.0, 0.0],
+            "segments": [
+              { "kind": "line", "to": [400.0, 0.0] },
+              { "kind": "line", "to": [400.0, 400.0] },
+              { "kind": "line", "to": [0.0, 400.0] }
+            ],
+            "closed": true
+          },
+          "style": {
+            "fill": "#232838"
+          }
+        },
+        {
+          "kind": "path",
+          "path": {
+            "start": [363.0, 80.0],
+            "segments": [
+              { "kind": "cubic", "ctrl1": [363.0, 100.9868], "ctrl2": [345.9868, 118.0], "to": [325.0, 118.0] },
+              { "kind": "cubic", "ctrl1": [304.0132, 118.0], "ctrl2": [287.0, 100.9868], "to": [287.0, 80.0] },
+              { "kind": "cubic", "ctrl1": [287.0, 59.0132], "ctrl2": [304.0132, 42.0], "to": [325.0, 42.0] },
+              { "kind": "cubic", "ctrl1": [345.9868, 42.0], "ctrl2": [363.0, 59.0132], "to": [363.0, 80.0] }
+            ],
+            "closed": true
+          },
+          "style": {
+            "fill": "#ffd166"
+          }
+        }
+      ]
+    },
+    {
+      "z": 10.0,
+      "items": [
+        {
+          "kind": "path",
+          "path": {
+            "start": [30.0, 330.0],
+            "segments": [
+              { "kind": "cubic", "ctrl1": [60.0, 280.0], "ctrl2": [90.0, 380.0], "to": [120.0, 330.0] },
+              { "kind": "cubic", "ctrl1": [150.0, 280.0], "ctrl2": [180.0, 380.0], "to": [210.0, 330.0] },
+              { "kind": "cubic", "ctrl1": [240.0, 280.0], "ctrl2": [270.0, 380.0], "to": [300.0, 330.0] },
+              { "kind": "cubic", "ctrl1": [330.0, 280.0], "ctrl2": [360.0, 380.0], "to": [390.0, 330.0] }
+            ]
+          },
+          "style": {
+            "stroke": {
+              "color": "#7ee787",
+              "width": 5.0
+            }
+          }
+        },
+        {
+          "kind": "path",
+          "path": {
+            "start": [60.0, 120.0],
+            "segments": [
+              { "kind": "line", "to": [110.0, 60.0] },
+              { "kind": "line", "to": [160.0, 120.0] }
+            ],
+            "closed": true
+          },
+          "style": {
+            "fill": "#8b5cf6",
+            "stroke": {
+              "color": "#0b0b12",
+              "width": 3.0
+            }
+          }
+        },
+        {
+          "kind": "path",
+          "path": {
+            "start": [70.0, 240.0],
+            "segments": [
+              { "kind": "cubic", "ctrl1": [90.0, 190.0], "ctrl2": [150.0, 190.0], "to": [170.0, 240.0] },
+              { "kind": "line", "to": [120.0, 275.0] }
+            ],
+            "closed": true
+          },
+          "style": {
+            "fill": "#34d399",
+            "stroke": {
+              "color": "#064e3b",
+              "width": 2.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "z": 20.0,
+      "items": [
+        {
+          "kind": "clip",
+          "clip": {
+            "start": [365.0, 270.0],
+            "segments": [
+              { "kind": "cubic", "ctrl1": [365.0, 316.9442], "ctrl2": [326.9442, 355.0], "to": [280.0, 355.0] },
+              { "kind": "cubic", "ctrl1": [233.0558, 355.0], "ctrl2": [195.0, 316.9442], "to": [195.0, 270.0] },
+              { "kind": "cubic", "ctrl1": [195.0, 223.0558], "ctrl2": [233.0558, 185.0], "to": [280.0, 185.0] },
+              { "kind": "cubic", "ctrl1": [326.9442, 185.0], "ctrl2": [365.0, 223.0558], "to": [365.0, 270.0] }
+            ],
+            "closed": true
+          },
+          "style": {
+            "fill": "#e76f51",
+            "stroke": {
+              "color": "#0b0b12",
+              "width": 3.0
+            }
+          },
+          "targets": [
+            {
+              "kind": "path",
+              "path": {
+                "start": [170.0, 370.0],
+                "segments": [
+                  { "kind": "line", "to": [390.0, 170.0] }
+                ]
+              },
+              "style": {
+                "stroke": {
+                  "color": "#ffd166",
+                  "width": 7.0
+                }
+              }
+            },
+            {
+              "kind": "path",
+              "path": {
+                "start": [170.0, 170.0],
+                "segments": [
+                  { "kind": "line", "to": [390.0, 370.0] }
+                ]
+              },
+              "style": {
+                "stroke": {
+                  "color": "#ffd166",
+                  "width": 7.0
+                }
+              }
+            },
+            {
+              "kind": "clip",
+              "clip": {
+                "start": [318.0, 270.0],
+                "segments": [
+                  { "kind": "cubic", "ctrl1": [318.0, 290.9868], "ctrl2": [300.9868, 308.0], "to": [280.0, 308.0] },
+                  { "kind": "cubic", "ctrl1": [259.0132, 308.0], "ctrl2": [242.0, 290.9868], "to": [242.0, 270.0] },
+                  { "kind": "cubic", "ctrl1": [242.0, 249.0132], "ctrl2": [259.0132, 232.0], "to": [280.0, 232.0] },
+                  { "kind": "cubic", "ctrl1": [300.9868, 232.0], "ctrl2": [318.0, 249.0132], "to": [318.0, 270.0] }
+                ],
+                "closed": true
+              },
+              "style": {
+                "fill": "#3b82f6",
+                "stroke": {
+                  "color": "#dbeafe",
+                  "width": 2.0
+                }
+              },
+              "targets": [
+                {
+                  "kind": "path",
+                  "path": {
+                    "start": [318.0, 270.0],
+                    "segments": [
+                      { "kind": "cubic", "ctrl1": [318.0, 290.9868], "ctrl2": [300.9868, 308.0], "to": [280.0, 308.0] },
+                      { "kind": "cubic", "ctrl1": [259.0132, 308.0], "ctrl2": [242.0, 290.9868], "to": [242.0, 270.0] },
+                      { "kind": "cubic", "ctrl1": [242.0, 249.0132], "ctrl2": [259.0132, 232.0], "to": [280.0, 232.0] },
+                      { "kind": "cubic", "ctrl1": [300.9868, 232.0], "ctrl2": [318.0, 249.0132], "to": [318.0, 270.0] }
+                    ],
+                    "closed": true
+                  },
+                  "style": {
+                    "fill": "#3b82f6",
+                    "stroke": {
+                      "color": "#dbeafe",
+                      "width": 2.0
+                    }
+                  }
+                },
+                {
+                  "kind": "path",
+                  "path": {
+                    "start": [252.0, 270.0],
+                    "segments": [
+                      { "kind": "line", "to": [268.0, 254.0] },
+                      { "kind": "line", "to": [292.0, 286.0] },
+                      { "kind": "line", "to": [308.0, 270.0] }
+                    ]
+                  },
+                  "style": {
+                    "stroke": {
+                      "color": "#ffffff",
+                      "width": 3.0
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

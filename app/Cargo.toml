@@ -1,0 +1,23 @@
+[package]
+name = "vector_anim_app"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Link Bevy dynamically: much faster incremental builds for development.
+# Enable with `cargo run --features dynamic_linking`.
+dynamic_linking = ["bevy/dynamic_linking"]
+
+[dependencies]
+bevy = "0.19"
+bevy_vello = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Bevy/Vello are much slower in a fully unoptimized build, but we do not want
+# to wait for an optimized build of our own (small) crate either.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
