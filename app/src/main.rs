@@ -4,8 +4,6 @@
 //! `editor` adds selection and control-point editing. This binary only wires
 //! those up to Bevy.
 
-use std::path::PathBuf;
-
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
@@ -13,9 +11,14 @@ use bevy::window::PrimaryWindow;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
 
+use vector_anim_app::clipboard::ClipboardPlugin;
+use vector_anim_app::dialogs::DialogPlugin;
 use vector_anim_app::editor::{
     DocumentBounds, DocumentScene, EditorPlugin, EditorState, fit_transform,
 };
+use vector_anim_app::file::{DocumentFile, FilePlugin, initial_path};
+use vector_anim_app::history::{History, HistoryPlugin};
+use vector_anim_app::menu_bar::MenuBarPlugin;
 use vector_anim_app::model::Document;
 use vector_anim_app::render::build_scene;
 use vector_anim_app::sidebar::SidebarPlugin;
@@ -38,30 +41,39 @@ fn main() {
             ..default()
         }))
         .add_plugins(VelloPlugin::default())
+        .insert_resource(DocumentFile::new(initial_path()))
         .add_plugins(EditorPlugin)
         .add_plugins(SidebarPlugin)
         .add_plugins(StylePanelPlugin)
         .add_plugins(ToolbarPlugin)
+        .add_plugins(MenuBarPlugin)
+        .add_plugins(FilePlugin)
+        .add_plugins(DialogPlugin)
+        .add_plugins(HistoryPlugin)
+        .add_plugins(ClipboardPlugin)
         .add_systems(Startup, setup)
         .run();
 }
 
-fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/example.vecart.json");
-    let document = Document::load_from_file(&path)
-        .unwrap_or_else(|err| panic!("failed to load {path:?}: {err}"));
+fn setup(
+    mut commands: Commands,
+    window: Query<&Window, With<PrimaryWindow>>,
+    file: Res<DocumentFile>,
+) {
+    let document = match &file.path {
+        Some(path) => {
+            let document = Document::load_from_file(path)
+                .unwrap_or_else(|err| panic!("failed to load {path:?}: {err}"));
+            println!("loaded {path:?}: {} layers", document.layers.len());
+            document
+        }
+        None => Document::new(),
+    };
 
     let bounds = document
         .bounds()
         .expect("the example document contains no geometry");
     let scene = build_scene(&document);
-
-    println!(
-        "loaded {path:?}: {} layers, {}x{} units",
-        document.layers.len(),
-        bounds.width(),
-        bounds.height()
-    );
 
     let (viewport_width, viewport_height) = window
         .single()
@@ -75,6 +87,7 @@ fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
     );
 
     commands.insert_resource(DocumentBounds(bounds));
+    commands.insert_resource(History::new(document.clone()));
     commands.insert_resource(EditorState::new(document));
     commands.spawn((Camera2d, VelloView, Transform::from_xyz(0.0, 0.0, 1000.0)));
     commands.spawn((

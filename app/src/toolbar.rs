@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use crate::editor::{EditorState, TOOLBAR_WIDTH, Tool, ToolState, finish_pen};
+use crate::editor::{EditorState, MENU_BAR_HEIGHT, TOOLBAR_WIDTH, Tool, ToolState, finish_pen};
 use crate::theme;
 
 pub struct ToolbarPlugin;
@@ -29,9 +29,9 @@ fn spawn_toolbar(mut commands: Commands) {
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
-                top: Val::Px(0.0),
+                top: Val::Px(MENU_BAR_HEIGHT),
+                bottom: Val::Px(0.0),
                 width: Val::Px(TOOLBAR_WIDTH),
-                height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 padding: UiRect::all(Val::Px(8.0)),
@@ -90,11 +90,17 @@ fn handle_tool_buttons(
             requested = Some(button.0);
         }
     }
-    if keys.just_pressed(KeyCode::KeyV) {
-        requested = Some(Tool::Select);
-    }
-    if keys.just_pressed(KeyCode::KeyP) {
-        requested = Some(Tool::Pen);
+    // Ctrl+V is paste and Ctrl+P is reserved for the browser/print convention;
+    // the letter shortcuts only apply on their own. While a tree row is being
+    // renamed, they belong to the text field.
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if !ctrl && editor.renaming.is_none() {
+        if keys.just_pressed(KeyCode::KeyV) {
+            requested = Some(Tool::Select);
+        }
+        if keys.just_pressed(KeyCode::KeyP) {
+            requested = Some(Tool::Pen);
+        }
     }
 
     let Some(next) = requested else {

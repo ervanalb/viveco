@@ -181,6 +181,9 @@ struct StylePanelState {
     stroke_width: f32,
     /// Whether the selected path is closed.
     closed: bool,
+    /// Whether the selection has a style the panel can edit. Layers and empty
+    /// selections do not.
+    editable: bool,
     /// The selection the panel currently mirrors; used to detect changes.
     synced: Option<PathAddress>,
     /// Set when the panel has edits that still need writing to the document.
@@ -196,6 +199,7 @@ impl Default for StylePanelState {
             stroke_enabled: false,
             stroke_width: DEFAULT_STROKE_WIDTH,
             closed: false,
+            editable: false,
             synced: None,
             dirty: false,
         }
@@ -571,12 +575,19 @@ fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelSta
         panel.fill_enabled = false;
         panel.stroke_enabled = false;
         panel.closed = false;
+        panel.editable = false;
         return;
     };
     panel.closed = path_closed_at(&editor.document, address).unwrap_or(false);
     let Some(style) = style_at(&editor.document, address) else {
+        // A layer (or another node without a style) has nothing to paint.
+        panel.fill_enabled = false;
+        panel.stroke_enabled = false;
+        panel.closed = false;
+        panel.editable = false;
         return;
     };
+    panel.editable = true;
 
     // Keep the last color when a paint is currently off, so switching it back
     // on restores a sensible value.
@@ -598,6 +609,10 @@ fn drag_sliders(
     sliders: Query<(&Interaction, &SliderTrack, &RelativeCursorPosition)>,
     mut panel: ResMut<StylePanelState>,
 ) {
+    if !panel.editable {
+        active.0 = None;
+        return;
+    }
     if mouse.just_pressed(MouseButton::Left) {
         let mut started = None;
         for (interaction, track, _) in &sliders {
@@ -631,6 +646,9 @@ fn handle_toggles(
     toggles: Query<(&Interaction, &ToggleButton), Changed<Interaction>>,
     mut panel: ResMut<StylePanelState>,
 ) {
+    if !panel.editable {
+        return;
+    }
     for (interaction, toggle) in &toggles {
         if *interaction != Interaction::Pressed {
             continue;
@@ -648,7 +666,7 @@ fn handle_closed_checkbox(
     checkboxes: Query<&Interaction, (With<ClosedCheckbox>, Changed<Interaction>)>,
     mut panel: ResMut<StylePanelState>,
 ) {
-    if panel.synced.is_none() {
+    if !panel.editable {
         return;
     }
     for interaction in &checkboxes {

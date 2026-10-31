@@ -15,9 +15,10 @@ use vello::kurbo::{
 };
 use vello::peniko::{Color, Fill};
 
+use crate::menu_bar::MenuState;
 use crate::model::{
-    Bounds, DEFAULT_STROKE_WIDTH, Document, Item, Layer, Path, PathEnds, PathItem, Rgba8, Segment,
-    StrokeStyle, Style,
+    Bounds, ClipGroup, DEFAULT_STROKE_WIDTH, Document, Item, Layer, Path, PathEnds, PathItem,
+    Rgba8, Segment, StrokeStyle, Style,
 };
 use crate::render::{build_scene, path_to_bez_path, to_kurbo_point};
 
@@ -35,6 +36,11 @@ pub const BOTTOM_BAR_HEIGHT: f32 = 200.0;
 ///
 /// The document is fitted into the remaining area to the right of it.
 pub const TOOLBAR_WIDTH: f32 = 56.0;
+
+/// Height of the menu bar along the top, in screen pixels.
+///
+/// The document is fitted into the remaining area below it.
+pub const MENU_BAR_HEIGHT: f32 = 28.0;
 
 /// The active editing tool.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,7 +72,7 @@ pub struct DocumentScene;
 /// `pan` is a screen-pixel offset: increasing it moves the document right and
 /// down. `zoom` multiplies the fit scale. Both are reset only by restarting
 /// the app; the document stays fitted when the window is resized.
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
     pub zoom: f32,
     pub pan: Vec2,
@@ -129,18 +135,21 @@ const OVERLAY_BAND: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x80);
 const OVERLAY_HANDLE_FILL: Color = Color::from_rgba8(0xff, 0xff, 0xff, 0xff);
 const OVERLAY_HANDLE_OUTLINE: Color = Color::from_rgba8(0x0b, 0x2a, 0x40, 0xff);
 
-/// The path currently selected for editing, addressed by tree position.
+/// A node selected for editing, addressed by tree position.
 ///
 /// `items` is a chain of item indices: `[i]` addresses `layer.items[i]`, while
 /// `[i, j]` addresses `layer.items[i]` (a clip group)'s `targets[j]`, and so
 /// on. [`PathAddress::Clip`] uses the same chain but selects the clip path of
 /// the clip group at that position instead of one of its targets.
+/// [`PathAddress::Layer`] names a whole layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PathAddress {
     /// A painted path stored in a [`PathItem`].
     Item { layer: usize, items: Vec<usize> },
     /// The clip path of the [`crate::model::ClipGroup`] at the given position.
     Clip { layer: usize, items: Vec<usize> },
+    /// A whole layer, selected from the tree.
+    Layer { layer: usize },
 }
 
 impl PathAddress {
@@ -148,8 +157,19 @@ impl PathAddress {
     fn push_item(&mut self, index: usize) {
         match self {
             Self::Item { items, .. } | Self::Clip { items, .. } => items.insert(0, index),
+            // Layers are never nested inside another item.
+            Self::Layer { .. } => {}
         }
     }
+}
+
+/// An in-progress inline rename of a tree node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameState {
+    /// The node whose name is being edited.
+    pub address: PathAddress,
+    /// The text typed so far.
+    pub buffer: String,
 }
 
 /// A draggable point of a [`Path`].
@@ -245,13 +265,15 @@ impl PenDraft {
 #[derive(Resource)]
 pub struct EditorState {
     pub document: Document,
-    /// The selected path, either a painted item or a clip mask.
+    /// The selected node, either a painted item, a clip mask, or a layer.
     pub selected: Option<PathAddress>,
     /// The selected control point of [`Self::selected`], if any.
     pub selected_handle: Option<Handle>,
-    /// Incremented whenever the object tree changes shape (an item is removed),
-    /// so the sidebar knows to rebuild its rows.
+    /// Incremented whenever the object tree changes shape (an item is removed
+    /// or moved), so the sidebar knows to rebuild its rows.
     pub structure_revision: u64,
+    /// The tree node whose name is being edited inline, if any.
+    pub renaming: Option<RenameState>,
     drag: Option<Drag>,
     /// The in-progress pen path, if any.
     pen: Option<PenDraft>,
@@ -267,6 +289,7 @@ impl EditorState {
             selected: None,
             selected_handle: None,
             structure_revision: 0,
+            renaming: None,
             drag: None,
             pen: None,
             last_click: None,
@@ -275,14 +298,50 @@ impl EditorState {
 
     /// Selects `address` (or clears the selection when it is `None`).
     ///
-    /// Any in-progress drag and control-point selection are dropped, so the
-    /// selection always starts from a clean state.
+    /// Any in-progress drag, control-point selection, and rename are dropped,
+    /// so the selection always starts from a clean state.
     pub fn select(&mut self, address: Option<PathAddress>) {
         self.selected = address;
         self.selected_handle = None;
+        self.renaming = None;
         self.drag = None;
     }
+
+    /// Starts renaming the node at `address`, seeding the text field with its
+    /// current name.
+    pub fn begin_rename(&mut self, address: PathAddress) {
+        let buffer = name_at(&self.document, &address)
+            .unwrap_or_default()
+            .to_owned();
+        self.selected = Some(address.clone());
+        self.selected_handle = None;
+        self.drag = None;
+        self.renaming = Some(RenameState { address, buffer });
+    }
+
+    /// Swaps in a whole new document, dropping all transient editing state.
+    ///
+    /// Used for new, load, and undo/redo. The structure revision is bumped so
+    /// views that mirror the object tree rebuild even when the selection does
+    /// not change.
+    pub fn replace_document(&mut self, document: Document) {
+        self.document = document;
+        self.selected = None;
+        self.selected_handle = None;
+        self.renaming = None;
+        self.drag = None;
+        self.pen = None;
+        self.last_click = None;
+        self.structure_revision += 1;
+    }
 }
+
+/// System set for canvas pointer handling.
+///
+/// UI systems that own the pointer (such as an open menu) run after this set
+/// so that canvas input still sees the UI state from the start of the frame.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanvasInput;
 
 /// Systems for selection, dragging, fitting, and redrawing.
 pub struct EditorPlugin;
@@ -295,7 +354,7 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     handle_viewport_input,
-                    handle_input,
+                    handle_input.in_set(CanvasInput),
                     refresh_scene,
                     fit_document,
                 )
@@ -305,24 +364,25 @@ impl Plugin for EditorPlugin {
 }
 
 /// Centers the document in the area right of the toolbar, left of the sidebar,
-/// and above the style panel, scaling it to fill 90% of that area.
+/// below the menu bar, and above the style panel, scaling it to fill 90% of
+/// that area.
 pub fn fit_transform(bounds: Bounds, viewport_width: f32, viewport_height: f32) -> Transform {
-    // The toolbar, sidebar, and style panel cover the edges, so fit into what
-    // remains.
+    // The menu bar, toolbar, sidebar, and style panel cover the edges, so fit
+    // into what remains.
     let available_width = (viewport_width - SIDEBAR_WIDTH - TOOLBAR_WIDTH).max(1.0);
-    let available_height = (viewport_height - BOTTOM_BAR_HEIGHT).max(1.0);
+    let available_height = (viewport_height - MENU_BAR_HEIGHT - BOTTOM_BAR_HEIGHT).max(1.0);
     let doc_width = bounds.width().max(f32::EPSILON);
     let doc_height = bounds.height().max(f32::EPSILON);
     let scale = FIT_FRACTION * (available_width / doc_width).min(available_height / doc_height);
 
     // Document Y points down, so shifting the document's centre to the content
     // area's centre means moving the entity *up* by `scale * centre.y`. That
-    // centre sits between the toolbar and the sidebar and half a style panel
-    // above the bottom edge.
+    // centre sits between the toolbar and the sidebar, half a menu bar below
+    // the top edge, and half a style panel above the bottom edge.
     let center = bounds.center();
     Transform::from_xyz(
         -scale * center[0] + (TOOLBAR_WIDTH - SIDEBAR_WIDTH) * 0.5,
-        scale * center[1] + BOTTOM_BAR_HEIGHT * 0.5,
+        scale * center[1] + (BOTTOM_BAR_HEIGHT - MENU_BAR_HEIGHT) * 0.5,
         0.0,
     )
     .with_scale(Vec3::splat(scale))
@@ -469,8 +529,27 @@ fn handle_input(
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
     tool: Res<ToolState>,
+    menu: Option<Res<MenuState>>,
     mut editor: ResMut<EditorState>,
 ) {
+    // An open dropdown owns the pointer: clicks on its rows run menu actions
+    // and clicks elsewhere close it, but none of them may edit the canvas.
+    if menu.is_some_and(|menu| menu.is_open()) {
+        if mouse.just_released(MouseButton::Left) {
+            editor.drag = None;
+        }
+        return;
+    }
+
+    // While a tree row is being renamed, the keyboard belongs to the text
+    // field. A click elsewhere commits the edit and then behaves normally.
+    if editor.renaming.is_some() {
+        if !mouse.just_pressed(MouseButton::Left) {
+            return;
+        }
+        commit_rename(&mut editor);
+    }
+
     match tool.0 {
         Tool::Select => handle_select_input(
             &mouse,
@@ -495,6 +574,7 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 fn over_ui(cursor: Vec2, window: &Window) -> bool {
     cursor.x < TOOLBAR_WIDTH
         || cursor.x >= window.width() - SIDEBAR_WIDTH
+        || cursor.y < MENU_BAR_HEIGHT
         || cursor.y >= window.height() - BOTTOM_BAR_HEIGHT
 }
 
@@ -816,6 +896,18 @@ fn item_in_mut<'a>(items: &'a mut [Item], indices: &[usize]) -> Option<&'a mut I
     items_at_mut(items, parents)?.get_mut(*last)
 }
 
+/// Resolves an address to the item it names.
+///
+/// Clip addresses name the clip group itself, so the returned item is an
+/// [`Item::Clip`] there and an [`Item::Path`] for a painted path.
+pub fn item_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Item> {
+    let (layer, items) = match address {
+        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
+        PathAddress::Layer { .. } => return None,
+    };
+    item_in(&document.layers.get(layer)?.items, items)
+}
+
 /// Resolves an address to the path it names.
 fn path_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Path> {
     match address {
@@ -831,6 +923,7 @@ fn path_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Path
                 Item::Path(_) => None,
             }
         }
+        PathAddress::Layer { .. } => None,
     }
 }
 
@@ -848,6 +941,7 @@ fn path_at_mut<'a>(document: &'a mut Document, address: &PathAddress) -> Option<
                 Item::Path(_) => None,
             }
         }
+        PathAddress::Layer { .. } => None,
     }
 }
 
@@ -866,6 +960,7 @@ pub fn style_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a
                 Item::Path(_) => None,
             }
         }
+        PathAddress::Layer { .. } => None,
     }
 }
 
@@ -887,6 +982,7 @@ pub fn style_at_mut<'a>(
                 Item::Path(_) => None,
             }
         }
+        PathAddress::Layer { .. } => None,
     }
 }
 
@@ -952,6 +1048,302 @@ fn items_vec_at_mut<'a>(
         }
     }
     Some(items)
+}
+
+// ---------------------------------------------------------------------------
+// Tree editing
+// ---------------------------------------------------------------------------
+
+/// An item's position in the document tree: the layer plus the chain of item
+/// indices leading from the layer down to the item itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ItemSlot {
+    layer: usize,
+    chain: Vec<usize>,
+}
+
+impl ItemSlot {
+    /// Indices of the clip groups that contain the item.
+    fn parents(&self) -> &[usize] {
+        &self.chain[..self.chain.len() - 1]
+    }
+
+    /// The item's index inside its container.
+    fn index(&self) -> usize {
+        *self.chain.last().expect("an item slot is never empty")
+    }
+}
+
+/// Resolves an item address to its position, validating every index.
+fn item_slot(document: &Document, address: &PathAddress) -> Option<ItemSlot> {
+    let (layer, items) = match address {
+        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
+        PathAddress::Layer { .. } => return None,
+    };
+    let (last, parents) = items.split_last()?;
+    let container = items_at(&document.layers.get(layer)?.items, parents)?;
+    if *last >= container.len() {
+        return None;
+    }
+    Some(ItemSlot {
+        layer,
+        chain: items.clone(),
+    })
+}
+
+/// Adjusts `slot` so it still names the same item after the item at `removed`
+/// has been taken out of the tree.
+fn shift_slot_after_removal(mut slot: ItemSlot, removed: &ItemSlot) -> ItemSlot {
+    if slot.layer != removed.layer {
+        return slot;
+    }
+    let depth = removed.parents().len();
+    if slot.chain.len() > depth
+        && slot.chain[..depth] == removed.parents()[..]
+        && slot.chain[depth] > removed.index()
+    {
+        slot.chain[depth] -= 1;
+    }
+    slot
+}
+
+/// Whether `outer` names an item that is `inner` itself or one of its
+/// ancestors.
+pub(crate) fn address_is_inside(outer: &PathAddress, inner: &PathAddress) -> bool {
+    let (outer_layer, outer_items) = match outer {
+        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
+        PathAddress::Layer { .. } => return false,
+    };
+    let (inner_layer, inner_items) = match inner {
+        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
+        PathAddress::Layer { .. } => return false,
+    };
+    outer_layer == inner_layer
+        && inner_items.len() >= outer_items.len()
+        && inner_items[..outer_items.len()] == outer_items[..]
+}
+
+/// Removes the item named by `address` from its container.
+fn take_item(document: &mut Document, address: &PathAddress) -> Option<Item> {
+    let slot = item_slot(document, address)?;
+    let items = items_vec_at_mut(document, slot.layer, slot.parents())?;
+    if slot.index() >= items.len() {
+        return None;
+    }
+    Some(items.remove(slot.index()))
+}
+
+/// Inserts `item` into the container at `parents` and returns its address.
+fn insert_item(
+    document: &mut Document,
+    layer: usize,
+    parents: &[usize],
+    index: usize,
+    item: Item,
+) -> Option<PathAddress> {
+    let is_clip = matches!(item, Item::Clip(_));
+    let items = items_vec_at_mut(document, layer, parents)?;
+    let index = index.min(items.len());
+    items.insert(index, item);
+
+    let mut chain = parents.to_vec();
+    chain.push(index);
+    Some(if is_clip {
+        PathAddress::Clip {
+            layer,
+            items: chain,
+        }
+    } else {
+        PathAddress::Item {
+            layer,
+            items: chain,
+        }
+    })
+}
+
+/// Moves `source` next to `target` inside the target's container.
+///
+/// Returns the item's new address, or `None` when either address is invalid or
+/// the move would put an item inside itself.
+pub fn move_item_near(
+    document: &mut Document,
+    source: &PathAddress,
+    target: &PathAddress,
+    after: bool,
+) -> Option<PathAddress> {
+    if address_is_inside(source, target) {
+        return None;
+    }
+    let source_slot = item_slot(document, source)?;
+    let target_slot = item_slot(document, target)?;
+
+    let item = take_item(document, source)?;
+    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
+    let index = target_slot.index() + usize::from(after);
+    insert_item(
+        document,
+        target_slot.layer,
+        target_slot.parents(),
+        index,
+        item,
+    )
+}
+
+/// Appends `source` to the items of `layer`, creating a layer when the index
+/// names one that is missing.
+pub fn move_item_to_layer(
+    document: &mut Document,
+    source: &PathAddress,
+    layer: usize,
+) -> Option<PathAddress> {
+    if layer >= document.layers.len() {
+        return None;
+    }
+    let item = take_item(document, source)?;
+    let index = document.layers[layer].items.len();
+    insert_item(document, layer, &[], index, item)
+}
+
+/// Parents `source` to `target`.
+///
+/// When `target` is already a clip group the item becomes one of its targets.
+/// When `target` is a painted path, that path becomes the clip of a new group
+/// and `source` becomes its only target.
+pub fn move_item_into(
+    document: &mut Document,
+    source: &PathAddress,
+    target: &PathAddress,
+) -> Option<PathAddress> {
+    if address_is_inside(source, target) {
+        return None;
+    }
+    let source_slot = item_slot(document, source)?;
+    let target_slot = item_slot(document, target)?;
+
+    let item = take_item(document, source)?;
+    let is_clip = matches!(item, Item::Clip(_));
+    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
+    let layer = target_slot.layer;
+    let parents = target_slot.parents().to_vec();
+    let index = target_slot.index();
+
+    let items = items_vec_at_mut(document, layer, &parents)?;
+    let target_item = items.get_mut(index)?;
+    match target_item {
+        Item::Clip(group) => {
+            group.targets.push(item);
+            let mut chain = parents;
+            chain.push(index);
+            chain.push(group.targets.len() - 1);
+            Some(if is_clip {
+                PathAddress::Clip {
+                    layer,
+                    items: chain,
+                }
+            } else {
+                PathAddress::Item {
+                    layer,
+                    items: chain,
+                }
+            })
+        }
+        Item::Path(path_item) => {
+            // The painted path becomes the clip mask of a new group.
+            let path_item = std::mem::replace(
+                path_item,
+                PathItem {
+                    path: Path::new([0.0, 0.0]),
+                    style: Style::default(),
+                },
+            );
+            *target_item = Item::Clip(ClipGroup {
+                clip: path_item.path,
+                style: path_item.style,
+                targets: vec![item],
+            });
+
+            let mut chain = parents;
+            chain.push(index);
+            Some(PathAddress::Clip {
+                layer,
+                items: chain,
+            })
+        }
+    }
+}
+
+/// Reorders layers so that `source` sits before or after `target` in the
+/// sidebar's top-to-bottom order.
+///
+/// Z values are renormalized from the resulting visual order, which keeps the
+/// order stable and makes subsequent drags simple.
+pub fn move_layer(document: &mut Document, source: usize, target: usize, after: bool) -> bool {
+    let count = document.layers.len();
+    if source >= count || target >= count || source == target {
+        return false;
+    }
+
+    // Topmost layer first, matching the sidebar.
+    let mut order: Vec<usize> = document
+        .layer_indices_in_paint_order()
+        .into_iter()
+        .rev()
+        .collect();
+    order.retain(|&index| index != source);
+    let Some(target_position) = order.iter().position(|&index| index == target) else {
+        return false;
+    };
+    order.insert(target_position + usize::from(after), source);
+
+    let top = order.len() - 1;
+    for (rank, &index) in order.iter().enumerate() {
+        document.layers[index].z = (top - rank) as f32;
+    }
+    true
+}
+
+/// The editable name of the node at `address`.
+pub fn name_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a str> {
+    match address {
+        PathAddress::Layer { layer } => Some(document.layers.get(*layer)?.name.as_str()),
+        _ => path_at(document, address).map(|path| path.name.as_str()),
+    }
+}
+
+/// Renames the node at `address`. Returns `false` when it does not exist.
+pub fn rename_at(document: &mut Document, address: &PathAddress, name: String) -> bool {
+    if let PathAddress::Layer { layer } = address {
+        return match document.layers.get_mut(*layer) {
+            Some(layer) => {
+                layer.name = name;
+                true
+            }
+            None => false,
+        };
+    }
+    match path_at_mut(document, address) {
+        Some(path) => {
+            path.name = name;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Commits the in-progress rename, if any.
+pub fn commit_rename(editor: &mut EditorState) {
+    let Some(renaming) = editor.renaming.take() else {
+        return;
+    };
+    let name = renaming.buffer.trim().to_owned();
+    if rename_at(&mut editor.document, &renaming.address, name) {
+        editor.structure_revision += 1;
+    }
+}
+
+/// Abandons the in-progress rename, if any.
+pub fn cancel_rename(editor: &mut EditorState) {
+    editor.renaming = None;
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,6 +1890,19 @@ fn translate_path(path: &mut Path, delta: [f32; 2]) {
     }
 }
 
+/// Moves every point of `item` by `delta`, including nested clip targets.
+pub(crate) fn translate_item(item: &mut Item, delta: [f32; 2]) {
+    match item {
+        Item::Path(path_item) => translate_path(&mut path_item.path, delta),
+        Item::Clip(group) => {
+            translate_path(&mut group.clip, delta);
+            for target in &mut group.targets {
+                translate_item(target, delta);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pen tool
 // ---------------------------------------------------------------------------
@@ -1660,6 +2065,13 @@ fn delete_handle(path: &mut Path, handle: Handle) -> bool {
 fn remove_object(document: &mut Document, address: &PathAddress) -> bool {
     let (layer, indices) = match address {
         PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
+        PathAddress::Layer { layer } => {
+            if *layer >= document.layers.len() {
+                return false;
+            }
+            document.layers.remove(*layer);
+            return true;
+        }
     };
     let Some((last, parents)) = indices.split_last() else {
         return false;
@@ -2013,9 +2425,10 @@ mod tests {
         let view = ViewMapping::new(bounds, 900.0, 900.0, &Viewport::default());
 
         // The content is centered in the window area between the toolbar and
-        // the sidebar, above the style panel.
+        // the sidebar, below the menu bar, and above the style panel.
         let content_center_x = TOOLBAR_WIDTH + (900.0 - SIDEBAR_WIDTH - TOOLBAR_WIDTH) * 0.5;
-        let content_center_y = (900.0 - BOTTOM_BAR_HEIGHT) * 0.5;
+        let content_center_y =
+            MENU_BAR_HEIGHT + (900.0 - MENU_BAR_HEIGHT - BOTTOM_BAR_HEIGHT) * 0.5;
         let center = view.screen_to_document(Vec2::new(content_center_x, content_center_y));
         assert!((center[0] - 200.0).abs() < 1e-4);
         assert!((center[1] - 100.0).abs() < 1e-4);
@@ -2652,5 +3065,325 @@ mod tests {
             items: vec![9],
         };
         assert!(!set_path_closed(&mut document, &missing, true));
+    }
+
+    fn path_at_point(point: [f32; 2]) -> PathItem {
+        PathItem {
+            path: Path::new(point).line_to([point[0] + 10.0, point[1]]),
+            style: filled(Rgba8::rgb(0, 0, 0)),
+        }
+    }
+
+    fn document_with_items(items: Vec<Item>) -> Document {
+        Document {
+            version: 1,
+            layers: vec![Layer {
+                name: String::new(),
+                z: 0.0,
+                items,
+            }],
+        }
+    }
+
+    #[test]
+    fn items_reorder_within_a_layer() {
+        let mut document = document_with_items(vec![
+            Item::Path(path_at_point([10.0, 0.0])),
+            Item::Path(path_at_point([30.0, 0.0])),
+        ]);
+        let first = PathAddress::Item {
+            layer: 0,
+            items: vec![0],
+        };
+        let second = PathAddress::Item {
+            layer: 0,
+            items: vec![1],
+        };
+
+        let moved = move_item_near(&mut document, &second, &first, false).unwrap();
+        assert_eq!(
+            moved,
+            PathAddress::Item {
+                layer: 0,
+                items: vec![0]
+            }
+        );
+        let Item::Path(path) = &document.layers[0].items[0] else {
+            panic!("expected a path");
+        };
+        assert_eq!(path.path.start(), Some([30.0, 0.0]));
+
+        // Dropping the front item after the back one swaps them again.
+        let moved = move_item_near(&mut document, &first, &second, true).unwrap();
+        assert_eq!(
+            moved,
+            PathAddress::Item {
+                layer: 0,
+                items: vec![1]
+            }
+        );
+        let Item::Path(path) = &document.layers[0].items[0] else {
+            panic!("expected a path");
+        };
+        assert_eq!(path.path.start(), Some([10.0, 0.0]));
+        let Item::Path(path) = &document.layers[0].items[1] else {
+            panic!("expected a path");
+        };
+        assert_eq!(path.path.start(), Some([30.0, 0.0]));
+    }
+
+    #[test]
+    fn items_move_between_layers() {
+        let mut document = Document {
+            version: 1,
+            layers: vec![
+                Layer {
+                    name: String::new(),
+                    z: 0.0,
+                    items: vec![Item::Path(path_at_point([0.0, 0.0]))],
+                },
+                Layer {
+                    name: String::new(),
+                    z: 10.0,
+                    items: Vec::new(),
+                },
+            ],
+        };
+        let source = PathAddress::Item {
+            layer: 0,
+            items: vec![0],
+        };
+
+        let moved = move_item_to_layer(&mut document, &source, 1).unwrap();
+        assert_eq!(
+            moved,
+            PathAddress::Item {
+                layer: 1,
+                items: vec![0]
+            }
+        );
+        assert!(document.layers[0].items.is_empty());
+        assert_eq!(document.layers[1].items.len(), 1);
+
+        // A missing layer is rejected without disturbing the item.
+        assert!(move_item_to_layer(&mut document, &moved, 9).is_none());
+        assert_eq!(document.layers[1].items.len(), 1);
+    }
+
+    #[test]
+    fn dropping_a_path_onto_another_creates_a_clip_group() {
+        let mut document = document_with_items(vec![
+            Item::Path(path_at_point([0.0, 0.0])),
+            Item::Path(path_at_point([50.0, 50.0])),
+        ]);
+        let clip_target = PathAddress::Item {
+            layer: 0,
+            items: vec![0],
+        };
+        let source = PathAddress::Item {
+            layer: 0,
+            items: vec![1],
+        };
+
+        let moved = move_item_into(&mut document, &source, &clip_target).unwrap();
+        assert_eq!(
+            moved,
+            PathAddress::Clip {
+                layer: 0,
+                items: vec![0]
+            }
+        );
+
+        assert_eq!(document.layers[0].items.len(), 1);
+        let Item::Clip(group) = &document.layers[0].items[0] else {
+            panic!("expected a clip group");
+        };
+        assert_eq!(group.clip.start(), Some([0.0, 0.0]));
+        assert_eq!(group.targets.len(), 1);
+        let Item::Path(inner) = &group.targets[0] else {
+            panic!("expected a nested path");
+        };
+        assert_eq!(inner.path.start(), Some([50.0, 50.0]));
+    }
+
+    #[test]
+    fn dropping_into_a_clip_group_appends_a_target() {
+        let mut document = document_with_items(vec![
+            Item::Clip(ClipGroup {
+                clip: rect(0.0, 0.0, 100.0, 100.0),
+                style: Style::default(),
+                targets: vec![Item::Path(path_at_point([5.0, 5.0]))],
+            }),
+            Item::Path(path_at_point([50.0, 50.0])),
+        ]);
+        let clip = PathAddress::Clip {
+            layer: 0,
+            items: vec![0],
+        };
+        let source = PathAddress::Item {
+            layer: 0,
+            items: vec![1],
+        };
+
+        let moved = move_item_into(&mut document, &source, &clip).unwrap();
+        assert_eq!(
+            moved,
+            PathAddress::Item {
+                layer: 0,
+                items: vec![0, 1]
+            }
+        );
+
+        assert_eq!(document.layers[0].items.len(), 1);
+        let Item::Clip(group) = &document.layers[0].items[0] else {
+            panic!("expected a clip group");
+        };
+        assert_eq!(group.targets.len(), 2);
+    }
+
+    #[test]
+    fn an_item_cannot_be_moved_into_its_own_contents() {
+        let mut document = document_with_items(vec![Item::Clip(ClipGroup {
+            clip: rect(0.0, 0.0, 100.0, 100.0),
+            style: Style::default(),
+            targets: vec![Item::Path(path_at_point([5.0, 5.0]))],
+        })]);
+        let clip = PathAddress::Clip {
+            layer: 0,
+            items: vec![0],
+        };
+        let child = PathAddress::Item {
+            layer: 0,
+            items: vec![0, 0],
+        };
+
+        assert_eq!(move_item_into(&mut document, &clip, &child), None);
+        assert_eq!(move_item_near(&mut document, &clip, &clip, false), None);
+        assert_eq!(move_item_near(&mut document, &clip, &child, true), None);
+
+        assert_eq!(document.layers[0].items.len(), 1);
+        let Item::Clip(group) = &document.layers[0].items[0] else {
+            panic!("expected a clip group");
+        };
+        assert_eq!(group.targets.len(), 1);
+    }
+
+    #[test]
+    fn a_nested_target_can_be_moved_out_of_its_clip() {
+        let mut document = document_with_items(vec![Item::Clip(ClipGroup {
+            clip: rect(0.0, 0.0, 100.0, 100.0),
+            style: Style::default(),
+            targets: vec![Item::Path(path_at_point([5.0, 5.0]))],
+        })]);
+        let clip = PathAddress::Clip {
+            layer: 0,
+            items: vec![0],
+        };
+        let child = PathAddress::Item {
+            layer: 0,
+            items: vec![0, 0],
+        };
+
+        let moved = move_item_near(&mut document, &child, &clip, false).unwrap();
+        assert_eq!(
+            moved,
+            PathAddress::Item {
+                layer: 0,
+                items: vec![0]
+            }
+        );
+
+        assert_eq!(document.layers[0].items.len(), 2);
+        let Item::Path(path) = &document.layers[0].items[0] else {
+            panic!("expected a path");
+        };
+        assert_eq!(path.path.start(), Some([5.0, 5.0]));
+        let Item::Clip(group) = &document.layers[0].items[1] else {
+            panic!("expected a clip group");
+        };
+        assert!(group.targets.is_empty());
+    }
+
+    #[test]
+    fn layers_reorder_by_z() {
+        let mut document = Document::new();
+        for z in 0..3 {
+            document.layers.push(Layer {
+                name: format!("L{z}"),
+                z: z as f32,
+                items: Vec::new(),
+            });
+        }
+
+        let visual = |document: &Document| -> Vec<usize> {
+            document
+                .layer_indices_in_paint_order()
+                .into_iter()
+                .rev()
+                .collect()
+        };
+        assert_eq!(visual(&document), vec![2, 1, 0]);
+
+        // The bottom layer is dragged above the top one.
+        assert!(move_layer(&mut document, 0, 2, false));
+        assert_eq!(visual(&document), vec![0, 2, 1]);
+
+        // Then below the middle one.
+        assert!(move_layer(&mut document, 0, 1, true));
+        assert_eq!(visual(&document), vec![2, 1, 0]);
+
+        assert!(!move_layer(&mut document, 1, 1, true));
+        assert!(!move_layer(&mut document, 0, 9, true));
+    }
+
+    #[test]
+    fn tree_names_can_be_read_and_changed() {
+        let mut document = document_with_items(vec![
+            Item::Path(path_at_point([0.0, 0.0])),
+            Item::Clip(ClipGroup {
+                clip: rect(0.0, 0.0, 10.0, 10.0),
+                style: Style::default(),
+                targets: Vec::new(),
+            }),
+        ]);
+        let path = PathAddress::Item {
+            layer: 0,
+            items: vec![0],
+        };
+        let clip = PathAddress::Clip {
+            layer: 0,
+            items: vec![1],
+        };
+        let layer = PathAddress::Layer { layer: 0 };
+
+        assert_eq!(name_at(&document, &path), Some(""));
+        assert!(rename_at(&mut document, &path, "Curve".into()));
+        assert_eq!(name_at(&document, &path), Some("Curve"));
+        assert!(rename_at(&mut document, &clip, "Mask".into()));
+        assert_eq!(name_at(&document, &clip), Some("Mask"));
+        assert!(rename_at(&mut document, &layer, "Base".into()));
+        assert_eq!(name_at(&document, &layer), Some("Base"));
+
+        let missing = PathAddress::Item {
+            layer: 0,
+            items: vec![9],
+        };
+        assert!(!rename_at(&mut document, &missing, "Nope".into()));
+
+        // Committing from the editor trims the buffer and bumps the revision.
+        let mut editor = EditorState::new(document);
+        editor.begin_rename(path.clone());
+        assert_eq!(
+            editor
+                .renaming
+                .as_ref()
+                .map(|rename| rename.buffer.as_str()),
+            Some("Curve")
+        );
+        editor.renaming.as_mut().unwrap().buffer = "  Renamed  ".into();
+        commit_rename(&mut editor);
+        assert!(editor.renaming.is_none());
+        assert_eq!(name_at(&editor.document, &path), Some("Renamed"));
+        assert_eq!(editor.structure_revision, 1);
     }
 }
