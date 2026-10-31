@@ -11,16 +11,18 @@ use bevy_vello::prelude::{VelloScene2d, vello};
 use vello::Scene;
 use vello::kurbo::{
     Affine, Circle, CubicBez, Line as KurboLine, ParamCurveNearest, PathSeg, Point as KurboPoint,
-    Shape, Stroke as KurboStroke,
+    Shape as KurboShape, Stroke as KurboStroke,
 };
 use vello::peniko::{Color, Fill};
 
 use crate::menu_bar::MenuState;
 use crate::model::{
-    Bounds, ClipGroup, DEFAULT_STROKE_WIDTH, Document, Item, Layer, Path, PathEnds, PathItem,
-    Rgba8, Segment, StrokeStyle, Style,
+    Bounds, DEFAULT_STROKE_WIDTH, Document, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle,
+    Style,
 };
-use crate::render::{build_scene, path_to_bez_path, to_kurbo_point};
+use crate::render::{
+    build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
+};
 
 /// Width of the layer sidebar on the right, in screen pixels.
 ///
@@ -137,37 +139,44 @@ const OVERLAY_HANDLE_OUTLINE: Color = Color::from_rgba8(0x0b, 0x2a, 0x40, 0xff);
 
 /// A node selected for editing, addressed by tree position.
 ///
-/// `items` is a chain of item indices: `[i]` addresses `layer.items[i]`, while
-/// `[i, j]` addresses `layer.items[i]` (a clip group)'s `targets[j]`, and so
-/// on. [`PathAddress::Clip`] uses the same chain but selects the clip path of
-/// the clip group at that position instead of one of its targets.
-/// [`PathAddress::Layer`] names a whole layer.
+/// `shapes` is a chain of shape indices: `[i]` addresses
+/// `document.shapes[i]`, `[i, j]` addresses its `children[j]`, and so on. A
+/// [`TreeAddress::Shape`] selects a whole shape together with all of its
+/// paths and nested children; a [`TreeAddress::Path`] selects one contour
+/// among that shape's direct paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PathAddress {
-    /// A painted path stored in a [`PathItem`].
-    Item { layer: usize, items: Vec<usize> },
-    /// The clip path of the [`crate::model::ClipGroup`] at the given position.
-    Clip { layer: usize, items: Vec<usize> },
-    /// A whole layer, selected from the tree.
-    Layer { layer: usize },
+pub enum TreeAddress {
+    /// A whole shape, including its paths and children.
+    Shape { shapes: Vec<usize> },
+    /// One of the paths directly owned by the shape named by `shapes`.
+    Path { shapes: Vec<usize>, path: usize },
 }
 
-impl PathAddress {
-    /// Descends one level: `index` becomes the first step of the chain.
-    fn push_item(&mut self, index: usize) {
+impl TreeAddress {
+    /// The chain of shape indices leading to the addressed node.
+    fn shape_chain(&self) -> &[usize] {
         match self {
-            Self::Item { items, .. } | Self::Clip { items, .. } => items.insert(0, index),
-            // Layers are never nested inside another item.
-            Self::Layer { .. } => {}
+            Self::Shape { shapes } | Self::Path { shapes, .. } => shapes,
         }
     }
+}
+
+/// The control point of the selected node that is currently highlighted.
+///
+/// When the selection is a whole shape, this also names which of its direct
+/// paths the point belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectedNode {
+    /// Index into the selected shape's [`crate::model::Shape::paths`].
+    pub path: usize,
+    pub handle: Handle,
 }
 
 /// An in-progress inline rename of a tree node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenameState {
     /// The node whose name is being edited.
-    pub address: PathAddress,
+    pub address: TreeAddress,
     /// The text typed so far.
     pub buffer: String,
 }
@@ -189,7 +198,7 @@ pub enum Handle {
 enum Drag {
     /// Dragging one control point of a path.
     Handle {
-        address: PathAddress,
+        address: TreeAddress,
         handle: Handle,
         /// Shift was held: keep the neighbouring handle symmetric around the
         /// shared anchor.
@@ -198,14 +207,14 @@ enum Drag {
     /// Shift-dragging an anchor instantiate a missing control point there.
     /// `target` is chosen from the drag direction on the first movement.
     Bend {
-        address: PathAddress,
+        address: TreeAddress,
         handle: Handle,
         target: Option<BendTarget>,
     },
-    /// Dragging a whole path by its body. The last document-space point is
+    /// Dragging a whole shape by its body. The last document-space point is
     /// remembered so each frame only applies the incremental movement.
     Object {
-        address: PathAddress,
+        address: TreeAddress,
         last: [f32; 2],
     },
 }
@@ -228,10 +237,10 @@ enum CtrlSlot {
 }
 
 /// A path being drawn with the pen tool.
+///
+/// Finishing the draft wraps the path in a brand-new top-level shape.
 #[derive(Clone, Debug)]
 struct PenDraft {
-    /// Layer the finished path will be appended to.
-    layer: usize,
     path: Path,
     /// Outgoing control of the most recent anchor, carried into the next
     /// segment so smooth drags continue smoothly.
@@ -265,10 +274,10 @@ impl PenDraft {
 #[derive(Resource)]
 pub struct EditorState {
     pub document: Document,
-    /// The selected node, either a painted item, a clip mask, or a layer.
-    pub selected: Option<PathAddress>,
+    /// The selected node, either a whole shape or one of its paths.
+    pub selected: Option<TreeAddress>,
     /// The selected control point of [`Self::selected`], if any.
-    pub selected_handle: Option<Handle>,
+    pub selected_handle: Option<SelectedNode>,
     /// Incremented whenever the object tree changes shape (an item is removed
     /// or moved), so the sidebar knows to rebuild its rows.
     pub structure_revision: u64,
@@ -300,7 +309,7 @@ impl EditorState {
     ///
     /// Any in-progress drag, control-point selection, and rename are dropped,
     /// so the selection always starts from a clean state.
-    pub fn select(&mut self, address: Option<PathAddress>) {
+    pub fn select(&mut self, address: Option<TreeAddress>) {
         self.selected = address;
         self.selected_handle = None;
         self.renaming = None;
@@ -309,7 +318,7 @@ impl EditorState {
 
     /// Starts renaming the node at `address`, seeding the text field with its
     /// current name.
-    pub fn begin_rename(&mut self, address: PathAddress) {
+    pub fn begin_rename(&mut self, address: TreeAddress) {
         let buffer = name_at(&self.document, &address)
             .unwrap_or_default()
             .to_owned();
@@ -528,7 +537,7 @@ fn handle_input(
     windows: Query<&Window, With<PrimaryWindow>>,
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
-    tool: Res<ToolState>,
+    mut tool: ResMut<ToolState>,
     menu: Option<Res<MenuState>>,
     mut editor: ResMut<EditorState>,
 ) {
@@ -548,6 +557,15 @@ fn handle_input(
             return;
         }
         commit_rename(&mut editor);
+    }
+
+    // Escape leaves the pen tool, abandoning a half-drawn path rather than
+    // finishing it.
+    if tool.0 == Tool::Pen && keys.just_pressed(KeyCode::Escape) {
+        editor.pen = None;
+        editor.drag = None;
+        tool.0 = Tool::Select;
+        return;
     }
 
     match tool.0 {
@@ -640,34 +658,39 @@ fn handle_select_input(
         let shift = shift_held(keys);
         let mut started_drag = false;
         if let Some(address) = editor.selected.clone()
-            && let Some(path) = path_at(&editor.document, &address)
-            && let Some(handle) =
-                find_handle(path, point, view.document_per_pixel() * HANDLE_HIT_RADIUS)
+            && let Some((node, node_address, path)) = node_under(
+                &editor.document,
+                &address,
+                point,
+                view.document_per_pixel() * HANDLE_HIT_RADIUS,
+            )
         {
+            let handle = node.handle;
             let endpoint = matches!(handle, Handle::Start | Handle::Anchor(_));
             let bending = shift && endpoint && !bend_candidates(path, handle).is_empty();
             editor.drag = Some(if bending {
                 Drag::Bend {
-                    address,
+                    address: node_address,
                     handle,
                     target: None,
                 }
             } else {
                 Drag::Handle {
-                    address,
+                    address: node_address,
                     handle,
                     symmetric: shift,
                 }
             });
-            editor.selected_handle = Some(handle);
+            editor.selected_handle = Some(node);
             started_drag = true;
         }
 
         if !started_drag {
-            // Pressing a path selects it and starts moving it as a whole;
+            // Pressing a shape selects it and starts moving the whole thing;
             // pressing empty space clears the selection.
-            let picked = pick_path(
+            let picked = pick_shape(
                 &editor.document,
+                editor.selected.as_ref(),
                 point,
                 view.document_per_pixel() * PATH_HIT_SLACK,
             );
@@ -731,9 +754,9 @@ fn handle_select_input(
                 Drag::Object { address, last } => {
                     let delta = offset(last, point);
                     if delta != [0.0, 0.0]
-                        && let Some(path) = path_at_mut(&mut editor.document, &address)
+                        && let Some(shape) = shape_at_mut(&mut editor.document, &address)
                     {
-                        translate_path(path, delta);
+                        translate_shape(shape, delta);
                     }
                     editor.drag = Some(Drag::Object {
                         address,
@@ -756,14 +779,12 @@ fn handle_pen_input(
     viewport: &Viewport,
     editor: &mut EditorState,
 ) {
-    if keys.just_pressed(KeyCode::Escape) {
-        if editor.pen.is_some() {
-            // Escape abandons the path being drawn.
-            editor.pen = None;
-        } else {
-            editor.selected = None;
-            editor.selected_handle = None;
-        }
+    // Escape is handled by the caller, which also switches to the select tool.
+
+    if keys.just_pressed(KeyCode::Delete) {
+        // Drawing does not disable editing: Delete still removes the selected
+        // point or object (for example, the shape the pen just finished).
+        delete_selection(editor);
         return;
     }
 
@@ -794,9 +815,7 @@ fn handle_pen_input(
 
     if mouse.just_pressed(MouseButton::Left) {
         if editor.pen.is_none() {
-            let layer = ensure_drawing_layer(&mut editor.document);
             editor.pen = Some(PenDraft {
-                layer,
                 path: Path::new(point),
                 pending_out: None,
                 dragging: false,
@@ -850,10 +869,16 @@ fn refresh_scene(
     let scale = view.map(|view| view.scale).unwrap_or(1.0);
 
     let mut scene = build_scene(&editor.document);
-    if let Some(address) = &editor.selected
-        && let Some(path) = path_at(&editor.document, address)
-    {
-        draw_control_overlay(&mut scene, path, scale, editor.selected_handle);
+    if let Some(address) = &editor.selected {
+        // A whole-shape selection shows the points of every path it owns. Only
+        // the path holding the selected point highlights it.
+        for (index, path) in selection_paths(&editor.document, address) {
+            let selected_handle = editor
+                .selected_handle
+                .filter(|node| node.path == index)
+                .map(|node| node.handle);
+            draw_control_overlay(&mut scene, path, scale, selected_handle);
+        }
     }
 
     if let Some(draft) = &editor.pen {
@@ -885,218 +910,196 @@ fn refresh_scene(
 // Tree addressing
 // ---------------------------------------------------------------------------
 
-/// Resolves an item address to the item it names.
-fn item_in<'a>(items: &'a [Item], indices: &[usize]) -> Option<&'a Item> {
-    let (last, parents) = indices.split_last()?;
-    items_at(items, parents)?.get(*last)
+/// Resolves a chain of child indices to the nested list of shapes it names.
+fn shapes_at<'a>(mut shapes: &'a [Shape], indices: &[usize]) -> Option<&'a [Shape]> {
+    for &index in indices {
+        shapes = &shapes.get(index)?.children;
+    }
+    Some(shapes)
 }
 
-fn item_in_mut<'a>(items: &'a mut [Item], indices: &[usize]) -> Option<&'a mut Item> {
-    let (last, parents) = indices.split_last()?;
-    items_at_mut(items, parents)?.get_mut(*last)
+fn shapes_at_mut<'a>(mut shapes: &'a mut [Shape], indices: &[usize]) -> Option<&'a mut [Shape]> {
+    for &index in indices {
+        shapes = &mut shapes.get_mut(index)?.children;
+    }
+    Some(shapes)
 }
 
-/// Resolves an address to the item it names.
+/// Resolves a chain of child indices to the mutable list that contains the last
+/// index, so the addressed child can be removed or inserted.
+fn shapes_vec_at_mut<'a>(
+    document: &'a mut Document,
+    indices: &[usize],
+) -> Option<&'a mut Vec<Shape>> {
+    let mut shapes = &mut document.shapes;
+    for &index in indices {
+        shapes = &mut shapes.get_mut(index)?.children;
+    }
+    Some(shapes)
+}
+
+/// Resolves a chain of shape indices to the shape it names.
+fn shape_at_chain<'a>(document: &'a Document, chain: &[usize]) -> Option<&'a Shape> {
+    let (last, parents) = chain.split_last()?;
+    shapes_at(&document.shapes, parents)?.get(*last)
+}
+
+fn shape_at_chain_mut<'a>(document: &'a mut Document, chain: &[usize]) -> Option<&'a mut Shape> {
+    let (last, parents) = chain.split_last()?;
+    shapes_at_mut(&mut document.shapes, parents)?.get_mut(*last)
+}
+
+/// Resolves an address to the shape that owns it.
 ///
-/// Clip addresses name the clip group itself, so the returned item is an
-/// [`Item::Clip`] there and an [`Item::Path`] for a painted path.
-pub fn item_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Item> {
-    let (layer, items) = match address {
-        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
-        PathAddress::Layer { .. } => return None,
+/// Paths are owned by their enclosing shape, so both variants resolve to a
+/// [`Shape`].
+pub fn shape_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a Shape> {
+    shape_at_chain(document, address.shape_chain())
+}
+
+pub fn shape_at_mut<'a>(
+    document: &'a mut Document,
+    address: &TreeAddress,
+) -> Option<&'a mut Shape> {
+    shape_at_chain_mut(document, address.shape_chain())
+}
+
+/// Resolves a path address to the path it names.
+fn path_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a Path> {
+    let TreeAddress::Path { shapes, path } = address else {
+        return None;
     };
-    item_in(&document.layers.get(layer)?.items, items)
+    shape_at_chain(document, shapes)?.paths.get(*path)
 }
 
-/// Resolves an address to the path it names.
-fn path_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Path> {
+fn path_at_mut<'a>(document: &'a mut Document, address: &TreeAddress) -> Option<&'a mut Path> {
+    let TreeAddress::Path { shapes, path } = address else {
+        return None;
+    };
+    shape_at_chain_mut(document, shapes)?.paths.get_mut(*path)
+}
+
+/// The paths the addressed node exposes for editing.
+///
+/// A whole shape exposes all of its direct paths; a path address exposes just
+/// that one.
+fn selection_paths<'a>(document: &'a Document, address: &TreeAddress) -> Vec<(usize, &'a Path)> {
     match address {
-        PathAddress::Item { layer, items } => {
-            match item_in(&document.layers.get(*layer)?.items, items)? {
-                Item::Path(path_item) => Some(&path_item.path),
-                Item::Clip(_) => None,
-            }
-        }
-        PathAddress::Clip { layer, items } => {
-            match item_in(&document.layers.get(*layer)?.items, items)? {
-                Item::Clip(group) => Some(&group.clip),
-                Item::Path(_) => None,
-            }
-        }
-        PathAddress::Layer { .. } => None,
+        TreeAddress::Shape { shapes } => shape_at_chain(document, shapes)
+            .map(|shape| shape.paths.iter().enumerate().collect())
+            .unwrap_or_default(),
+        TreeAddress::Path {
+            shapes,
+            path: index,
+        } => shape_at_chain(document, shapes)
+            .and_then(|shape| shape.paths.get(*index))
+            .map(|owned| vec![(*index, owned)])
+            .unwrap_or_default(),
     }
 }
 
-fn path_at_mut<'a>(document: &'a mut Document, address: &PathAddress) -> Option<&'a mut Path> {
-    match address {
-        PathAddress::Item { layer, items } => {
-            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
-                Item::Path(path_item) => Some(&mut path_item.path),
-                Item::Clip(_) => None,
-            }
-        }
-        PathAddress::Clip { layer, items } => {
-            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
-                Item::Clip(group) => Some(&mut group.clip),
-                Item::Path(_) => None,
-            }
-        }
-        PathAddress::Layer { .. } => None,
-    }
+/// Resolves an address to the style applied to the shape it names.
+///
+/// Paths paint with their owner's style, so a path address resolves to the
+/// style of its enclosing shape.
+pub fn style_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a Style> {
+    Some(&shape_at(document, address)?.style)
 }
 
-/// Resolves an address to the style applied to the path it names.
-pub fn style_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Style> {
-    match address {
-        PathAddress::Item { layer, items } => {
-            match item_in(&document.layers.get(*layer)?.items, items)? {
-                Item::Path(path_item) => Some(&path_item.style),
-                Item::Clip(_) => None,
-            }
-        }
-        PathAddress::Clip { layer, items } => {
-            match item_in(&document.layers.get(*layer)?.items, items)? {
-                Item::Clip(group) => Some(&group.style),
-                Item::Path(_) => None,
-            }
-        }
-        PathAddress::Layer { .. } => None,
-    }
-}
-
-/// Resolves an address to the mutable style applied to the path it names.
+/// Resolves an address to the mutable style applied to the shape it names.
 pub fn style_at_mut<'a>(
     document: &'a mut Document,
-    address: &PathAddress,
+    address: &TreeAddress,
 ) -> Option<&'a mut Style> {
-    match address {
-        PathAddress::Item { layer, items } => {
-            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
-                Item::Path(path_item) => Some(&mut path_item.style),
-                Item::Clip(_) => None,
-            }
-        }
-        PathAddress::Clip { layer, items } => {
-            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
-                Item::Clip(group) => Some(&mut group.style),
-                Item::Path(_) => None,
-            }
-        }
-        PathAddress::Layer { .. } => None,
-    }
+    Some(&mut shape_at_mut(document, address)?.style)
 }
 
-/// Whether the path named by `address` is closed. `None` when the address does
-/// not resolve to a path.
-pub fn path_closed_at(document: &Document, address: &PathAddress) -> Option<bool> {
-    path_at(document, address).map(Path::is_closed)
+/// Whether the addressed path is closed.
+///
+/// A whole shape reports whether all of its paths are closed, and `None` when
+/// it has no paths.
+pub fn path_closed_at(document: &Document, address: &TreeAddress) -> Option<bool> {
+    match address {
+        TreeAddress::Path { .. } => path_at(document, address).map(Path::is_closed),
+        TreeAddress::Shape { shapes } => {
+            let shape = shape_at_chain(document, shapes)?;
+            (!shape.paths.is_empty()).then(|| shape.paths.iter().all(Path::is_closed))
+        }
+    }
 }
 
 /// Closes or opens the path named by `address`.
 ///
-/// Closing adds a straight segment back to the start; opening removes the
-/// closing segment. Returns whether the path was actually changed.
-pub fn set_path_closed(document: &mut Document, address: &PathAddress, closed: bool) -> bool {
-    match path_at_mut(document, address) {
-        Some(path) => {
-            if closed {
-                path.close()
-            } else {
-                path.open()
+/// A path address changes only that path; a shape address changes every one of
+/// its direct paths. Closing adds a straight segment back to the start and
+/// opening removes it. Returns whether anything was changed.
+pub fn set_path_closed(document: &mut Document, address: &TreeAddress, closed: bool) -> bool {
+    match address {
+        TreeAddress::Path { .. } => match path_at_mut(document, address) {
+            Some(path) => {
+                if closed {
+                    path.close()
+                } else {
+                    path.open()
+                }
             }
-        }
-        None => false,
-    }
-}
-
-/// Resolves a chain of item indices to the list of items it selects.
-///
-/// Every index except the last must address a clip group, since clip groups are
-/// the only items that contain further items.
-fn items_at<'a>(mut items: &'a [Item], indices: &[usize]) -> Option<&'a [Item]> {
-    for &index in indices {
-        match items.get(index)? {
-            Item::Clip(group) => items = &group.targets,
-            Item::Path(_) => return None,
+            None => false,
+        },
+        TreeAddress::Shape { shapes } => {
+            let Some(shape) = shape_at_chain_mut(document, shapes) else {
+                return false;
+            };
+            let mut changed = false;
+            for path in &mut shape.paths {
+                changed |= if closed { path.close() } else { path.open() };
+            }
+            changed
         }
     }
-    Some(items)
-}
-
-fn items_at_mut<'a>(mut items: &'a mut [Item], indices: &[usize]) -> Option<&'a mut [Item]> {
-    for &index in indices {
-        match items.get_mut(index)? {
-            Item::Clip(group) => items = &mut group.targets,
-            Item::Path(_) => return None,
-        }
-    }
-    Some(items)
-}
-
-/// Resolves a chain of item indices to the mutable list that contains the last
-/// index, so the addressed item can be removed.
-fn items_vec_at_mut<'a>(
-    document: &'a mut Document,
-    layer: usize,
-    indices: &[usize],
-) -> Option<&'a mut Vec<Item>> {
-    let mut items = &mut document.layers.get_mut(layer)?.items;
-    for &index in indices {
-        match items.get_mut(index)? {
-            Item::Clip(group) => items = &mut group.targets,
-            Item::Path(_) => return None,
-        }
-    }
-    Some(items)
 }
 
 // ---------------------------------------------------------------------------
 // Tree editing
 // ---------------------------------------------------------------------------
 
-/// An item's position in the document tree: the layer plus the chain of item
-/// indices leading from the layer down to the item itself.
+/// A shape's position in the document tree: the chain of shape indices leading
+/// from the root down to the shape itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ItemSlot {
-    layer: usize,
+struct ShapeSlot {
     chain: Vec<usize>,
 }
 
-impl ItemSlot {
-    /// Indices of the clip groups that contain the item.
+impl ShapeSlot {
+    /// Indices of the shapes that contain this one.
     fn parents(&self) -> &[usize] {
         &self.chain[..self.chain.len() - 1]
     }
 
-    /// The item's index inside its container.
+    /// The shape's index inside its container.
     fn index(&self) -> usize {
-        *self.chain.last().expect("an item slot is never empty")
+        *self.chain.last().expect("a shape slot is never empty")
     }
 }
 
-/// Resolves an item address to its position, validating every index.
-fn item_slot(document: &Document, address: &PathAddress) -> Option<ItemSlot> {
-    let (layer, items) = match address {
-        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
-        PathAddress::Layer { .. } => return None,
+/// Resolves a shape address to its position, validating every index.
+fn shape_slot(document: &Document, address: &TreeAddress) -> Option<ShapeSlot> {
+    let chain = match address {
+        TreeAddress::Shape { shapes } => shapes,
+        TreeAddress::Path { .. } => return None,
     };
-    let (last, parents) = items.split_last()?;
-    let container = items_at(&document.layers.get(layer)?.items, parents)?;
-    if *last >= container.len() {
+    let (last, parents) = chain.split_last()?;
+    let siblings = shapes_at(&document.shapes, parents)?;
+    if *last >= siblings.len() {
         return None;
     }
-    Some(ItemSlot {
-        layer,
-        chain: items.clone(),
+    Some(ShapeSlot {
+        chain: chain.clone(),
     })
 }
 
-/// Adjusts `slot` so it still names the same item after the item at `removed`
+/// Adjusts `slot` so it still names the same shape after the shape at `removed`
 /// has been taken out of the tree.
-fn shift_slot_after_removal(mut slot: ItemSlot, removed: &ItemSlot) -> ItemSlot {
-    if slot.layer != removed.layer {
-        return slot;
-    }
+fn shift_slot_after_removal(mut slot: ShapeSlot, removed: &ShapeSlot) -> ShapeSlot {
     let depth = removed.parents().len();
     if slot.chain.len() > depth
         && slot.chain[..depth] == removed.parents()[..]
@@ -1107,226 +1110,210 @@ fn shift_slot_after_removal(mut slot: ItemSlot, removed: &ItemSlot) -> ItemSlot 
     slot
 }
 
-/// Whether `outer` names an item that is `inner` itself or one of its
-/// ancestors.
-pub(crate) fn address_is_inside(outer: &PathAddress, inner: &PathAddress) -> bool {
-    let (outer_layer, outer_items) = match outer {
-        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
-        PathAddress::Layer { .. } => return false,
+/// Whether `outer` names a shape that is `inner` itself or one of its
+/// ancestors. A path is never anybody's ancestor.
+pub(crate) fn address_is_inside(outer: &TreeAddress, inner: &TreeAddress) -> bool {
+    let TreeAddress::Shape {
+        shapes: outer_shapes,
+    } = outer
+    else {
+        return false;
     };
-    let (inner_layer, inner_items) = match inner {
-        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
-        PathAddress::Layer { .. } => return false,
-    };
-    outer_layer == inner_layer
-        && inner_items.len() >= outer_items.len()
-        && inner_items[..outer_items.len()] == outer_items[..]
+    let inner_shapes = inner.shape_chain();
+    inner_shapes.len() >= outer_shapes.len()
+        && inner_shapes[..outer_shapes.len()] == outer_shapes[..]
 }
 
-/// Removes the item named by `address` from its container.
-fn take_item(document: &mut Document, address: &PathAddress) -> Option<Item> {
-    let slot = item_slot(document, address)?;
-    let items = items_vec_at_mut(document, slot.layer, slot.parents())?;
-    if slot.index() >= items.len() {
+/// Removes the shape named by `address` from its container.
+fn take_shape(document: &mut Document, address: &TreeAddress) -> Option<Shape> {
+    let slot = shape_slot(document, address)?;
+    let siblings = shapes_vec_at_mut(document, slot.parents())?;
+    if slot.index() >= siblings.len() {
         return None;
     }
-    Some(items.remove(slot.index()))
+    Some(siblings.remove(slot.index()))
 }
 
-/// Inserts `item` into the container at `parents` and returns its address.
-fn insert_item(
-    document: &mut Document,
-    layer: usize,
-    parents: &[usize],
-    index: usize,
-    item: Item,
-) -> Option<PathAddress> {
-    let is_clip = matches!(item, Item::Clip(_));
-    let items = items_vec_at_mut(document, layer, parents)?;
-    let index = index.min(items.len());
-    items.insert(index, item);
+/// Removes the path named by `address` from its owning shape.
+fn take_path(document: &mut Document, address: &TreeAddress) -> Option<Path> {
+    let TreeAddress::Path { shapes, path } = address else {
+        return None;
+    };
+    let shape = shape_at_chain_mut(document, shapes)?;
+    if *path >= shape.paths.len() {
+        return None;
+    }
+    Some(shape.paths.remove(*path))
+}
 
-    let mut chain = parents.to_vec();
+/// Rewrites a sibling list's Z values to match its vector order.
+///
+/// Painting sorts stably by Z, so a list whose Z values equal their indices
+/// paints in vector order. Reordering physically moves shapes in the vector
+/// and then calls this, keeping both notions of order in agreement.
+fn renormalize_z(siblings: &mut [Shape]) {
+    for (index, shape) in siblings.iter_mut().enumerate() {
+        shape.z = index as f32;
+    }
+}
+
+/// Moves `source` next to `target` in the target's sibling list.
+///
+/// `higher` inserts the source after the target (higher Z, painted on top and
+/// listed below it); `false` inserts it before (lower Z, painted underneath and
+/// listed above it). Returns the shape's new address, or `None` when either
+/// address is invalid or the move would put a shape inside itself.
+pub fn move_shape_near(
+    document: &mut Document,
+    source: &TreeAddress,
+    target: &TreeAddress,
+    higher: bool,
+) -> Option<TreeAddress> {
+    if address_is_inside(source, target) {
+        return None;
+    }
+    let source_slot = shape_slot(document, source)?;
+    let target_slot = shape_slot(document, target)?;
+
+    let shape = take_shape(document, source)?;
+    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
+    let index = target_slot.index() + usize::from(higher);
+    let siblings = shapes_vec_at_mut(document, target_slot.parents())?;
+    let index = index.min(siblings.len());
+    siblings.insert(index, shape);
+    renormalize_z(siblings);
+
+    let mut chain = target_slot.parents().to_vec();
     chain.push(index);
-    Some(if is_clip {
-        PathAddress::Clip {
-            layer,
-            items: chain,
-        }
-    } else {
-        PathAddress::Item {
-            layer,
-            items: chain,
-        }
+    Some(TreeAddress::Shape { shapes: chain })
+}
+
+/// Parents `source` to `target` as its last child.
+pub fn move_shape_into(
+    document: &mut Document,
+    source: &TreeAddress,
+    target: &TreeAddress,
+) -> Option<TreeAddress> {
+    if address_is_inside(source, target) {
+        return None;
+    }
+    let source_slot = shape_slot(document, source)?;
+    let target_slot = shape_slot(document, target)?;
+
+    let shape = take_shape(document, source)?;
+    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
+    let children = shapes_vec_at_mut(document, &target_slot.chain)?;
+    let index = children.len();
+    children.push(shape);
+    renormalize_z(children);
+
+    let mut chain = target_slot.chain;
+    chain.push(index);
+    Some(TreeAddress::Shape { shapes: chain })
+}
+
+/// Moves `source` next to the path named by `target`, either within the same
+/// shape or into another shape.
+///
+/// Paths are listed in vector order, so `after` inserts the source below the
+/// target in the list and `false` inserts it above. Returns the path's new
+/// address, or `None` when either address is invalid or names the same path.
+pub fn move_path_near(
+    document: &mut Document,
+    source: &TreeAddress,
+    target: &TreeAddress,
+    after: bool,
+) -> Option<TreeAddress> {
+    let TreeAddress::Path {
+        shapes: source_shapes,
+        path: source_index,
+    } = source
+    else {
+        return None;
+    };
+    let TreeAddress::Path {
+        shapes: target_shapes,
+        path: target_index,
+    } = target
+    else {
+        return None;
+    };
+    if source == target {
+        return None;
+    }
+    if *source_index >= shape_at_chain(document, source_shapes)?.paths.len()
+        || *target_index >= shape_at_chain(document, target_shapes)?.paths.len()
+    {
+        return None;
+    }
+
+    let path = take_path(document, source)?;
+    let target_shape = shape_at_chain_mut(document, target_shapes)?;
+    let mut index = *target_index;
+    if source_shapes == target_shapes && *source_index < *target_index {
+        // Taking the source out shifted the target towards the front.
+        index -= 1;
+    }
+    let index = (index + usize::from(after)).min(target_shape.paths.len());
+    target_shape.paths.insert(index, path);
+    Some(TreeAddress::Path {
+        shapes: target_shapes.clone(),
+        path: index,
     })
 }
 
-/// Moves `source` next to `target` inside the target's container.
-///
-/// Returns the item's new address, or `None` when either address is invalid or
-/// the move would put an item inside itself.
-pub fn move_item_near(
+/// Moves a path from one shape into another, appending it to the target's
+/// paths. Returns the path's new address.
+pub fn move_path_into_shape(
     document: &mut Document,
-    source: &PathAddress,
-    target: &PathAddress,
-    after: bool,
-) -> Option<PathAddress> {
-    if address_is_inside(source, target) {
+    source: &TreeAddress,
+    target: &TreeAddress,
+) -> Option<TreeAddress> {
+    let TreeAddress::Shape {
+        shapes: target_shapes,
+    } = target
+    else {
         return None;
-    }
-    let source_slot = item_slot(document, source)?;
-    let target_slot = item_slot(document, target)?;
-
-    let item = take_item(document, source)?;
-    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
-    let index = target_slot.index() + usize::from(after);
-    insert_item(
-        document,
-        target_slot.layer,
-        target_slot.parents(),
-        index,
-        item,
-    )
-}
-
-/// Appends `source` to the items of `layer`, creating a layer when the index
-/// names one that is missing.
-pub fn move_item_to_layer(
-    document: &mut Document,
-    source: &PathAddress,
-    layer: usize,
-) -> Option<PathAddress> {
-    if layer >= document.layers.len() {
-        return None;
-    }
-    let item = take_item(document, source)?;
-    let index = document.layers[layer].items.len();
-    insert_item(document, layer, &[], index, item)
-}
-
-/// Parents `source` to `target`.
-///
-/// When `target` is already a clip group the item becomes one of its targets.
-/// When `target` is a painted path, that path becomes the clip of a new group
-/// and `source` becomes its only target.
-pub fn move_item_into(
-    document: &mut Document,
-    source: &PathAddress,
-    target: &PathAddress,
-) -> Option<PathAddress> {
-    if address_is_inside(source, target) {
-        return None;
-    }
-    let source_slot = item_slot(document, source)?;
-    let target_slot = item_slot(document, target)?;
-
-    let item = take_item(document, source)?;
-    let is_clip = matches!(item, Item::Clip(_));
-    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
-    let layer = target_slot.layer;
-    let parents = target_slot.parents().to_vec();
-    let index = target_slot.index();
-
-    let items = items_vec_at_mut(document, layer, &parents)?;
-    let target_item = items.get_mut(index)?;
-    match target_item {
-        Item::Clip(group) => {
-            group.targets.push(item);
-            let mut chain = parents;
-            chain.push(index);
-            chain.push(group.targets.len() - 1);
-            Some(if is_clip {
-                PathAddress::Clip {
-                    layer,
-                    items: chain,
-                }
-            } else {
-                PathAddress::Item {
-                    layer,
-                    items: chain,
-                }
-            })
-        }
-        Item::Path(path_item) => {
-            // The painted path becomes the clip mask of a new group.
-            let path_item = std::mem::replace(
-                path_item,
-                PathItem {
-                    path: Path::new([0.0, 0.0]),
-                    style: Style::default(),
-                },
-            );
-            *target_item = Item::Clip(ClipGroup {
-                clip: path_item.path,
-                style: path_item.style,
-                targets: vec![item],
-            });
-
-            let mut chain = parents;
-            chain.push(index);
-            Some(PathAddress::Clip {
-                layer,
-                items: chain,
-            })
-        }
-    }
-}
-
-/// Reorders layers so that `source` sits before or after `target` in the
-/// sidebar's top-to-bottom order.
-///
-/// Z values are renormalized from the resulting visual order, which keeps the
-/// order stable and makes subsequent drags simple.
-pub fn move_layer(document: &mut Document, source: usize, target: usize, after: bool) -> bool {
-    let count = document.layers.len();
-    if source >= count || target >= count || source == target {
-        return false;
-    }
-
-    // Topmost layer first, matching the sidebar.
-    let mut order: Vec<usize> = document
-        .layer_indices_in_paint_order()
-        .into_iter()
-        .rev()
-        .collect();
-    order.retain(|&index| index != source);
-    let Some(target_position) = order.iter().position(|&index| index == target) else {
-        return false;
     };
-    order.insert(target_position + usize::from(after), source);
+    let TreeAddress::Path { .. } = source else {
+        return None;
+    };
 
-    let top = order.len() - 1;
-    for (rank, &index) in order.iter().enumerate() {
-        document.layers[index].z = (top - rank) as f32;
-    }
-    true
+    let path = take_path(document, source)?;
+    let target_shape = shape_at_chain_mut(document, target_shapes)?;
+    let index = target_shape.paths.len();
+    target_shape.paths.push(path);
+    Some(TreeAddress::Path {
+        shapes: target_shapes.clone(),
+        path: index,
+    })
 }
 
 /// The editable name of the node at `address`.
-pub fn name_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a str> {
+pub fn name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a str> {
     match address {
-        PathAddress::Layer { layer } => Some(document.layers.get(*layer)?.name.as_str()),
-        _ => path_at(document, address).map(|path| path.name.as_str()),
+        TreeAddress::Shape { .. } => Some(shape_at(document, address)?.name.as_str()),
+        TreeAddress::Path { .. } => Some(path_at(document, address)?.name.as_str()),
     }
 }
 
 /// Renames the node at `address`. Returns `false` when it does not exist.
-pub fn rename_at(document: &mut Document, address: &PathAddress, name: String) -> bool {
-    if let PathAddress::Layer { layer } = address {
-        return match document.layers.get_mut(*layer) {
-            Some(layer) => {
-                layer.name = name;
+pub fn rename_at(document: &mut Document, address: &TreeAddress, name: String) -> bool {
+    match address {
+        TreeAddress::Shape { .. } => match shape_at_mut(document, address) {
+            Some(shape) => {
+                shape.name = name;
                 true
             }
             None => false,
-        };
-    }
-    match path_at_mut(document, address) {
-        Some(path) => {
-            path.name = name;
-            true
-        }
-        None => false,
+        },
+        TreeAddress::Path { .. } => match path_at_mut(document, address) {
+            Some(path) => {
+                path.name = name;
+                true
+            }
+            None => false,
+        },
     }
 }
 
@@ -1350,91 +1337,97 @@ pub fn cancel_rename(editor: &mut EditorState) {
 // Hit testing
 // ---------------------------------------------------------------------------
 
-/// Returns the topmost paintable path under `point`.
-fn pick_path(document: &Document, point: [f32; 2], slack: f32) -> Option<PathAddress> {
-    // Later indices are painted later, so walk the paint order backwards and
-    // reverse document order within each layer.
-    for layer_index in document.layer_indices_in_paint_order().into_iter().rev() {
-        let layer = &document.layers[layer_index];
-        if let Some(address) = pick_items(&layer.items, point, slack, layer_index) {
+/// Returns the shape under `point` that the user is most likely aiming at.
+///
+/// A selected shape is tried first with clipping ignored, so a shape that its
+/// parent clips away stays reachable while it is selected (for example after
+/// dragging it outside its parent). Trying it before the paint order also
+/// raises the selection above everything else. Every other shape is only
+/// pickable where it is actually visible.
+fn pick_shape(
+    document: &Document,
+    selected: Option<&TreeAddress>,
+    point: [f32; 2],
+    slack: f32,
+) -> Option<TreeAddress> {
+    if let Some(TreeAddress::Shape { shapes }) = selected
+        && let Some(shape) = shape_at_chain(document, shapes)
+        && let Some(address) = pick_shape_node(shape, point, slack, shapes, false)
+    {
+        return Some(address);
+    }
+
+    // Later indices are painted later, so walk the paint order backwards.
+    for index in document.shape_indices_in_paint_order().into_iter().rev() {
+        if let Some(address) =
+            pick_shape_node(&document.shapes[index], point, slack, &[index], true)
+        {
             return Some(address);
         }
     }
     None
 }
 
-/// Returns the topmost path under `point`, including clip paths themselves.
+/// Tests one shape and its children, mirroring painting order.
 ///
-/// The order mirrors painting: a clip's stroke is over its targets, and its
-/// fill is underneath them.
-fn pick_items(items: &[Item], point: [f32; 2], slack: f32, layer: usize) -> Option<PathAddress> {
-    for (index, item) in items.iter().enumerate().rev() {
-        match item {
-            Item::Path(path_item) => {
-                if path_hit(&path_item.path, &path_item.style, point, slack) {
-                    return Some(PathAddress::Item {
-                        layer,
-                        items: vec![index],
-                    });
-                }
-            }
-            Item::Clip(group) => {
-                let clip_address = || PathAddress::Clip {
-                    layer,
-                    items: vec![index],
-                };
+/// The stroke is painted over the children and the fill underneath them.
+/// Children are only visible inside the parent's fill when the parent has
+/// paths; a group without paths does not clip at all. `respect_clip` controls
+/// whether that visibility rule applies to the descent.
+fn pick_shape_node(
+    shape: &Shape,
+    point: [f32; 2],
+    slack: f32,
+    chain: &[usize],
+    respect_clip: bool,
+) -> Option<TreeAddress> {
+    let address = || TreeAddress::Shape {
+        shapes: chain.to_vec(),
+    };
 
-                // The clip's stroke is painted over its targets.
-                if let Some(stroke) = group.style.stroke {
-                    let tolerance = stroke.width * 0.5 + slack;
-                    if path_distance(&group.clip, point) <= tolerance {
-                        return Some(clip_address());
-                    }
-                }
+    // Every shape is pickable near its outline, whether or not it has paint,
+    // so an unfilled or unstroked shape can still be selected and dragged. A
+    // stroke widens the tolerance by half its width.
+    let tolerance = shape.style.stroke.map_or(0.0, |stroke| stroke.width * 0.5) + slack;
+    if shape_distance(shape, point) <= tolerance {
+        return Some(address());
+    }
 
-                // A clip group's targets are only visible inside the clip.
-                if path_contains(&group.clip, point)
-                    && let Some(mut target) = pick_items(&group.targets, point, slack, layer)
-                {
-                    target.push_item(index);
-                    return Some(target);
-                }
-
-                // The clip's fill is painted underneath its targets.
-                if group.style.fill.is_some() && path_contains(&group.clip, point) {
-                    return Some(clip_address());
+    if !shape.children.is_empty() {
+        let visible = !respect_clip || shape.paths.is_empty() || shape_contains(shape, point);
+        if visible {
+            for index in shape.child_indices_in_paint_order().into_iter().rev() {
+                let mut child_chain = chain.to_vec();
+                child_chain.push(index);
+                if let Some(found) = pick_shape_node(
+                    &shape.children[index],
+                    point,
+                    slack,
+                    &child_chain,
+                    respect_clip,
+                ) {
+                    return Some(found);
                 }
             }
         }
     }
+
+    if shape.style.fill.is_some() && shape_contains(shape, point) {
+        return Some(address());
+    }
+
     None
 }
 
-fn path_hit(path: &Path, style: &Style, point: [f32; 2], slack: f32) -> bool {
-    if style.fill.is_some() && path_contains(path, point) {
-        return true;
-    }
-    if let Some(stroke) = style.stroke {
-        let tolerance = stroke.width * 0.5 + slack;
-        if path_distance(path, point) <= tolerance {
-            return true;
-        }
-    }
-    false
+/// Whether `point` lies inside the shape's combined fill.
+fn shape_contains(shape: &Shape, point: [f32; 2]) -> bool {
+    shape_fill_path(shape).contains(to_kurbo_point(point))
 }
 
-fn path_contains(path: &Path, point: [f32; 2]) -> bool {
-    let mut bez = path_to_bez_path(path);
-    if !path.is_closed() {
-        // Fills implicitly close open subpaths.
-        bez.close_path();
-    }
-    bez.contains(to_kurbo_point(point))
-}
-
-fn path_distance(path: &Path, point: [f32; 2]) -> f32 {
+/// Distance from `point` to the nearest contour of `shape`.
+fn shape_distance(shape: &Shape, point: [f32; 2]) -> f32 {
     let point = to_kurbo_point(point);
-    path_to_bez_path(path)
+    shape_to_bez_path(shape)
         .segments()
         .map(|segment| segment.nearest(point, NEAREST_ACCURACY).distance_sq)
         .fold(f64::INFINITY, f64::min)
@@ -1544,20 +1537,18 @@ fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
 /// Only the outline is eligible: clicking the interior of a filled shape far
 /// from its edge does nothing. Returns `true` when a point was inserted.
 fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
-    let Some(address) = pick_path(&editor.document, point, slack) else {
+    let Some(address) = pick_shape(&editor.document, editor.selected.as_ref(), point, slack) else {
         return false;
     };
-    let Some(path) = path_at(&editor.document, &address) else {
+    let Some(shape) = shape_at(&editor.document, &address) else {
         return false;
     };
-    let Some((index, t, distance)) = nearest_point_on_path(path, point) else {
+    let Some((path_index, segment_index, t, distance)) = nearest_on_shape(shape, point) else {
         return false;
     };
 
     // Clicking on a wide stroke still counts as clicking its outline.
-    let stroke_half_width = style_at(&editor.document, &address)
-        .and_then(|style| style.stroke)
-        .map_or(0.0, |stroke| stroke.width * 0.5);
+    let stroke_half_width = shape.style.stroke.map_or(0.0, |stroke| stroke.width * 0.5);
     if distance > slack + stroke_half_width {
         return false;
     }
@@ -1568,17 +1559,38 @@ fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
         return false;
     }
 
-    let Some(path) = path_at_mut(&mut editor.document, &address) else {
+    let Some(shape) = shape_at_mut(&mut editor.document, &address) else {
         return false;
     };
-    let Some(new_index) = split_segment(path, index, t) else {
+    let Some(path) = shape.paths.get_mut(path_index) else {
+        return false;
+    };
+    let Some(new_index) = split_segment(path, segment_index, t) else {
         return false;
     };
 
     editor.selected = Some(address);
-    editor.selected_handle = Some(Handle::Anchor(new_index));
+    editor.selected_handle = Some(SelectedNode {
+        path: path_index,
+        handle: Handle::Anchor(new_index),
+    });
     editor.drag = None;
     true
+}
+
+/// The segment nearest to `point` among all of a shape's paths, as
+/// `(path index, segment index, parameter, distance)`.
+fn nearest_on_shape(shape: &Shape, point: [f32; 2]) -> Option<(usize, usize, f64, f32)> {
+    let mut best: Option<(usize, usize, f64, f32)> = None;
+    for (path_index, path) in shape.paths.iter().enumerate() {
+        let Some((segment_index, t, distance)) = nearest_point_on_path(path, point) else {
+            continue;
+        };
+        if best.is_none_or(|(_, _, _, best_distance)| distance < best_distance) {
+            best = Some((path_index, segment_index, t, distance));
+        }
+    }
+    best
 }
 
 // ---------------------------------------------------------------------------
@@ -1605,15 +1617,45 @@ fn handles(path: &Path) -> Vec<(Handle, [f32; 2])> {
     handles
 }
 
-fn find_handle(path: &Path, point: [f32; 2], radius: f32) -> Option<Handle> {
-    handles(path)
-        .into_iter()
-        .filter_map(|(handle, position)| {
+/// Finds the selected node's control point nearest to `point`, if within
+/// `radius`.
+///
+/// A whole-shape selection can grab points from any of its direct paths, so
+/// the search spans all of them and returns the path-qualified address of the
+/// best match. A single-path selection only searches that path.
+fn node_under<'a>(
+    document: &'a Document,
+    address: &TreeAddress,
+    point: [f32; 2],
+    radius: f32,
+) -> Option<(SelectedNode, TreeAddress, &'a Path)> {
+    let mut best: Option<(f32, usize, Handle, &'a Path)> = None;
+    for (path_index, path) in selection_paths(document, address) {
+        for (handle, position) in handles(path) {
             let distance = distance(position, point);
-            (distance <= radius).then_some((distance, handle))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, handle)| handle)
+            if distance <= radius
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_distance, ..)| distance < *best_distance)
+            {
+                best = Some((distance, path_index, handle, path));
+            }
+        }
+    }
+
+    let (_, path_index, handle, path) = best?;
+    let drag_address = TreeAddress::Path {
+        shapes: address.shape_chain().to_vec(),
+        path: path_index,
+    };
+    Some((
+        SelectedNode {
+            path: path_index,
+            handle,
+        },
+        drag_address,
+        path,
+    ))
 }
 
 fn set_handle(path: &mut Path, handle: Handle, point: [f32; 2]) {
@@ -1890,38 +1932,19 @@ fn translate_path(path: &mut Path, delta: [f32; 2]) {
     }
 }
 
-/// Moves every point of `item` by `delta`, including nested clip targets.
-pub(crate) fn translate_item(item: &mut Item, delta: [f32; 2]) {
-    match item {
-        Item::Path(path_item) => translate_path(&mut path_item.path, delta),
-        Item::Clip(group) => {
-            translate_path(&mut group.clip, delta);
-            for target in &mut group.targets {
-                translate_item(target, delta);
-            }
-        }
+/// Moves every point of `shape` by `delta`, including nested children.
+pub(crate) fn translate_shape(shape: &mut Shape, delta: [f32; 2]) {
+    for path in &mut shape.paths {
+        translate_path(path, delta);
+    }
+    for child in &mut shape.children {
+        translate_shape(child, delta);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Pen tool
 // ---------------------------------------------------------------------------
-
-/// Returns the index of the layer new pen paths should go into: the topmost
-/// (highest Z) layer, creating one when the document is empty.
-fn ensure_drawing_layer(document: &mut Document) -> usize {
-    match document.layer_indices_in_paint_order().last().copied() {
-        Some(index) => index,
-        None => {
-            document.layers.push(Layer {
-                name: "Drawing".into(),
-                z: 0.0,
-                items: Vec::new(),
-            });
-            document.layers.len() - 1
-        }
-    }
-}
 
 /// True when the next click should close the current pen path rather than add
 /// another anchor.
@@ -1936,7 +1959,7 @@ fn pen_should_close(editor: &EditorState, point: [f32; 2], slack: f32) -> bool {
 }
 
 /// Ends the pen draft. When `finalize` is set and the draft has at least one
-/// segment, the path is added to the document and selected.
+/// segment, the path is wrapped in a new top-level shape and selected.
 pub fn finish_pen(editor: &mut EditorState, finalize: bool) {
     let Some(draft) = editor.pen.take() else {
         return;
@@ -1944,19 +1967,29 @@ pub fn finish_pen(editor: &mut EditorState, finalize: bool) {
     if !finalize || draft.path.segments.is_empty() {
         return;
     }
-    let Some(layer) = editor.document.layers.get_mut(draft.layer) else {
-        return;
+
+    // New shapes go on top of everything, using a Z greater than any sibling.
+    let z = match editor
+        .document
+        .shapes
+        .iter()
+        .map(|shape| shape.z)
+        .reduce(f32::max)
+    {
+        Some(max) => max + 1.0,
+        None => 0.0,
     };
-
-    let index = layer.items.len();
-    layer.items.push(Item::Path(PathItem {
-        path: draft.path,
+    let index = editor.document.shapes.len();
+    editor.document.shapes.push(Shape {
+        name: String::new(),
+        z,
         style: pen_style(),
-    }));
+        paths: vec![draft.path],
+        children: Vec::new(),
+    });
 
-    editor.selected = Some(PathAddress::Item {
-        layer: draft.layer,
-        items: vec![index],
+    editor.selected = Some(TreeAddress::Shape {
+        shapes: vec![index],
     });
     editor.selected_handle = None;
     editor.drag = None;
@@ -1990,12 +2023,16 @@ fn path_end(path: &Path) -> [f32; 2] {
 /// Deletes the selected control point, or the selected object when no control
 /// point is selected.
 fn delete_selection(editor: &mut EditorState) {
-    if let Some(handle) = editor.selected_handle.take() {
+    if let Some(node) = editor.selected_handle.take() {
         // A control point is selected: only it is deleted, even when the
         // handle happens to sit on top of another object.
-        if let Some(address) = editor.selected.clone()
-            && let Some(path) = path_at_mut(&mut editor.document, &address)
-            && delete_handle(path, handle)
+        let node_address = editor
+            .selected
+            .as_ref()
+            .map(|address| node_path_address(address, node.path));
+        if let Some(node_address) = node_address
+            && let Some(path) = path_at_mut(&mut editor.document, &node_address)
+            && delete_handle(path, node.handle)
         {
             editor.drag = None;
             editor.structure_revision += 1;
@@ -2010,6 +2047,14 @@ fn delete_selection(editor: &mut EditorState) {
         editor.structure_revision += 1;
     }
     editor.drag = None;
+}
+
+/// The address of path `index` within the node selected at `address`.
+fn node_path_address(address: &TreeAddress, index: usize) -> TreeAddress {
+    TreeAddress::Path {
+        shapes: address.shape_chain().to_vec(),
+        path: index,
+    }
 }
 
 /// Removes one point from `path`.
@@ -2058,32 +2103,14 @@ fn delete_handle(path: &mut Path, handle: Handle) -> bool {
     }
 }
 
-/// Removes the item named by `address` from the document.
+/// Removes the node named by `address` from the document.
 ///
-/// A clip address names the clip mask of its group, so removing it removes the
-/// whole group together with its targets.
-fn remove_object(document: &mut Document, address: &PathAddress) -> bool {
-    let (layer, indices) = match address {
-        PathAddress::Item { layer, items } | PathAddress::Clip { layer, items } => (*layer, items),
-        PathAddress::Layer { layer } => {
-            if *layer >= document.layers.len() {
-                return false;
-            }
-            document.layers.remove(*layer);
-            return true;
-        }
-    };
-    let Some((last, parents)) = indices.split_last() else {
-        return false;
-    };
-    let Some(items) = items_vec_at_mut(document, layer, parents) else {
-        return false;
-    };
-    if *last >= items.len() {
-        return false;
+/// Removing a shape takes its paths and nested children with it.
+fn remove_object(document: &mut Document, address: &TreeAddress) -> bool {
+    match address {
+        TreeAddress::Shape { .. } => take_shape(document, address).is_some(),
+        TreeAddress::Path { .. } => take_path(document, address).is_some(),
     }
-    items.remove(*last);
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -2176,7 +2203,7 @@ fn stroke_segment(scene: &mut Scene, from: [f32; 2], to: [f32; 2], width: f64, c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipGroup, Layer, Rgba8, StrokeStyle, Style};
+    use crate::model::{FORMAT_VERSION, Rgba8, StrokeStyle, Style};
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Path {
         Path::new([x0, y0])
@@ -2193,227 +2220,306 @@ mod tests {
         }
     }
 
-    #[test]
-    fn picks_topmost_layer() {
-        let document = Document {
-            version: 1,
-            layers: vec![
-                Layer {
-                    name: String::new(),
-                    z: 0.0,
-                    items: vec![Item::Path(PathItem {
-                        path: rect(0.0, 0.0, 100.0, 100.0),
-                        style: filled(Rgba8::rgb(255, 0, 0)),
-                    })],
-                },
-                Layer {
-                    name: String::new(),
-                    z: 10.0,
-                    items: vec![Item::Path(PathItem {
-                        path: rect(50.0, 50.0, 150.0, 150.0),
-                        style: filled(Rgba8::rgb(0, 0, 255)),
-                    })],
-                },
-            ],
-        };
+    fn stroked(width: f32) -> Style {
+        Style {
+            fill: None,
+            stroke: Some(StrokeStyle {
+                color: Rgba8::rgb(0, 0, 0),
+                width,
+            }),
+        }
+    }
 
-        assert_eq!(
-            pick_path(&document, [75.0, 75.0], 0.0),
-            Some(PathAddress::Item {
-                layer: 1,
-                items: vec![0]
-            })
-        );
-        assert_eq!(
-            pick_path(&document, [10.0, 10.0], 0.0),
-            Some(PathAddress::Item {
-                layer: 0,
-                items: vec![0]
-            })
-        );
-        assert_eq!(pick_path(&document, [200.0, 200.0], 0.0), None);
+    fn shaped(path: Path, style: Style) -> Shape {
+        Shape {
+            paths: vec![path],
+            style,
+            ..default()
+        }
+    }
+
+    fn document_of(shapes: Vec<Shape>) -> Document {
+        Document {
+            version: FORMAT_VERSION,
+            shapes,
+        }
+    }
+
+    fn shape_address(chain: &[usize]) -> TreeAddress {
+        TreeAddress::Shape {
+            shapes: chain.to_vec(),
+        }
+    }
+
+    fn path_address(chain: &[usize], path: usize) -> TreeAddress {
+        TreeAddress::Path {
+            shapes: chain.to_vec(),
+            path,
+        }
     }
 
     #[test]
-    fn clip_group_limits_hits() {
-        let document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
+    fn picks_topmost_sibling_shape() {
+        let document = document_of(vec![
+            Shape {
                 z: 0.0,
-                items: vec![Item::Clip(ClipGroup {
-                    clip: rect(0.0, 0.0, 100.0, 100.0),
-                    style: Style::default(),
-                    targets: vec![Item::Path(PathItem {
-                        path: rect(0.0, 0.0, 200.0, 200.0),
-                        style: filled(Rgba8::rgb(0, 255, 0)),
-                    })],
-                })],
-            }],
-        };
+                ..shaped(rect(0.0, 0.0, 100.0, 100.0), filled(Rgba8::rgb(255, 0, 0)))
+            },
+            Shape {
+                z: 10.0,
+                ..shaped(
+                    rect(50.0, 50.0, 150.0, 150.0),
+                    filled(Rgba8::rgb(0, 0, 255)),
+                )
+            },
+        ]);
 
         assert_eq!(
-            pick_path(&document, [50.0, 50.0], 0.0),
-            Some(PathAddress::Item {
-                layer: 0,
-                items: vec![0, 0]
-            })
+            pick_shape(&document, None, [75.0, 75.0], 0.0),
+            Some(shape_address(&[1]))
         );
-        // Inside the target rectangle but clipped away.
-        assert_eq!(pick_path(&document, [150.0, 150.0], 0.0), None);
+        assert_eq!(
+            pick_shape(&document, None, [10.0, 10.0], 0.0),
+            Some(shape_address(&[0]))
+        );
+        assert_eq!(pick_shape(&document, None, [200.0, 200.0], 0.0), None);
     }
 
     #[test]
-    fn clip_stroke_is_picked_over_targets() {
-        let document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: vec![Item::Clip(ClipGroup {
-                    clip: rect(0.0, 0.0, 100.0, 100.0),
-                    style: Style {
-                        fill: None,
-                        stroke: Some(crate::model::StrokeStyle {
-                            color: Rgba8::rgb(0, 0, 0),
-                            width: 4.0,
-                        }),
-                    },
-                    targets: vec![Item::Path(PathItem {
-                        path: rect(0.0, 0.0, 100.0, 100.0),
-                        style: filled(Rgba8::rgb(255, 0, 0)),
-                    })],
-                })],
-            }],
-        };
+    fn clipped_away_shapes_are_only_pickable_while_selected() {
+        let document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+            children: vec![shaped(
+                rect(0.0, 0.0, 200.0, 200.0),
+                filled(Rgba8::rgb(0, 255, 0)),
+            )],
+            ..default()
+        }]);
 
-        // Away from the outline the target is picked.
+        // Inside the parent's clip the child is visible and pickable.
         assert_eq!(
-            pick_path(&document, [50.0, 50.0], 0.0),
-            Some(PathAddress::Item {
-                layer: 0,
-                items: vec![0, 0]
-            })
+            pick_shape(&document, None, [50.0, 50.0], 0.0),
+            Some(shape_address(&[0, 0]))
         );
-        // The clip's stroke is painted over the target, so it wins there.
+        // Outside it the child is clipped away, so a click finds nothing...
+        assert_eq!(pick_shape(&document, None, [150.0, 150.0], 0.0), None);
+
+        // ...unless the child is selected, so it can be dragged back into view.
+        let child = shape_address(&[0, 0]);
         assert_eq!(
-            pick_path(&document, [1.0, 50.0], 0.0),
-            Some(PathAddress::Clip {
-                layer: 0,
-                items: vec![0]
-            })
+            pick_shape(&document, Some(&child), [150.0, 150.0], 0.0),
+            Some(shape_address(&[0, 0]))
         );
     }
 
     #[test]
-    fn clip_fill_is_picked_under_targets() {
-        let document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
+    fn visible_shapes_win_over_clipped_away_children() {
+        let document = document_of(vec![
+            Shape {
                 z: 0.0,
-                items: vec![Item::Clip(ClipGroup {
-                    clip: rect(0.0, 0.0, 100.0, 100.0),
-                    style: filled(Rgba8::rgb(0, 0, 255)),
-                    targets: vec![Item::Path(PathItem {
-                        path: rect(20.0, 20.0, 80.0, 80.0),
-                        style: filled(Rgba8::rgb(255, 0, 0)),
-                    })],
-                })],
-            }],
-        };
+                paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+                children: vec![shaped(
+                    rect(0.0, 0.0, 200.0, 200.0),
+                    filled(Rgba8::rgb(0, 255, 0)),
+                )],
+                ..default()
+            },
+            Shape {
+                z: 10.0,
+                ..shaped(rect(0.0, 0.0, 200.0, 200.0), filled(Rgba8::rgb(0, 0, 255)))
+            },
+        ]);
 
-        // The target is painted over the clip's fill.
+        // The top shape is visible here, so it wins over the clipped child
+        // that happens to cover the same point.
         assert_eq!(
-            pick_path(&document, [50.0, 50.0], 0.0),
-            Some(PathAddress::Item {
-                layer: 0,
-                items: vec![0, 0]
-            })
+            pick_shape(&document, None, [150.0, 150.0], 0.0),
+            Some(shape_address(&[1]))
         );
-        // Where the target does not cover, the clip's fill is picked.
+
+        // A selected shape is raised to the top, even when clipped away.
+        let child = shape_address(&[0, 0]);
         assert_eq!(
-            pick_path(&document, [10.0, 50.0], 0.0),
-            Some(PathAddress::Clip {
-                layer: 0,
-                items: vec![0]
-            })
+            pick_shape(&document, Some(&child), [150.0, 150.0], 0.0),
+            Some(shape_address(&[0, 0]))
         );
     }
 
     #[test]
-    fn nested_clip_paths_can_be_addressed_and_edited() {
-        let mut document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: vec![Item::Clip(ClipGroup {
-                    clip: rect(0.0, 0.0, 100.0, 100.0),
-                    style: filled(Rgba8::rgb(0, 0, 255)),
-                    targets: vec![Item::Clip(ClipGroup {
-                        clip: rect(10.0, 10.0, 90.0, 90.0),
-                        style: filled(Rgba8::rgb(0, 255, 0)),
-                        targets: Vec::new(),
-                    })],
-                })],
-            }],
-        };
+    fn a_shape_without_paths_does_not_clip_its_children() {
+        let document = document_of(vec![Shape {
+            children: vec![shaped(
+                rect(0.0, 0.0, 100.0, 100.0),
+                filled(Rgba8::rgb(0, 255, 0)),
+            )],
+            ..default()
+        }]);
 
-        let address = PathAddress::Clip {
-            layer: 0,
-            items: vec![0, 0],
-        };
+        assert_eq!(
+            pick_shape(&document, None, [50.0, 50.0], 0.0),
+            Some(shape_address(&[0, 0]))
+        );
+    }
+
+    #[test]
+    fn parent_stroke_is_picked_over_children() {
+        let document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+            style: stroked(4.0),
+            children: vec![shaped(
+                rect(0.0, 0.0, 100.0, 100.0),
+                filled(Rgba8::rgb(255, 0, 0)),
+            )],
+            ..default()
+        }]);
+
+        // Away from the outline the child is picked.
+        assert_eq!(
+            pick_shape(&document, None, [50.0, 50.0], 0.0),
+            Some(shape_address(&[0, 0]))
+        );
+        // The parent's stroke is painted over the child, so it wins there.
+        assert_eq!(
+            pick_shape(&document, None, [1.0, 50.0], 0.0),
+            Some(shape_address(&[0]))
+        );
+    }
+
+    #[test]
+    fn parent_fill_is_picked_under_children() {
+        let document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+            style: filled(Rgba8::rgb(0, 0, 255)),
+            children: vec![shaped(
+                rect(20.0, 20.0, 80.0, 80.0),
+                filled(Rgba8::rgb(255, 0, 0)),
+            )],
+            ..default()
+        }]);
+
+        // The child is painted over the parent's fill.
+        assert_eq!(
+            pick_shape(&document, None, [50.0, 50.0], 0.0),
+            Some(shape_address(&[0, 0]))
+        );
+        // Where the child does not cover, the parent's fill is picked.
+        assert_eq!(
+            pick_shape(&document, None, [10.0, 50.0], 0.0),
+            Some(shape_address(&[0]))
+        );
+    }
+
+    #[test]
+    fn unpainted_shapes_are_picked_near_their_outline() {
+        let document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+            style: Style::default(),
+            ..default()
+        }]);
+
+        // With no paint, the interior is not a pick target...
+        assert_eq!(pick_shape(&document, None, [50.0, 50.0], 0.0), None);
+        // ...but the outline is, within the slack distance.
+        assert_eq!(
+            pick_shape(&document, None, [0.0, 50.0], 0.0),
+            Some(shape_address(&[0]))
+        );
+        assert_eq!(
+            pick_shape(&document, None, [3.0, 50.0], 3.0),
+            Some(shape_address(&[0]))
+        );
+        assert_eq!(pick_shape(&document, None, [4.0, 50.0], 3.0), None);
+    }
+
+    #[test]
+    fn a_compound_shape_can_have_a_hole() {
+        let hole = Path::new([20.0, 20.0])
+            .line_to([20.0, 80.0])
+            .line_to([80.0, 80.0])
+            .line_to([80.0, 20.0])
+            .closed();
+        let document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0), hole],
+            style: filled(Rgba8::rgb(0, 0, 0)),
+            ..default()
+        }]);
+
+        // The inner contour is wound the other way, so it is a hole.
+        assert_eq!(pick_shape(&document, None, [50.0, 50.0], 0.0), None);
+        assert_eq!(
+            pick_shape(&document, None, [10.0, 10.0], 0.0),
+            Some(shape_address(&[0]))
+        );
+    }
+
+    #[test]
+    fn nested_children_can_be_addressed_and_edited() {
+        let mut document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+            style: filled(Rgba8::rgb(0, 0, 255)),
+            children: vec![Shape {
+                paths: vec![rect(10.0, 10.0, 90.0, 90.0)],
+                style: filled(Rgba8::rgb(0, 255, 0)),
+                ..default()
+            }],
+            ..default()
+        }]);
+
+        let address = path_address(&[0, 0], 0);
         assert!(path_at(&document, &address).is_some());
+        assert!(shape_at(&document, &address).is_some());
 
         *path_at_mut(&mut document, &address).unwrap() = rect(20.0, 20.0, 80.0, 80.0);
 
-        let Item::Clip(outer) = &document.layers[0].items[0] else {
-            panic!("expected an outer clip group");
-        };
-        let Item::Clip(inner) = &outer.targets[0] else {
-            panic!("expected a nested clip group");
-        };
-        assert_eq!(inner.clip, rect(20.0, 20.0, 80.0, 80.0));
+        let inner = &document.shapes[0].children[0];
+        assert_eq!(inner.paths[0], rect(20.0, 20.0, 80.0, 80.0));
     }
 
     #[test]
-    fn example_red_area_selects_the_clip_path() {
+    fn example_asset_picks_the_outer_shape() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/example.vecart.json");
         let document = Document::load_from_file(path).unwrap();
 
-        // The clip's fill is the only thing covering this part of the circle.
+        // Inside the outer circle but away from the stripes and inner circle.
         assert_eq!(
-            pick_path(&document, [330.0, 210.0], 0.0),
-            Some(PathAddress::Clip {
-                layer: 2,
-                items: vec![0]
-            })
+            pick_shape(&document, None, [330.0, 210.0], 0.0),
+            Some(shape_address(&[5]))
         );
     }
 
     #[test]
     fn strokes_are_hit_by_distance() {
-        let document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: vec![Item::Path(PathItem {
-                    path: Path::new([0.0, 50.0]).line_to([100.0, 50.0]),
-                    style: Style {
-                        fill: None,
-                        stroke: Some(crate::model::StrokeStyle {
-                            color: Rgba8::rgb(0, 0, 0),
-                            width: 4.0,
-                        }),
-                    },
-                })],
-            }],
-        };
+        let document = document_of(vec![shaped(
+            Path::new([0.0, 50.0]).line_to([100.0, 50.0]),
+            stroked(4.0),
+        )]);
 
-        assert!(pick_path(&document, [50.0, 52.0], 0.0).is_some());
-        assert!(pick_path(&document, [50.0, 60.0], 0.0).is_none());
+        assert!(pick_shape(&document, None, [50.0, 52.0], 0.0).is_some());
+        assert!(pick_shape(&document, None, [50.0, 60.0], 0.0).is_none());
+    }
+
+    #[test]
+    fn address_is_inside_tracks_ancestry() {
+        assert!(address_is_inside(
+            &shape_address(&[0]),
+            &shape_address(&[0, 1])
+        ));
+        assert!(address_is_inside(
+            &shape_address(&[0]),
+            &path_address(&[0, 1], 3)
+        ));
+        assert!(address_is_inside(
+            &shape_address(&[0]),
+            &shape_address(&[0])
+        ));
+        assert!(!address_is_inside(
+            &shape_address(&[0, 1]),
+            &shape_address(&[0])
+        ));
+        assert!(!address_is_inside(
+            &path_address(&[0], 0),
+            &path_address(&[0], 0)
+        ));
     }
 
     #[test]
@@ -2468,6 +2574,28 @@ mod tests {
             .filter(|(_, position)| distance(*position, join) <= 1e-3)
             .count();
         assert_eq!(at_join, 1);
+    }
+
+    #[test]
+    fn node_under_searches_every_path_of_a_shape() {
+        let document = document_of(vec![Shape {
+            paths: vec![
+                Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
+                Path::new([50.0, 50.0]).line_to([60.0, 50.0]),
+            ],
+            ..default()
+        }]);
+        let address = shape_address(&[0]);
+
+        let (node, node_address, _) = node_under(&document, &address, [50.0, 50.0], 1.0).unwrap();
+        assert_eq!(
+            node,
+            SelectedNode {
+                path: 1,
+                handle: Handle::Start
+            }
+        );
+        assert_eq!(node_address, path_address(&[0], 1));
     }
 
     #[test]
@@ -2574,61 +2702,47 @@ mod tests {
     }
 
     #[test]
-    fn deleting_objects_removes_them_from_the_tree() {
-        let mut document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: "Layer".into(),
-                z: 0.0,
-                items: vec![
-                    Item::Path(PathItem {
-                        path: rect(0.0, 0.0, 10.0, 10.0),
-                        style: Style::default(),
-                    }),
-                    Item::Clip(ClipGroup {
-                        clip: rect(0.0, 0.0, 10.0, 10.0),
-                        style: Style::default(),
-                        targets: vec![Item::Path(PathItem {
-                            path: rect(0.0, 0.0, 5.0, 5.0),
-                            style: Style::default(),
-                        })],
-                    }),
-                ],
-            }],
-        };
+    fn deleting_shapes_and_paths_removes_them_from_the_tree() {
+        let mut document = document_of(vec![
+            shaped(rect(0.0, 0.0, 10.0, 10.0), Style::default()),
+            Shape {
+                paths: vec![rect(0.0, 0.0, 10.0, 10.0)],
+                children: vec![shaped(rect(0.0, 0.0, 5.0, 5.0), Style::default())],
+                ..default()
+            },
+        ]);
 
-        // A nested target is removed from its parent clip group.
-        assert!(remove_object(
-            &mut document,
-            &PathAddress::Item {
-                layer: 0,
-                items: vec![1, 0],
-            }
-        ));
-        let Item::Clip(group) = &document.layers[0].items[1] else {
-            panic!("expected a clip group");
-        };
-        assert!(group.targets.is_empty());
+        // A nested shape is removed from its parent.
+        assert!(remove_object(&mut document, &shape_address(&[1, 0])));
+        assert!(document.shapes[1].children.is_empty());
 
-        // A clip address removes the whole group.
-        assert!(remove_object(
-            &mut document,
-            &PathAddress::Clip {
-                layer: 0,
-                items: vec![1],
-            }
-        ));
-        assert_eq!(document.layers[0].items.len(), 1);
+        // A path is removed from its owning shape.
+        assert!(remove_object(&mut document, &path_address(&[0], 0)));
+        assert!(document.shapes[0].paths.is_empty());
+
+        // A whole shape takes its subtree with it.
+        assert!(remove_object(&mut document, &shape_address(&[1])));
+        assert_eq!(document.shapes.len(), 1);
     }
 
     #[test]
-    fn dragging_a_path_translates_all_points() {
+    fn dragging_a_shape_translates_all_of_its_points() {
         let mut path = Path::new([0.0, 0.0])
             .cubic_to([10.0, 0.0], [20.0, 10.0], [30.0, 10.0])
             .line_to([40.0, 20.0]);
+        path.open();
+        let mut shape = Shape {
+            paths: vec![path],
+            children: vec![shaped(
+                Path::new([100.0, 100.0]).line_to([110.0, 100.0]),
+                Style::default(),
+            )],
+            ..default()
+        };
 
-        translate_path(&mut path, [5.0, -3.0]);
+        translate_shape(&mut shape, [5.0, -3.0]);
 
+        let path = &shape.paths[0];
         assert_eq!(path.start(), Some([5.0, -3.0]));
         assert_eq!(
             path.segments[0],
@@ -2639,32 +2753,13 @@ mod tests {
             }
         );
         assert_eq!(path.segments[1], Segment::line([45.0, 17.0]));
+        assert_eq!(shape.children[0].paths[0].start(), Some([105.0, 97.0]));
     }
 
     #[test]
-    fn pen_creates_a_layer_for_an_empty_document() {
-        let mut document = Document::new();
-
-        assert_eq!(ensure_drawing_layer(&mut document), 0);
-        assert_eq!(document.layers.len(), 1);
-
-        // An existing document keeps using its topmost layer.
-        assert_eq!(ensure_drawing_layer(&mut document), 0);
-    }
-
-    #[test]
-    fn finishing_the_pen_adds_and_selects_the_path() {
-        let document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: Vec::new(),
-            }],
-        };
-        let mut editor = EditorState::new(document);
+    fn finishing_the_pen_creates_a_new_top_level_shape() {
+        let mut editor = EditorState::new(document_of(Vec::new()));
         editor.pen = Some(PenDraft {
-            layer: 0,
             path: Path::new([0.0, 0.0]).line_to([10.0, 10.0]),
             pending_out: None,
             dragging: false,
@@ -2673,15 +2768,29 @@ mod tests {
         finish_pen(&mut editor, true);
 
         assert!(editor.pen.is_none());
-        assert_eq!(editor.document.layers[0].items.len(), 1);
-        assert_eq!(
-            editor.selected,
-            Some(PathAddress::Item {
-                layer: 0,
-                items: vec![0],
-            })
-        );
+        assert_eq!(editor.document.shapes.len(), 1);
+        assert_eq!(editor.selected, Some(shape_address(&[0])));
+        assert_eq!(editor.document.shapes[0].paths.len(), 1);
+        assert_eq!(editor.document.shapes[0].z, 0.0);
         assert_eq!(editor.structure_revision, 1);
+    }
+
+    #[test]
+    fn pen_stacks_new_shapes_above_existing_ones() {
+        let mut editor = EditorState::new(document_of(vec![Shape {
+            z: 4.0,
+            ..default()
+        }]));
+        editor.pen = Some(PenDraft {
+            path: Path::new([0.0, 0.0]).line_to([10.0, 10.0]),
+            pending_out: None,
+            dragging: false,
+        });
+
+        finish_pen(&mut editor, true);
+
+        assert_eq!(editor.document.shapes[1].z, 5.0);
+        assert_eq!(editor.selected, Some(shape_address(&[1])));
     }
 
     #[test]
@@ -2690,7 +2799,6 @@ mod tests {
         // cubic whose incoming control mirrors the outgoing one across the
         // anchor.
         let mut draft = PenDraft {
-            layer: 0,
             path: Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
             pending_out: None,
             dragging: true,
@@ -2930,34 +3038,24 @@ mod tests {
 
     #[test]
     fn inserting_a_point_selects_the_new_anchor() {
-        let document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: vec![Item::Path(PathItem {
-                    path: Path::new([0.0, 0.0]).line_to([100.0, 0.0]),
-                    style: Style {
-                        fill: None,
-                        stroke: Some(StrokeStyle {
-                            color: Rgba8::rgb(0, 0, 0),
-                            width: 2.0,
-                        }),
-                    },
-                })],
-            }],
-        };
+        let document = document_of(vec![shaped(
+            Path::new([0.0, 0.0]).line_to([100.0, 0.0]),
+            stroked(2.0),
+        )]);
         let mut editor = EditorState::new(document);
-        let address = PathAddress::Item {
-            layer: 0,
-            items: vec![0],
-        };
 
         assert!(insert_point(&mut editor, [50.0, 0.0], 1.0));
-        assert_eq!(editor.selected, Some(address.clone()));
-        assert_eq!(editor.selected_handle, Some(Handle::Anchor(0)));
+        assert_eq!(editor.selected, Some(shape_address(&[0])));
+        assert_eq!(
+            editor.selected_handle,
+            Some(SelectedNode {
+                path: 0,
+                handle: Handle::Anchor(0)
+            })
+        );
 
-        let path = path_at(&editor.document, &address).unwrap();
+        let shape = shape_at(&editor.document, &shape_address(&[0])).unwrap();
+        let path = &shape.paths[0];
         assert_eq!(path.segments.len(), 2);
         assert_eq!(path.segments[0], Segment::line([50.0, 0.0]));
         assert_eq!(path.segments[1], Segment::line([100.0, 0.0]));
@@ -2965,17 +3063,10 @@ mod tests {
 
     #[test]
     fn insertion_ignores_the_interior_of_a_filled_shape() {
-        let document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: vec![Item::Path(PathItem {
-                    path: rect(0.0, 0.0, 100.0, 100.0),
-                    style: filled(Rgba8::rgb(0, 0, 0)),
-                })],
-            }],
-        };
+        let document = document_of(vec![shaped(
+            rect(0.0, 0.0, 100.0, 100.0),
+            filled(Rgba8::rgb(0, 0, 0)),
+        )]);
         let mut editor = EditorState::new(document);
 
         // Far from any edge: the fill is hit but no point is inserted.
@@ -3015,371 +3106,292 @@ mod tests {
 
     #[test]
     fn closed_state_can_be_read_and_written() {
-        let mut document = Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: vec![
-                    Item::Path(PathItem {
-                        path: Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
-                        style: Style::default(),
-                    }),
-                    Item::Clip(ClipGroup {
-                        clip: Path::new([0.0, 0.0]).line_to([5.0, 5.0]),
-                        style: Style::default(),
-                        targets: Vec::new(),
-                    }),
-                ],
-            }],
-        };
+        let mut document = document_of(vec![
+            Shape {
+                paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 0.0])],
+                ..default()
+            },
+            Shape {
+                paths: vec![Path::new([0.0, 0.0]).line_to([5.0, 5.0])],
+                ..default()
+            },
+        ]);
 
-        let item = PathAddress::Item {
-            layer: 0,
-            items: vec![0],
-        };
-        let clip = PathAddress::Clip {
-            layer: 0,
-            items: vec![1],
-        };
-
-        assert_eq!(path_closed_at(&document, &item), Some(false));
-        assert!(set_path_closed(&mut document, &item, true));
-        assert_eq!(path_closed_at(&document, &item), Some(true));
+        let first = shape_address(&[0]);
+        assert_eq!(path_closed_at(&document, &first), Some(false));
+        assert!(set_path_closed(&mut document, &first, true));
+        assert_eq!(path_closed_at(&document, &first), Some(true));
 
         // Closing adds the edge that joins the last point to the start.
-        let path = path_at(&document, &item).unwrap();
+        let path = &document.shapes[0].paths[0];
         assert_eq!(path.start(), Some([0.0, 0.0]));
         assert_eq!(path.segments.len(), 2);
         assert_eq!(path.segments[1], Segment::line([0.0, 0.0]));
 
         // Opening removes it again.
-        assert!(set_path_closed(&mut document, &item, false));
-        assert_eq!(path_at(&document, &item).unwrap().segments.len(), 1);
+        assert!(set_path_closed(&mut document, &first, false));
+        assert_eq!(document.shapes[0].paths[0].segments.len(), 1);
 
-        assert!(set_path_closed(&mut document, &clip, true));
-        assert_eq!(path_closed_at(&document, &clip), Some(true));
+        // A path address only changes that path.
+        let path = path_address(&[1], 0);
+        assert!(set_path_closed(&mut document, &path, true));
+        assert_eq!(path_closed_at(&document, &path), Some(true));
 
-        let missing = PathAddress::Item {
-            layer: 0,
-            items: vec![9],
+        // A shape with no paths has no closed state.
+        let empty = Shape {
+            paths: Vec::new(),
+            ..default()
         };
+        let mut document = document_of(vec![empty]);
+        assert_eq!(path_closed_at(&document, &shape_address(&[0])), None);
+
+        let missing = shape_address(&[9]);
         assert!(!set_path_closed(&mut document, &missing, true));
     }
 
-    fn path_at_point(point: [f32; 2]) -> PathItem {
-        PathItem {
-            path: Path::new(point).line_to([point[0] + 10.0, point[1]]),
-            style: filled(Rgba8::rgb(0, 0, 0)),
-        }
-    }
-
-    fn document_with_items(items: Vec<Item>) -> Document {
-        Document {
-            version: 1,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items,
-            }],
-        }
-    }
-
     #[test]
-    fn items_reorder_within_a_layer() {
-        let mut document = document_with_items(vec![
-            Item::Path(path_at_point([10.0, 0.0])),
-            Item::Path(path_at_point([30.0, 0.0])),
-        ]);
-        let first = PathAddress::Item {
-            layer: 0,
-            items: vec![0],
-        };
-        let second = PathAddress::Item {
-            layer: 0,
-            items: vec![1],
-        };
-
-        let moved = move_item_near(&mut document, &second, &first, false).unwrap();
-        assert_eq!(
-            moved,
-            PathAddress::Item {
-                layer: 0,
-                items: vec![0]
-            }
-        );
-        let Item::Path(path) = &document.layers[0].items[0] else {
-            panic!("expected a path");
-        };
-        assert_eq!(path.path.start(), Some([30.0, 0.0]));
-
-        // Dropping the front item after the back one swaps them again.
-        let moved = move_item_near(&mut document, &first, &second, true).unwrap();
-        assert_eq!(
-            moved,
-            PathAddress::Item {
-                layer: 0,
-                items: vec![1]
-            }
-        );
-        let Item::Path(path) = &document.layers[0].items[0] else {
-            panic!("expected a path");
-        };
-        assert_eq!(path.path.start(), Some([10.0, 0.0]));
-        let Item::Path(path) = &document.layers[0].items[1] else {
-            panic!("expected a path");
-        };
-        assert_eq!(path.path.start(), Some([30.0, 0.0]));
-    }
-
-    #[test]
-    fn items_move_between_layers() {
-        let mut document = Document {
-            version: 1,
-            layers: vec![
-                Layer {
-                    name: String::new(),
-                    z: 0.0,
-                    items: vec![Item::Path(path_at_point([0.0, 0.0]))],
-                },
-                Layer {
-                    name: String::new(),
-                    z: 10.0,
-                    items: Vec::new(),
-                },
+    fn closing_a_shape_closes_all_of_its_paths() {
+        let mut document = document_of(vec![Shape {
+            paths: vec![
+                Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
+                Path::new([0.0, 0.0]).line_to([5.0, 5.0]),
             ],
-        };
-        let source = PathAddress::Item {
-            layer: 0,
-            items: vec![0],
-        };
+            ..default()
+        }]);
 
-        let moved = move_item_to_layer(&mut document, &source, 1).unwrap();
-        assert_eq!(
-            moved,
-            PathAddress::Item {
-                layer: 1,
-                items: vec![0]
-            }
-        );
-        assert!(document.layers[0].items.is_empty());
-        assert_eq!(document.layers[1].items.len(), 1);
-
-        // A missing layer is rejected without disturbing the item.
-        assert!(move_item_to_layer(&mut document, &moved, 9).is_none());
-        assert_eq!(document.layers[1].items.len(), 1);
+        let shape = shape_address(&[0]);
+        assert_eq!(path_closed_at(&document, &shape), Some(false));
+        assert!(set_path_closed(&mut document, &shape, true));
+        assert_eq!(path_closed_at(&document, &shape), Some(true));
+        assert!(document.shapes[0].paths.iter().all(Path::is_closed));
     }
 
-    #[test]
-    fn dropping_a_path_onto_another_creates_a_clip_group() {
-        let mut document = document_with_items(vec![
-            Item::Path(path_at_point([0.0, 0.0])),
-            Item::Path(path_at_point([50.0, 50.0])),
-        ]);
-        let clip_target = PathAddress::Item {
-            layer: 0,
-            items: vec![0],
-        };
-        let source = PathAddress::Item {
-            layer: 0,
-            items: vec![1],
-        };
-
-        let moved = move_item_into(&mut document, &source, &clip_target).unwrap();
-        assert_eq!(
-            moved,
-            PathAddress::Clip {
-                layer: 0,
-                items: vec![0]
-            }
-        );
-
-        assert_eq!(document.layers[0].items.len(), 1);
-        let Item::Clip(group) = &document.layers[0].items[0] else {
-            panic!("expected a clip group");
-        };
-        assert_eq!(group.clip.start(), Some([0.0, 0.0]));
-        assert_eq!(group.targets.len(), 1);
-        let Item::Path(inner) = &group.targets[0] else {
-            panic!("expected a nested path");
-        };
-        assert_eq!(inner.path.start(), Some([50.0, 50.0]));
-    }
-
-    #[test]
-    fn dropping_into_a_clip_group_appends_a_target() {
-        let mut document = document_with_items(vec![
-            Item::Clip(ClipGroup {
-                clip: rect(0.0, 0.0, 100.0, 100.0),
-                style: Style::default(),
-                targets: vec![Item::Path(path_at_point([5.0, 5.0]))],
-            }),
-            Item::Path(path_at_point([50.0, 50.0])),
-        ]);
-        let clip = PathAddress::Clip {
-            layer: 0,
-            items: vec![0],
-        };
-        let source = PathAddress::Item {
-            layer: 0,
-            items: vec![1],
-        };
-
-        let moved = move_item_into(&mut document, &source, &clip).unwrap();
-        assert_eq!(
-            moved,
-            PathAddress::Item {
-                layer: 0,
-                items: vec![0, 1]
-            }
-        );
-
-        assert_eq!(document.layers[0].items.len(), 1);
-        let Item::Clip(group) = &document.layers[0].items[0] else {
-            panic!("expected a clip group");
-        };
-        assert_eq!(group.targets.len(), 2);
-    }
-
-    #[test]
-    fn an_item_cannot_be_moved_into_its_own_contents() {
-        let mut document = document_with_items(vec![Item::Clip(ClipGroup {
-            clip: rect(0.0, 0.0, 100.0, 100.0),
-            style: Style::default(),
-            targets: vec![Item::Path(path_at_point([5.0, 5.0]))],
-        })]);
-        let clip = PathAddress::Clip {
-            layer: 0,
-            items: vec![0],
-        };
-        let child = PathAddress::Item {
-            layer: 0,
-            items: vec![0, 0],
-        };
-
-        assert_eq!(move_item_into(&mut document, &clip, &child), None);
-        assert_eq!(move_item_near(&mut document, &clip, &clip, false), None);
-        assert_eq!(move_item_near(&mut document, &clip, &child, true), None);
-
-        assert_eq!(document.layers[0].items.len(), 1);
-        let Item::Clip(group) = &document.layers[0].items[0] else {
-            panic!("expected a clip group");
-        };
-        assert_eq!(group.targets.len(), 1);
-    }
-
-    #[test]
-    fn a_nested_target_can_be_moved_out_of_its_clip() {
-        let mut document = document_with_items(vec![Item::Clip(ClipGroup {
-            clip: rect(0.0, 0.0, 100.0, 100.0),
-            style: Style::default(),
-            targets: vec![Item::Path(path_at_point([5.0, 5.0]))],
-        })]);
-        let clip = PathAddress::Clip {
-            layer: 0,
-            items: vec![0],
-        };
-        let child = PathAddress::Item {
-            layer: 0,
-            items: vec![0, 0],
-        };
-
-        let moved = move_item_near(&mut document, &child, &clip, false).unwrap();
-        assert_eq!(
-            moved,
-            PathAddress::Item {
-                layer: 0,
-                items: vec![0]
-            }
-        );
-
-        assert_eq!(document.layers[0].items.len(), 2);
-        let Item::Path(path) = &document.layers[0].items[0] else {
-            panic!("expected a path");
-        };
-        assert_eq!(path.path.start(), Some([5.0, 5.0]));
-        let Item::Clip(group) = &document.layers[0].items[1] else {
-            panic!("expected a clip group");
-        };
-        assert!(group.targets.is_empty());
-    }
-
-    #[test]
-    fn layers_reorder_by_z() {
-        let mut document = Document::new();
-        for z in 0..3 {
-            document.layers.push(Layer {
-                name: format!("L{z}"),
-                z: z as f32,
-                items: Vec::new(),
-            });
+    fn named_shape(point: [f32; 2], name: &str) -> Shape {
+        Shape {
+            name: name.into(),
+            paths: vec![Path::new(point).line_to([point[0] + 10.0, point[1]])],
+            style: filled(Rgba8::rgb(0, 0, 0)),
+            ..default()
         }
+    }
 
-        let visual = |document: &Document| -> Vec<usize> {
-            document
-                .layer_indices_in_paint_order()
-                .into_iter()
-                .rev()
-                .collect()
-        };
-        assert_eq!(visual(&document), vec![2, 1, 0]);
+    fn named_path(index: usize, name: &str) -> Path {
+        let x = index as f32 * 20.0;
+        Path::new([x, 0.0]).line_to([x + 10.0, 0.0]).named(name)
+    }
 
-        // The bottom layer is dragged above the top one.
-        assert!(move_layer(&mut document, 0, 2, false));
-        assert_eq!(visual(&document), vec![0, 2, 1]);
+    fn paths_shape(names: &[&str]) -> Shape {
+        Shape {
+            paths: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| named_path(index, name))
+                .collect(),
+            ..default()
+        }
+    }
 
-        // Then below the middle one.
-        assert!(move_layer(&mut document, 0, 1, true));
-        assert_eq!(visual(&document), vec![2, 1, 0]);
+    fn path_names(shape: &Shape) -> Vec<String> {
+        shape.paths.iter().map(|path| path.name.clone()).collect()
+    }
 
-        assert!(!move_layer(&mut document, 1, 1, true));
-        assert!(!move_layer(&mut document, 0, 9, true));
+    #[test]
+    fn paths_reorder_within_their_shape() {
+        let mut document = document_of(vec![paths_shape(&["A", "B", "C"])]);
+
+        // Inserting A after B moves it later in the vector, below B.
+        let moved = move_path_near(
+            &mut document,
+            &path_address(&[0], 0),
+            &path_address(&[0], 1),
+            true,
+        )
+        .unwrap();
+        assert_eq!(moved, path_address(&[0], 1));
+        assert_eq!(path_names(&document.shapes[0]), ["B", "A", "C"]);
+
+        // Inserting C before A moves it back up the vector.
+        let moved = move_path_near(
+            &mut document,
+            &path_address(&[0], 2),
+            &path_address(&[0], 1),
+            false,
+        )
+        .unwrap();
+        assert_eq!(moved, path_address(&[0], 1));
+        assert_eq!(path_names(&document.shapes[0]), ["B", "C", "A"]);
+    }
+
+    #[test]
+    fn paths_move_next_to_paths_in_another_shape() {
+        let mut document = document_of(vec![paths_shape(&["A", "B"]), paths_shape(&["C"])]);
+
+        let moved = move_path_near(
+            &mut document,
+            &path_address(&[0], 0),
+            &path_address(&[1], 0),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(moved, path_address(&[1], 1));
+        assert_eq!(path_names(&document.shapes[0]), ["B"]);
+        assert_eq!(path_names(&document.shapes[1]), ["C", "A"]);
+    }
+
+    #[test]
+    fn paths_only_move_next_to_other_paths() {
+        let mut document = document_of(vec![paths_shape(&["A"]), paths_shape(&["B"])]);
+
+        // A shape is not an insertion point for a path.
+        assert_eq!(
+            move_path_near(
+                &mut document,
+                &path_address(&[0], 0),
+                &shape_address(&[1]),
+                true,
+            ),
+            None
+        );
+        // Dropping a path on itself is a no-op.
+        assert_eq!(
+            move_path_near(
+                &mut document,
+                &path_address(&[0], 0),
+                &path_address(&[0], 0),
+                true,
+            ),
+            None
+        );
+        assert_eq!(path_names(&document.shapes[0]), ["A"]);
+        assert_eq!(path_names(&document.shapes[1]), ["B"]);
+    }
+
+    #[test]
+    fn shapes_reorder_among_siblings() {
+        let mut document = document_of(vec![
+            named_shape([10.0, 0.0], "A"),
+            named_shape([30.0, 0.0], "B"),
+        ]);
+        let first = shape_address(&[0]);
+        let second = shape_address(&[1]);
+
+        let moved = move_shape_near(&mut document, &second, &first, false).unwrap();
+        assert_eq!(moved, shape_address(&[0]));
+        assert_eq!(document.shapes[0].name, "B");
+        assert_eq!(document.shapes[0].z, 0.0);
+        assert_eq!(document.shapes[1].z, 1.0);
+
+        // Dropping the front shape after the back one swaps them again.
+        let moved = move_shape_near(&mut document, &first, &second, true).unwrap();
+        assert_eq!(moved, shape_address(&[1]));
+        assert_eq!(document.shapes[0].name, "A");
+        assert_eq!(document.shapes[1].name, "B");
+    }
+
+    #[test]
+    fn shapes_nest_and_move_between_parents() {
+        let mut document = document_of(vec![
+            named_shape([0.0, 0.0], "Child"),
+            Shape {
+                name: "Parent".into(),
+                paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+                ..default()
+            },
+        ]);
+        let source = shape_address(&[0]);
+        let target = shape_address(&[1]);
+
+        let moved = move_shape_into(&mut document, &source, &target).unwrap();
+        // Taking the child out of the top level leaves the parent at index 0.
+        let parent = shape_address(&[0]);
+        assert_eq!(moved, shape_address(&[0, 0]));
+        assert_eq!(document.shapes.len(), 1);
+        assert_eq!(document.shapes[0].children[0].name, "Child");
+        assert_eq!(document.shapes[0].children[0].z, 0.0);
+
+        // Moving it back out puts it beside the parent.
+        let moved_out = move_shape_near(&mut document, &moved, &parent, false).unwrap();
+        assert_eq!(moved_out, shape_address(&[0]));
+        assert_eq!(document.shapes.len(), 2);
+        assert_eq!(document.shapes[0].name, "Child");
+        assert_eq!(document.shapes[1].name, "Parent");
+    }
+
+    #[test]
+    fn a_shape_cannot_be_moved_into_its_own_contents() {
+        let mut document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
+            children: vec![named_shape([5.0, 5.0], "Child")],
+            ..default()
+        }]);
+        let parent = shape_address(&[0]);
+        let child = shape_address(&[0, 0]);
+
+        assert_eq!(move_shape_into(&mut document, &parent, &child), None);
+        assert_eq!(
+            move_shape_near(&mut document, &parent, &parent, false),
+            None
+        );
+        assert_eq!(move_shape_near(&mut document, &parent, &child, true), None);
+
+        assert_eq!(document.shapes[0].children.len(), 1);
+    }
+
+    #[test]
+    fn paths_move_between_shapes() {
+        let mut document = document_of(vec![
+            Shape {
+                paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0])],
+                ..default()
+            },
+            Shape {
+                paths: vec![Path::new([5.0, 5.0]).line_to([6.0, 6.0])],
+                ..default()
+            },
+        ]);
+        let source = path_address(&[0], 0);
+        let target = shape_address(&[1]);
+
+        let moved = move_path_into_shape(&mut document, &source, &target).unwrap();
+        assert_eq!(moved, path_address(&[1], 1));
+        assert!(document.shapes[0].paths.is_empty());
+        assert_eq!(document.shapes[1].paths.len(), 2);
+
+        // A shape cannot be moved into a path.
+        assert_eq!(move_path_into_shape(&mut document, &target, &target), None);
     }
 
     #[test]
     fn tree_names_can_be_read_and_changed() {
-        let mut document = document_with_items(vec![
-            Item::Path(path_at_point([0.0, 0.0])),
-            Item::Clip(ClipGroup {
-                clip: rect(0.0, 0.0, 10.0, 10.0),
-                style: Style::default(),
-                targets: Vec::new(),
-            }),
+        let mut document = document_of(vec![
+            Shape {
+                paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0]).named("Original")],
+                ..default()
+            },
+            Shape {
+                paths: vec![Path::new([0.0, 0.0]).line_to([2.0, 2.0])],
+                ..default()
+            },
         ]);
-        let path = PathAddress::Item {
-            layer: 0,
-            items: vec![0],
-        };
-        let clip = PathAddress::Clip {
-            layer: 0,
-            items: vec![1],
-        };
-        let layer = PathAddress::Layer { layer: 0 };
+        let path = path_address(&[0], 0);
+        let shape = shape_address(&[1]);
 
-        assert_eq!(name_at(&document, &path), Some(""));
+        assert_eq!(name_at(&document, &path), Some("Original"));
         assert!(rename_at(&mut document, &path, "Curve".into()));
         assert_eq!(name_at(&document, &path), Some("Curve"));
-        assert!(rename_at(&mut document, &clip, "Mask".into()));
-        assert_eq!(name_at(&document, &clip), Some("Mask"));
-        assert!(rename_at(&mut document, &layer, "Base".into()));
-        assert_eq!(name_at(&document, &layer), Some("Base"));
 
-        let missing = PathAddress::Item {
-            layer: 0,
-            items: vec![9],
-        };
+        assert_eq!(name_at(&document, &shape), Some(""));
+        assert!(rename_at(&mut document, &shape, "Group".into()));
+        assert_eq!(name_at(&document, &shape), Some("Group"));
+
+        let missing = shape_address(&[9]);
         assert!(!rename_at(&mut document, &missing, "Nope".into()));
+        assert_eq!(name_at(&document, &missing), None);
 
         // Committing from the editor trims the buffer and bumps the revision.
         let mut editor = EditorState::new(document);
         editor.begin_rename(path.clone());
-        assert_eq!(
-            editor
-                .renaming
-                .as_ref()
-                .map(|rename| rename.buffer.as_str()),
-            Some("Curve")
-        );
         editor.renaming.as_mut().unwrap().buffer = "  Renamed  ".into();
         commit_rename(&mut editor);
         assert!(editor.renaming.is_none());

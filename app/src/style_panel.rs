@@ -1,9 +1,11 @@
 //! Bottom style panel: fill and stroke color pickers, stroke width, and
 //! enable toggles.
 //!
-//! The panel edits the style of the currently selected path. Values are kept in
-//! [`StylePanelState`] and written back into the document when they change, so
-//! the canvas refreshes through the usual editor pipeline.
+//! The panel edits the style of the currently selected shape. A path selection
+//! resolves to its owning shape, since paths are painted with their parent's
+//! style. Values are kept in [`StylePanelState`] and written back into the
+//! document when they change, so the canvas refreshes through the usual editor
+//! pipeline.
 //!
 //! Sliders are built from ordinary UI nodes: a track (`Button` +
 //! [`RelativeCursorPosition`]) with a fill bar and a thumb. Dragging the track
@@ -13,7 +15,7 @@ use bevy::prelude::*;
 use bevy::ui::{RelativeCursorPosition, Val2};
 
 use crate::editor::{
-    BOTTOM_BAR_HEIGHT, EditorState, PathAddress, SIDEBAR_WIDTH, TOOLBAR_WIDTH, path_closed_at,
+    BOTTOM_BAR_HEIGHT, EditorState, SIDEBAR_WIDTH, TOOLBAR_WIDTH, TreeAddress, path_closed_at,
     set_path_closed, style_at, style_at_mut,
 };
 use crate::model::{DEFAULT_STROKE_WIDTH, Rgba8, StrokeStyle, Style};
@@ -179,13 +181,13 @@ struct StylePanelState {
     fill_enabled: bool,
     stroke_enabled: bool,
     stroke_width: f32,
-    /// Whether the selected path is closed.
+    /// Whether the selected node's paths are closed.
     closed: bool,
-    /// Whether the selection has a style the panel can edit. Layers and empty
-    /// selections do not.
+    /// Whether the selection has a style the panel can edit. Empty selections
+    /// do not.
     editable: bool,
     /// The selection the panel currently mirrors; used to detect changes.
-    synced: Option<PathAddress>,
+    synced: Option<TreeAddress>,
     /// Set when the panel has edits that still need writing to the document.
     dirty: bool,
 }
@@ -346,12 +348,12 @@ fn spawn_panel(mut commands: Commands) {
         .with_children(|panel| {
             spawn_color_group(panel, ColorTarget::Fill);
             spawn_color_group(panel, ColorTarget::Stroke);
-            spawn_path_group(panel);
+            spawn_shape_group(panel);
         });
 }
 
-/// A narrow column holding path-shaped options.
-fn spawn_path_group(parent: &mut ChildSpawnerCommands) {
+/// A narrow column holding shape-level options.
+fn spawn_shape_group(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn(Node {
             flex_direction: FlexDirection::Column,
@@ -361,7 +363,7 @@ fn spawn_path_group(parent: &mut ChildSpawnerCommands) {
         })
         .with_children(|group| {
             group.spawn((
-                Text::new("Path"),
+                Text::new("Shape"),
                 TextFont::from_font_size(13.0),
                 TextColor(theme::TEXT),
                 Node {
@@ -563,7 +565,8 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
 // Behaviour
 // ---------------------------------------------------------------------------
 
-/// Mirrors the selected path's style into the panel when the selection changes.
+/// Mirrors the selected shape's style into the panel when the selection
+/// changes.
 fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelState>) {
     if panel.synced == editor.selected {
         return;
@@ -580,7 +583,7 @@ fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelSta
     };
     panel.closed = path_closed_at(&editor.document, address).unwrap_or(false);
     let Some(style) = style_at(&editor.document, address) else {
-        // A layer (or another node without a style) has nothing to paint.
+        // A node that no longer exists has nothing to paint.
         panel.fill_enabled = false;
         panel.stroke_enabled = false;
         panel.closed = false;
@@ -661,7 +664,7 @@ fn handle_toggles(
     }
 }
 
-/// Closes or opens the selected path from the checkbox.
+/// Closes or opens the selected shape's paths from the checkbox.
 fn handle_closed_checkbox(
     checkboxes: Query<&Interaction, (With<ClosedCheckbox>, Changed<Interaction>)>,
     mut panel: ResMut<StylePanelState>,
@@ -677,7 +680,8 @@ fn handle_closed_checkbox(
     }
 }
 
-/// Writes pending panel edits into the selected path's style and closed state.
+/// Writes pending panel edits into the selected shape's style and closed
+/// state.
 fn apply_edits(mut editor: ResMut<EditorState>, mut panel: ResMut<StylePanelState>) {
     if !panel.dirty {
         return;
@@ -776,8 +780,7 @@ fn update_visuals(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::PathAddress;
-    use crate::model::{ClipGroup, Document, Item, Layer, Path, PathItem};
+    use crate::model::{Document, FORMAT_VERSION, Path, Shape};
 
     #[test]
     fn slider_positions_map_to_values() {
@@ -828,39 +831,30 @@ mod tests {
     }
 
     #[test]
-    fn style_accessors_reach_items_and_clips() {
+    fn style_accessors_reach_a_shape_and_its_paths() {
         let mut document = Document {
-            version: 1,
-            layers: vec![Layer {
+            version: FORMAT_VERSION,
+            shapes: vec![Shape {
                 name: String::new(),
-                z: 0.0,
-                items: vec![
-                    Item::Path(PathItem {
-                        path: Path::new([0.0, 0.0]).line_to([10.0, 10.0]),
-                        style: Style::default(),
-                    }),
-                    Item::Clip(ClipGroup {
-                        clip: Path::new([0.0, 0.0]).line_to([5.0, 5.0]),
-                        style: Style::default(),
-                        targets: Vec::new(),
-                    }),
+                paths: vec![
+                    Path::new([0.0, 0.0]).line_to([10.0, 10.0]),
+                    Path::new([0.0, 0.0]).line_to([5.0, 5.0]),
                 ],
+                ..default()
             }],
         };
 
-        let item = PathAddress::Item {
-            layer: 0,
-            items: vec![0],
+        let shape = TreeAddress::Shape { shapes: vec![0] };
+        let path = TreeAddress::Path {
+            shapes: vec![0],
+            path: 1,
         };
-        let clip = PathAddress::Clip {
-            layer: 0,
-            items: vec![1],
-        };
-        assert_eq!(style_at(&document, &item), Some(&Style::default()));
+        assert_eq!(style_at(&document, &shape), Some(&Style::default()));
 
-        style_at_mut(&mut document, &clip).unwrap().fill = Some(Rgba8::rgb(9, 9, 9));
+        // A path address resolves to its owning shape's style.
+        style_at_mut(&mut document, &path).unwrap().fill = Some(Rgba8::rgb(9, 9, 9));
         assert_eq!(
-            style_at(&document, &clip).unwrap().fill,
+            style_at(&document, &shape).unwrap().fill,
             Some(Rgba8::rgb(9, 9, 9))
         );
     }

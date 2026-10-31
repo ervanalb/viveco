@@ -27,6 +27,12 @@ pub const ACCENT_FAINT: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0x26);
 /// Accent used for selected row and active button backgrounds.
 pub const ACCENT_SELECTED: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0x59);
 
+/// Background of a tree row that would receive the dragged node.
+///
+/// Stronger than [`ACCENT_FAINT`] and [`ACCENT_SELECTED`] so a drop target is
+/// unmistakable next to ordinary hover feedback.
+pub const DROP_TARGET: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0x80);
+
 /// Stronger accent used for filled slider tracks.
 pub const ACCENT_STRONG: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0xc0);
 

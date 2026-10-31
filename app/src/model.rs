@@ -1,9 +1,14 @@
 //! Serializable vector-art document model.
 //!
-//! The document is a stack of [`Layer`]s ordered by a Z coordinate. Each layer
-//! holds zero or more [`Item`]s: plain [`PathItem`]s or [`ClipGroup`]s. Paths are
-//! built from [`Segment`]s whose Bézier control points are optional, may be open
-//! or closed, and may be filled and/or stroked with a solid color.
+//! A document is a stack of [`Shape`]s ordered by a Z coordinate. A shape owns
+//! zero or more [`Path`]s, which are filled together as a single compound path
+//! (so holes can be made by giving inner contours the opposite winding), and
+//! zero or more child shapes. Children are clipped to the interior of their
+//! parent and are painted above the parent's fill but beneath its stroke.
+//!
+//! Z only orders shapes among their siblings. Moving a shape therefore carries
+//! its entire subtree with it and never disturbs the parent/child clipping
+//! relationship.
 //!
 //! Coordinates are plain document units with the origin at the top-left and Y
 //! pointing down (the usual vector-graphics convention).
@@ -17,7 +22,7 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Version written to and expected by this build of the format.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// A 2D point/vector in document space.
 pub type Point = [f32; 2];
@@ -122,7 +127,7 @@ pub struct Document {
     pub version: u32,
 
     #[serde(default)]
-    pub layers: Vec<Layer>,
+    pub shapes: Vec<Shape>,
 }
 
 fn default_version() -> u32 {
@@ -139,40 +144,32 @@ impl Document {
     pub fn new() -> Self {
         Self {
             version: FORMAT_VERSION,
-            layers: Vec::new(),
+            shapes: Vec::new(),
         }
     }
 
-    /// Indices of [`Self::layers`] in painting order (ascending Z, stable for
-    /// equal Z). The first index is painted furthest back.
-    pub fn layer_indices_in_paint_order(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = (0..self.layers.len()).collect();
-        indices.sort_by(|&a, &b| {
-            self.layers[a]
-                .z
-                .partial_cmp(&self.layers[b].z)
-                .unwrap_or(Ordering::Equal)
-        });
-        indices
+    /// Indices of the top-level [`Self::shapes`] in painting order (ascending
+    /// Z, stable for equal Z). The first index is painted furthest back.
+    pub fn shape_indices_in_paint_order(&self) -> Vec<usize> {
+        indices_in_paint_order(&self.shapes)
     }
 
-    /// Layers in painting order (ascending Z, stable for equal Z).
-    pub fn sorted_layers(&self) -> Vec<&Layer> {
-        self.layer_indices_in_paint_order()
+    /// Top-level shapes in painting order (ascending Z, stable for equal Z).
+    pub fn sorted_shapes(&self) -> Vec<&Shape> {
+        self.shape_indices_in_paint_order()
             .into_iter()
-            .map(|index| &self.layers[index])
+            .map(|index| &self.shapes[index])
             .collect()
     }
 
-    /// Axis-aligned bounds of all geometry in the document.
+    /// Axis-aligned bounds of all geometry in the document, including the
+    /// geometry of nested children.
     ///
     /// Bézier control points are included, so the result is a conservative bound.
     pub fn bounds(&self) -> Option<Bounds> {
         let mut acc = BoundsAccumulator::default();
-        for layer in &self.layers {
-            for item in &layer.items {
-                acc.add_item(item);
-            }
+        for shape in &self.shapes {
+            acc.add_shape(shape);
         }
         acc.finish()
     }
@@ -199,52 +196,69 @@ impl Document {
 }
 
 // ---------------------------------------------------------------------------
-// Layers and items
+// Shapes
 // ---------------------------------------------------------------------------
 
-/// A group of items drawn together at a given depth.
+/// A painted shape: a compound path plus optionally clipped child shapes.
+///
+/// The shape's [`paths`](Self::paths) are combined into a single compound path
+/// and filled with a non-zero winding rule, so contours wound opposite to the
+/// outer one become holes. The same combined path both paints the fill and
+/// clips the shape's [`children`](Self::children). The stroke is drawn on the
+/// combined path after the children, so it sits above them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Layer {
-    /// Optional human-readable name, shown in the editor's layer tree.
+pub struct Shape {
+    /// Optional human-readable name, shown in the editor's shape tree.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
 
-    /// Z order. Lower values are painted first (further back).
+    /// Z order among siblings. Lower values are painted first (further back).
     #[serde(default)]
     pub z: f32,
 
     #[serde(default)]
-    pub items: Vec<Item>,
-}
-
-/// Something that can be drawn inside a layer (or inside a clip group).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Item {
-    Path(PathItem),
-    Clip(ClipGroup),
-}
-
-/// A path plus the paint applied to it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PathItem {
-    pub path: Path,
-    #[serde(default)]
     pub style: Style,
+
+    /// Contours combined into this shape's compound path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<Path>,
+
+    /// Child shapes, clipped to this shape's interior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<Shape>,
 }
 
-/// A set of target items clipped to the interior of `clip`.
-///
-/// The clip path is itself painted: its fill is drawn beneath the targets and
-/// its stroke is drawn above them. Targets may themselves be clip groups,
-/// allowing nested clipping.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ClipGroup {
-    pub clip: Path,
-    #[serde(default)]
-    pub style: Style,
-    #[serde(default)]
-    pub targets: Vec<Item>,
+impl Shape {
+    /// Indices of [`Self::children`] in painting order (ascending Z, stable for
+    /// equal Z).
+    pub fn child_indices_in_paint_order(&self) -> Vec<usize> {
+        indices_in_paint_order(&self.children)
+    }
+
+    /// Child shapes in painting order (ascending Z, stable for equal Z).
+    pub fn sorted_children(&self) -> Vec<&Shape> {
+        self.child_indices_in_paint_order()
+            .into_iter()
+            .map(|index| &self.children[index])
+            .collect()
+    }
+
+    /// True when the shape has neither paths nor children.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.children.is_empty()
+    }
+}
+
+/// Indices of `shapes` in painting order (ascending Z, stable for equal Z).
+pub fn indices_in_paint_order(shapes: &[Shape]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..shapes.len()).collect();
+    indices.sort_by(|&a, &b| {
+        shapes[a]
+            .z
+            .partial_cmp(&shapes[b].z)
+            .unwrap_or(Ordering::Equal)
+    });
+    indices
 }
 
 // ---------------------------------------------------------------------------
@@ -260,7 +274,7 @@ pub struct ClipGroup {
 /// styles when you need an open outline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Path {
-    /// Optional human-readable name, shown in the editor's layer tree.
+    /// Optional human-readable name, shown in the editor's shape tree.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
 
@@ -288,7 +302,7 @@ impl Path {
         }
     }
 
-    /// Sets the human-readable name used by the editor's layer tree.
+    /// Sets the human-readable name used by the editor's shape tree.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
@@ -401,7 +415,7 @@ impl Segment {
 /// Stroke width used for new and default strokes, in document units.
 pub const DEFAULT_STROKE_WIDTH: f32 = 2.0;
 
-/// Solid fills and/or strokes applied to a path.
+/// Solid fills and/or strokes applied to a shape.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Style {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -481,15 +495,12 @@ impl BoundsAccumulator {
         }
     }
 
-    fn add_item(&mut self, item: &Item) {
-        match item {
-            Item::Path(path_item) => self.add_path(&path_item.path),
-            Item::Clip(clip) => {
-                self.add_path(&clip.clip);
-                for target in &clip.targets {
-                    self.add_item(target);
-                }
-            }
+    fn add_shape(&mut self, shape: &Shape) {
+        for path in &shape.paths {
+            self.add_path(path);
+        }
+        for child in &shape.children {
+            self.add_shape(child);
         }
     }
 
@@ -505,25 +516,34 @@ impl BoundsAccumulator {
 mod tests {
     use super::*;
 
+    fn sample_path() -> Path {
+        Path::new([10.0, 20.0])
+            .line_to([30.0, 20.0])
+            .cubic_to([40.0, 25.0], [50.0, 35.0], [60.0, 40.0])
+            .closed()
+    }
+
     fn sample_document() -> Document {
         Document {
             version: FORMAT_VERSION,
-            layers: vec![Layer {
-                name: String::new(),
+            shapes: vec![Shape {
+                name: "Outer".to_string(),
                 z: 5.0,
-                items: vec![Item::Path(PathItem {
-                    path: Path::new([10.0, 20.0])
-                        .line_to([30.0, 20.0])
-                        .cubic_to([40.0, 25.0], [50.0, 35.0], [60.0, 40.0])
-                        .closed(),
-                    style: Style {
-                        fill: Some(Rgba8::rgb(0xb3, 0xb3, 0xb3)),
-                        stroke: Some(StrokeStyle {
-                            color: Rgba8::rgba(0, 0, 0, 128),
-                            width: 2.0,
-                        }),
-                    },
-                })],
+                style: Style {
+                    fill: Some(Rgba8::rgb(0xb3, 0xb3, 0xb3)),
+                    stroke: Some(StrokeStyle {
+                        color: Rgba8::rgba(0, 0, 0, 128),
+                        width: 2.0,
+                    }),
+                },
+                paths: vec![sample_path()],
+                children: vec![Shape {
+                    name: "Child".to_string(),
+                    z: 1.0,
+                    style: Style::default(),
+                    paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0])],
+                    children: Vec::new(),
+                }],
             }],
         }
     }
@@ -570,54 +590,72 @@ mod tests {
     }
 
     #[test]
-    fn layers_are_sorted_by_z() {
-        let mut doc = Document::new();
-        doc.layers.push(Layer {
-            name: String::new(),
-            z: 10.0,
-            items: vec![],
-        });
-        doc.layers.push(Layer {
-            name: String::new(),
-            z: -1.0,
-            items: vec![],
-        });
-        doc.layers.push(Layer {
-            name: String::new(),
-            z: 2.0,
-            items: vec![],
-        });
+    fn siblings_are_sorted_by_z() {
+        let doc = Document {
+            version: FORMAT_VERSION,
+            shapes: vec![
+                Shape {
+                    z: 10.0,
+                    ..Default::default()
+                },
+                Shape {
+                    z: -1.0,
+                    ..Default::default()
+                },
+                Shape {
+                    z: 2.0,
+                    ..Default::default()
+                },
+            ],
+        };
 
-        let zs: Vec<f32> = doc.sorted_layers().iter().map(|layer| layer.z).collect();
+        let zs: Vec<f32> = doc.sorted_shapes().iter().map(|shape| shape.z).collect();
         assert_eq!(zs, vec![-1.0, 2.0, 10.0]);
+
+        let parent = Shape {
+            z: 0.0,
+            children: vec![
+                Shape {
+                    z: 3.0,
+                    ..Default::default()
+                },
+                Shape {
+                    z: 0.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let child_zs: Vec<f32> = parent
+            .sorted_children()
+            .iter()
+            .map(|child| child.z)
+            .collect();
+        assert_eq!(child_zs, vec![0.0, 3.0]);
     }
 
     #[test]
-    fn bounds_include_clip_geometry_and_controls() {
+    fn bounds_include_nested_shapes_and_controls() {
         let doc = Document {
             version: FORMAT_VERSION,
-            layers: vec![Layer {
-                name: String::new(),
-                z: 0.0,
-                items: vec![
-                    Item::Path(PathItem {
-                        path: Path::new([0.0, 0.0]).line_to([10.0, 10.0]),
-                        style: Style::default(),
-                    }),
-                    Item::Clip(ClipGroup {
-                        clip: Path::new([-5.0, -5.0]).line_to([20.0, 20.0]),
-                        style: Style::default(),
-                        targets: vec![Item::Path(PathItem {
-                            path: Path::new([100.0, 100.0]).cubic_to(
-                                [110.0, 120.0],
-                                [130.0, 140.0],
-                                [150.0, 150.0],
-                            ),
-                            style: Style::default(),
-                        })],
-                    }),
-                ],
-            }],
+            shapes: vec![
+                Shape {
+                    paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 10.0])],
+                    ..Default::default()
+                },
+                Shape {
+                    paths: vec![Path::new([-5.0, -5.0]).line_to([20.0, 20.0])],
+                    children: vec![Shape {
+                        paths: vec![Path::new([100.0, 100.0]).cubic_to(
+                            [110.0, 120.0],
+                            [130.0, 140.0],
+                            [150.0, 150.0],
+                        )],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
         };
 
         let bounds = doc.bounds().unwrap();

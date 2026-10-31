@@ -1,4 +1,4 @@
-//! Loads the example document and displays it with Vello.
+//! Starts with a blank document and displays it with Vello.
 //!
 //! `model` owns the document format, `render` turns it into a Vello scene, and
 //! `editor` adds selection and control-point editing. This binary only wires
@@ -16,7 +16,7 @@ use vector_anim_app::dialogs::DialogPlugin;
 use vector_anim_app::editor::{
     DocumentBounds, DocumentScene, EditorPlugin, EditorState, fit_transform,
 };
-use vector_anim_app::file::{DocumentFile, FilePlugin, initial_path};
+use vector_anim_app::file::{DocumentFile, FilePlugin, bounds_for};
 use vector_anim_app::history::{History, HistoryPlugin};
 use vector_anim_app::menu_bar::MenuBarPlugin;
 use vector_anim_app::model::Document;
@@ -41,7 +41,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(VelloPlugin::default())
-        .insert_resource(DocumentFile::new(initial_path()))
+        .insert_resource(DocumentFile::untitled())
         .add_plugins(EditorPlugin)
         .add_plugins(SidebarPlugin)
         .add_plugins(StylePanelPlugin)
@@ -55,24 +55,9 @@ fn main() {
         .run();
 }
 
-fn setup(
-    mut commands: Commands,
-    window: Query<&Window, With<PrimaryWindow>>,
-    file: Res<DocumentFile>,
-) {
-    let document = match &file.path {
-        Some(path) => {
-            let document = Document::load_from_file(path)
-                .unwrap_or_else(|err| panic!("failed to load {path:?}: {err}"));
-            println!("loaded {path:?}: {} layers", document.layers.len());
-            document
-        }
-        None => Document::new(),
-    };
-
-    let bounds = document
-        .bounds()
-        .expect("the example document contains no geometry");
+fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
+    let document = Document::new();
+    let bounds = bounds_for(&document);
     let scene = build_scene(&document);
 
     let (viewport_width, viewport_height) = window

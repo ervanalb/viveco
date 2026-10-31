@@ -1,16 +1,24 @@
 //! Right-hand object tree.
 //!
-//! Shows the document hierarchy (layers, paths, and clip groups) and lets the
-//! user select, reorder, reparent, and rename nodes. Selection lives in
-//! [`EditorState`], the same resource the canvas uses, so the tree and the
-//! canvas stay in sync.
+//! Shows the document hierarchy (shapes, their paths, and nested child shapes)
+//! and lets the user select, reorder, reparent, and rename nodes. Selection
+//! lives in [`EditorState`], the same resource the canvas uses, so the tree and
+//! the canvas stay in sync.
 //!
 //! Rows are ordinary [`Button`] entities, with a [`RelativeCursorPosition`] used
 //! to find the row under the cursor. Insertion points are explicit slot nodes:
-//! one above the first row of each list and one below every row. Because a
-//! node's children live inside its container, the slot below a parent falls
-//! below its whole subtree. Slots are indented to their depth so they line up
-//! with the rows they sit between.
+//! one above the first row of each sibling list and one below every shape.
+//! Because a shape's contents live inside its container, the slot below a shape
+//! falls below its whole subtree. Slots are indented to their depth so they
+//! line up with the rows they sit between.
+//!
+//! Sibling rows are listed in paint order, so a row below its siblings is drawn
+//! on top of them and a parent's row sits above the rows of its children.
+//!
+//! Only sibling shapes can be reordered, since Z only orders shapes among their
+//! siblings. Paths are shown under their owning shape: slots between path rows
+//! reorder them within that shape, and dropping one on another shape's row
+//! moves it into that shape.
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
@@ -19,11 +27,11 @@ use bevy::ui::{FocusPolicy, RelativeCursorPosition};
 use bevy::window::PrimaryWindow;
 
 use crate::editor::{
-    CanvasInput, EditorState, MENU_BAR_HEIGHT, PathAddress, SIDEBAR_WIDTH, address_is_inside,
-    cancel_rename, commit_rename, move_item_into, move_item_near, move_item_to_layer, move_layer,
-    name_at,
+    CanvasInput, EditorState, MENU_BAR_HEIGHT, SIDEBAR_WIDTH, TreeAddress, address_is_inside,
+    cancel_rename, commit_rename, move_path_into_shape, move_path_near, move_shape_into,
+    move_shape_near, name_at,
 };
-use crate::model::{Document, Item, Layer, Path};
+use crate::model::{Document, Path, Shape, indices_in_paint_order};
 use crate::theme;
 
 /// Unselected rows are transparent.
@@ -56,7 +64,7 @@ const ROW_PADDING_RIGHT: f32 = 8.0;
 /// Extra left inset added per tree level, matching the children's indent.
 const ROW_INDENT: f32 = 14.0;
 
-/// Left inset of a row or drop line at `depth` levels below a layer.
+/// Left inset of a row or drop line at `depth` tree levels.
 fn indent_for_depth(depth: usize) -> f32 {
     ROW_PADDING_LEFT + depth as f32 * ROW_INDENT
 }
@@ -104,58 +112,56 @@ struct SidebarTree;
 /// A clickable node addressing one node in the document.
 #[derive(Component)]
 struct TreeRow {
-    address: PathAddress,
+    address: TreeAddress,
 }
 
 /// The text node of a row, kept up to date while its name is edited.
 #[derive(Component)]
 struct RowLabel {
-    address: PathAddress,
+    address: TreeAddress,
 }
 
 /// An invisible hit area marking an insertion point between rows.
 #[derive(Component)]
 struct DropSlot {
-    target: PathAddress,
+    target: TreeAddress,
     kind: DropKind,
 }
 
 /// The visible line inside a [`DropSlot`].
 #[derive(Component)]
 struct SlotLine {
-    target: PathAddress,
+    target: TreeAddress,
     kind: DropKind,
 }
 
 /// Where a dragged row would be dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DropKind {
-    /// Above `target`, between it and the row before it.
+    /// Above `target`, between it and the shape before it.
     Before,
     /// Below `target`, and below all of its children.
     After,
-    /// Inside `target` (parenting for items).
+    /// Inside `target`: a child shape, or a path moved into a shape.
     Into,
-    /// Appended to the end of a layer.
-    LayerAppend,
 }
 
 /// Pointer state for dragging tree rows.
 ///
 /// Rows are rebuilt whenever the selection changes, so the drag lives in a
-/// resource keyed by [`PathAddress`] rather than on an entity.
+/// resource keyed by [`TreeAddress`] rather than on an entity.
 #[derive(Resource, Default)]
 struct TreeDrag {
     /// The row the press started on.
-    source: Option<PathAddress>,
+    source: Option<TreeAddress>,
     /// Screen position of the press, used to detect an actual drag.
     origin: Vec2,
     /// Set once the pointer has moved far enough to count as a drag.
     dragging: bool,
     /// The row and zone currently under the pointer.
-    hovered: Option<(PathAddress, DropKind)>,
+    hovered: Option<(TreeAddress, DropKind)>,
     /// The last press, for double-click detection.
-    last_click: Option<(f64, Vec2, PathAddress)>,
+    last_click: Option<(f64, Vec2, TreeAddress)>,
 }
 
 fn spawn_sidebar(mut commands: Commands) {
@@ -190,11 +196,6 @@ fn spawn_sidebar(mut commands: Commands) {
                 },
                 SidebarTree,
             ));
-            panel.spawn((
-                Text::new("Drag to reorder - Double-click to rename - Delete to remove"),
-                TextFont::from_font_size(11.0),
-                TextColor(theme::MUTED),
-            ));
         });
 }
 
@@ -207,7 +208,7 @@ fn rebuild_tree(
     mut commands: Commands,
     editor: Res<EditorState>,
     tree: Query<Entity, With<SidebarTree>>,
-    mut last: Local<Option<(u64, Option<PathAddress>, Option<PathAddress>)>>,
+    mut last: Local<Option<(u64, Option<TreeAddress>, Option<TreeAddress>)>>,
 ) {
     let renaming = editor
         .renaming
@@ -229,81 +230,42 @@ fn rebuild_tree(
 }
 
 fn spawn_rows(parent: &mut ChildSpawnerCommands, editor: &EditorState) {
-    // Topmost layer first, matching the way the picture stacks on screen.
-    let layers: Vec<usize> = editor
-        .document
-        .layer_indices_in_paint_order()
-        .into_iter()
-        .rev()
-        .collect();
-    spawn_layer_list(
+    // Bottom-most shape first, so each row lists what is drawn above it below.
+    spawn_shape_list(
         parent,
-        &editor.document,
-        &layers,
+        &editor.document.shapes,
+        &[],
         0,
         editor.selected.as_ref(),
     );
 }
 
-/// Spawns a list of layers with an insertion slot above the first and below
-/// every layer.
-fn spawn_layer_list(
-    parent: &mut ChildSpawnerCommands,
-    document: &Document,
-    layers: &[usize],
-    depth: usize,
-    selected: Option<&PathAddress>,
-) {
-    let Some(&first) = layers.first() else {
-        return;
-    };
-    spawn_slot(
-        parent,
-        PathAddress::Layer { layer: first },
-        DropKind::Before,
-        depth,
-    );
-
-    for &layer_index in layers {
-        let layer = &document.layers[layer_index];
-        let address = PathAddress::Layer { layer: layer_index };
-        let is_selected = selected == Some(&address);
-        spawn_container(
-            parent,
-            &layer_label(layer, layer_index),
-            depth,
-            address.clone(),
-            is_selected,
-            |container| {
-                spawn_item_list(
-                    container,
-                    &layer.items,
-                    layer_index,
-                    &[],
-                    depth + 1,
-                    selected,
-                );
-            },
-        );
-        spawn_slot(parent, address, DropKind::After, depth);
-    }
+/// The address of a child shape of the shape at `parents`.
+fn shape_address(parents: &[usize], index: usize) -> TreeAddress {
+    let mut shapes = parents.to_vec();
+    shapes.push(index);
+    TreeAddress::Shape { shapes }
 }
 
-/// Spawns a list of items with an insertion slot above the first and below
-/// every item.
+/// Spawns a sibling list of shapes with an insertion slot above the first and
+/// below every shape.
 ///
 /// The list is wrapped in a padded container so that the slot below a nested
-/// list's last item does not sit flush against the slot below the node that
+/// list's last shape does not sit flush against the slot below the shape that
 /// owns the list.
-fn spawn_item_list(
+///
+/// Rows are listed in paint order, so siblings further down the list are
+/// painted on top of the ones above them. A parent's row sits above its
+/// children's rows for the same reason: children paint over their parent.
+fn spawn_shape_list(
     parent: &mut ChildSpawnerCommands,
-    items: &[Item],
-    layer: usize,
+    shapes: &[Shape],
     parents: &[usize],
     depth: usize,
-    selected: Option<&PathAddress>,
+    selected: Option<&TreeAddress>,
 ) {
-    let Some(first_index) = items.len().checked_sub(1) else {
+    let indices = indices_in_paint_order(shapes);
+    let Some(&first) = indices.first() else {
         return;
     };
 
@@ -315,78 +277,81 @@ fn spawn_item_list(
             ..default()
         })
         .with_children(|list| {
-            let mut first_chain = parents.to_vec();
-            first_chain.push(first_index);
-            spawn_slot(
-                list,
-                item_address(layer, first_chain, &items[first_index]),
-                DropKind::Before,
-                depth,
-            );
+            spawn_slot(list, shape_address(parents, first), DropKind::Before, depth);
 
-            // Later items are painted on top, so list them first.
-            for (index, item) in items.iter().enumerate().rev() {
+            for &index in &indices {
+                let shape = &shapes[index];
                 let mut chain = parents.to_vec();
                 chain.push(index);
-                let address = item_address(layer, chain.clone(), item);
+                let address = TreeAddress::Shape {
+                    shapes: chain.clone(),
+                };
                 let is_selected = selected == Some(&address);
 
-                match item {
-                    Item::Path(path_item) => {
-                        spawn_container(
-                            list,
-                            &path_label(&path_item.path),
-                            depth,
-                            address.clone(),
-                            is_selected,
-                            |_| {},
-                        );
-                    }
-                    Item::Clip(group) => {
-                        spawn_container(
-                            list,
-                            &clip_label(&group.clip),
-                            depth,
-                            address.clone(),
-                            is_selected,
-                            |container| {
-                                spawn_item_list(
-                                    container,
-                                    &group.targets,
-                                    layer,
-                                    &chain,
-                                    depth + 1,
-                                    selected,
-                                );
-                            },
-                        );
-                    }
-                }
+                spawn_container(
+                    list,
+                    &shape_label(shape),
+                    depth,
+                    address.clone(),
+                    is_selected,
+                    |container| {
+                        // The shape's own paths come first, directly beneath
+                        // it. A slot above the first path and one below every
+                        // path reorder them (and move them between shapes).
+                        if !shape.paths.is_empty() {
+                            spawn_slot(
+                                container,
+                                TreeAddress::Path {
+                                    shapes: chain.clone(),
+                                    path: 0,
+                                },
+                                DropKind::Before,
+                                depth + 1,
+                            );
+                        }
+                        for path_index in 0..shape.paths.len() {
+                            let path_address = TreeAddress::Path {
+                                shapes: chain.clone(),
+                                path: path_index,
+                            };
+                            let path_selected = selected == Some(&path_address);
+                            spawn_row(
+                                container,
+                                &path_label(&shape.paths[path_index]),
+                                depth + 1,
+                                path_address.clone(),
+                                path_selected,
+                            );
+                            spawn_slot(container, path_address, DropKind::After, depth + 1);
+                        }
+                        // Then the child shapes, one level deeper.
+                        if !shape.children.is_empty() {
+                            spawn_shape_list(
+                                container,
+                                &shape.children,
+                                &chain,
+                                depth + 1,
+                                selected,
+                            );
+                        }
+                    },
+                );
 
                 spawn_slot(list, address, DropKind::After, depth);
             }
         });
 }
 
-/// The address of an item inside a layer.
-fn item_address(layer: usize, items: Vec<usize>, item: &Item) -> PathAddress {
-    if matches!(item, Item::Clip(_)) {
-        PathAddress::Clip { layer, items }
-    } else {
-        PathAddress::Item { layer, items }
-    }
-}
-
 /// Spawns one tree node: a selectable header row plus a nested container for
-/// its children.
+/// its contents.
 ///
-/// Grouping each node with its children means the parent's `After` slot, which
+/// Grouping each node with its contents means the parent's `After` slot, which
 /// is spawned by the surrounding list, lands below the whole subtree.
 fn spawn_container(
     parent: &mut ChildSpawnerCommands,
     label: &str,
     depth: usize,
-    address: PathAddress,
+    address: TreeAddress,
     selected: bool,
     children: impl FnOnce(&mut ChildSpawnerCommands),
 ) {
@@ -406,7 +371,7 @@ fn spawn_row(
     parent: &mut ChildSpawnerCommands,
     label: &str,
     depth: usize,
-    address: PathAddress,
+    address: TreeAddress,
     selected: bool,
 ) {
     parent
@@ -452,7 +417,7 @@ fn spawn_row(
 /// indicator appears; only the line inside it is toggled.
 fn spawn_slot(
     parent: &mut ChildSpawnerCommands,
-    target: PathAddress,
+    target: TreeAddress,
     kind: DropKind,
     depth: usize,
 ) {
@@ -642,50 +607,51 @@ fn update_drag_hover(
     }
 
     // Slots are separate nodes between the rows, so at most one is under the
-    // cursor and they never fight with a row for the pointer.
-    for (slot, relative) in &slots {
-        if relative.cursor_over() {
-            drag.hovered = resolve_drop(&source, &slot.target, slot.kind);
-            return;
-        }
+    // cursor. Adjacent slots can overlap near a list boundary where only one of
+    // them accepts the dragged kind, so skip the ones that refuse the drop
+    // instead of stopping there.
+    let resolved = slots
+        .iter()
+        .filter(|(_, relative)| relative.cursor_over())
+        .find_map(|(slot, _)| resolve_drop(&source, &slot.target, slot.kind));
+    if let Some(resolved) = resolved {
+        drag.hovered = Some(resolved);
+        return;
     }
 
     // Outside a slot, the row under the pointer means "inside it".
     for (row, relative) in &rows {
-        if !relative.cursor_over() {
-            continue;
+        if relative.cursor_over()
+            && let Some(resolved) = resolve_drop(&source, &row.address, DropKind::Into)
+        {
+            drag.hovered = Some(resolved);
+            return;
         }
-        let kind = if matches!(row.address, PathAddress::Layer { .. }) {
-            DropKind::LayerAppend
-        } else {
-            DropKind::Into
-        };
-        drag.hovered = resolve_drop(&source, &row.address, kind);
-        return;
     }
 }
 
 /// Checks that a drop is allowed, returning the resolved target.
 ///
-/// Layers only reorder among themselves. Items can be inserted between or
-/// inside other items, and appended to a layer. A node can never be dropped on
-/// itself or into its own subtree.
+/// Sibling shapes reorder among themselves or nest inside one another. Paths
+/// reorder within a shape, move next to a path in another shape, or move into a
+/// shape's row. A node can never be dropped on itself, into its own subtree, or
+/// into the shape that already owns it.
 fn resolve_drop(
-    source: &PathAddress,
-    target: &PathAddress,
+    source: &TreeAddress,
+    target: &TreeAddress,
     kind: DropKind,
-) -> Option<(PathAddress, DropKind)> {
-    let source_is_layer = matches!(source, PathAddress::Layer { .. });
-    let target_is_layer = matches!(target, PathAddress::Layer { .. });
-    let allowed = match kind {
-        DropKind::Before | DropKind::After => source_is_layer == target_is_layer,
-        DropKind::Into => !source_is_layer && !target_is_layer,
-        DropKind::LayerAppend => !source_is_layer && target_is_layer,
+) -> Option<(TreeAddress, DropKind)> {
+    let allowed = match (source, target) {
+        (TreeAddress::Shape { .. }, TreeAddress::Shape { .. }) => {
+            !address_is_inside(source, target)
+        }
+        (TreeAddress::Path { shapes, .. }, TreeAddress::Shape { shapes: owner }) => {
+            kind == DropKind::Into && shapes != owner
+        }
+        (TreeAddress::Path { .. }, TreeAddress::Path { .. }) => kind != DropKind::Into,
+        _ => false,
     };
-    if !allowed || source == target || address_is_inside(source, target) {
-        return None;
-    }
-    Some((target.clone(), kind))
+    (allowed && source != target).then(|| (target.clone(), kind))
 }
 
 /// Applies the drop when the mouse is released after a drag.
@@ -712,40 +678,28 @@ fn finish_drag(
 
 fn apply_drop(
     editor: &mut EditorState,
-    source: &PathAddress,
-    target: &PathAddress,
+    source: &TreeAddress,
+    target: &TreeAddress,
     kind: DropKind,
 ) {
     let moved = match (source, target) {
-        (
-            PathAddress::Layer {
-                layer: source_layer,
-            },
-            PathAddress::Layer {
-                layer: target_layer,
-            },
-        ) => {
-            if move_layer(
-                &mut editor.document,
-                *source_layer,
-                *target_layer,
-                kind == DropKind::After,
-            ) {
-                Some(source.clone())
-            } else {
-                None
-            }
+        (TreeAddress::Shape { .. }, TreeAddress::Shape { .. }) => match kind {
+            // Rows are listed in paint order, so a slot above the target means
+            // a lower Z (before it in the vector) and a slot below means a
+            // higher Z (after it).
+            DropKind::Before => move_shape_near(&mut editor.document, source, target, false),
+            DropKind::After => move_shape_near(&mut editor.document, source, target, true),
+            DropKind::Into => move_shape_into(&mut editor.document, source, target),
+        },
+        (TreeAddress::Path { .. }, TreeAddress::Shape { .. }) if kind == DropKind::Into => {
+            move_path_into_shape(&mut editor.document, source, target)
         }
-        (source, PathAddress::Layer { layer }) if !matches!(source, PathAddress::Layer { .. }) => {
-            move_item_to_layer(&mut editor.document, source, *layer)
-        }
-        (source, _) if !matches!(source, PathAddress::Layer { .. }) => match kind {
-            // Items are stored bottom-first but listed top-first, so inserting
-            // at the target's index puts the item above it in the tree.
-            DropKind::Before => move_item_near(&mut editor.document, source, target, true),
-            DropKind::After => move_item_near(&mut editor.document, source, target, false),
-            DropKind::Into => move_item_into(&mut editor.document, source, target),
-            DropKind::LayerAppend => None,
+        (TreeAddress::Path { .. }, TreeAddress::Path { .. }) => match kind {
+            // Path rows are listed in vector order, so "before" is the lower
+            // index and "after" is the higher one.
+            DropKind::Before => move_path_near(&mut editor.document, source, target, false),
+            DropKind::After => move_path_near(&mut editor.document, source, target, true),
+            DropKind::Into => None,
         },
         _ => None,
     };
@@ -783,11 +737,12 @@ fn paint_rows(
 ) {
     for (row, interaction, mut background) in &mut rows {
         let selected = editor.selected.as_ref() == Some(&row.address);
-        let inside = drag.hovered.as_ref().is_some_and(|(address, kind)| {
-            address == &row.address && matches!(kind, DropKind::Into | DropKind::LayerAppend)
-        });
+        let inside = drag
+            .hovered
+            .as_ref()
+            .is_some_and(|(address, kind)| address == &row.address && *kind == DropKind::Into);
         let color = if inside {
-            theme::ACCENT_FAINT
+            theme::DROP_TARGET
         } else if selected {
             theme::ACCENT_SELECTED
         } else if *interaction == Interaction::Hovered {
@@ -820,248 +775,296 @@ fn paint_rows(
 // Labels
 // ---------------------------------------------------------------------------
 
-fn row_name(document: &crate::model::Document, address: &PathAddress) -> String {
-    let fallback = match address {
-        PathAddress::Layer { layer } => format!("Layer {}", layer + 1),
-        PathAddress::Item { .. } => "Path".to_string(),
-        PathAddress::Clip { .. } => "Path (clip)".to_string(),
-    };
-    let name = name_at(document, address).unwrap_or_default();
+/// A display label, falling back to `fallback` when the name is empty.
+fn label(name: &str, fallback: &str) -> String {
     if name.is_empty() {
-        fallback
-    } else if matches!(address, PathAddress::Clip { .. }) {
-        format!("{name} (clip)")
+        fallback.to_string()
     } else {
         name.to_string()
     }
 }
 
+fn row_name(document: &Document, address: &TreeAddress) -> String {
+    let name = name_at(document, address).unwrap_or_default();
+    match address {
+        TreeAddress::Shape { .. } => label(name, "Shape"),
+        TreeAddress::Path { .. } => label(name, "Path"),
+    }
+}
+
+fn shape_label(shape: &Shape) -> String {
+    label(&shape.name, "Shape")
+}
+
 fn path_label(path: &Path) -> String {
-    if path.name.is_empty() {
-        "Path".to_string()
-    } else {
-        path.name.clone()
-    }
-}
-
-fn clip_label(clip: &Path) -> String {
-    format!("{} (clip)", path_label(clip))
-}
-
-fn layer_label(layer: &Layer, index: usize) -> String {
-    if layer.name.is_empty() {
-        format!("Layer {}", index + 1)
-    } else {
-        layer.name.clone()
-    }
+    label(&path.name, "Path")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipGroup, PathItem, Style};
+    use crate::model::FORMAT_VERSION;
 
-    fn named_line(name: &str) -> Path {
-        let mut path = Path::new([0.0, 0.0]).line_to([1.0, 0.0]);
-        path.name = name.into();
-        path
+    fn named_shape(name: &str, z: f32) -> Shape {
+        Shape {
+            name: name.into(),
+            z,
+            paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 0.0])],
+            ..default()
+        }
     }
 
-    fn named_path(name: &str) -> Item {
-        Item::Path(PathItem {
-            path: named_line(name),
-            style: Style::default(),
-        })
+    fn paths_shape(names: &[&str]) -> Shape {
+        Shape {
+            paths: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    let x = index as f32 * 20.0;
+                    Path::new([x, 0.0]).line_to([x + 10.0, 0.0]).named(*name)
+                })
+                .collect(),
+            ..default()
+        }
     }
 
-    fn names(items: &[Item]) -> Vec<String> {
-        items
-            .iter()
-            .map(|item| match item {
-                Item::Path(path_item) => path_item.path.name.clone(),
-                Item::Clip(group) => group.clip.name.clone(),
-            })
-            .collect()
+    fn path_names(shape: &Shape) -> Vec<String> {
+        shape.paths.iter().map(|path| path.name.clone()).collect()
     }
 
-    fn state(items: Vec<Item>) -> EditorState {
+    fn names(shapes: &[Shape]) -> Vec<String> {
+        shapes.iter().map(|shape| shape.name.clone()).collect()
+    }
+
+    fn state(shapes: Vec<Shape>) -> EditorState {
         EditorState::new(Document {
-            version: 1,
-            layers: vec![Layer {
-                name: "L0".into(),
-                z: 0.0,
-                items,
-            }],
+            version: FORMAT_VERSION,
+            shapes,
         })
     }
 
-    fn layer(index: usize) -> PathAddress {
-        PathAddress::Layer { layer: index }
-    }
-
-    fn item(chain: &[usize]) -> PathAddress {
-        PathAddress::Item {
-            layer: 0,
-            items: chain.to_vec(),
+    fn shape(chain: &[usize]) -> TreeAddress {
+        TreeAddress::Shape {
+            shapes: chain.to_vec(),
         }
     }
 
-    fn clip(chain: &[usize]) -> PathAddress {
-        PathAddress::Clip {
-            layer: 0,
-            items: chain.to_vec(),
+    fn path(chain: &[usize], index: usize) -> TreeAddress {
+        TreeAddress::Path {
+            shapes: chain.to_vec(),
+            path: index,
         }
     }
 
-    fn displayed_layers(editor: &EditorState) -> Vec<String> {
+    fn displayed_shapes(editor: &EditorState) -> Vec<String> {
         editor
             .document
-            .layer_indices_in_paint_order()
+            .shape_indices_in_paint_order()
             .into_iter()
-            .rev()
-            .map(|index| editor.document.layers[index].name.clone())
+            .map(|index| editor.document.shapes[index].name.clone())
             .collect()
     }
 
     #[test]
     fn a_before_slot_inserts_above_the_target() {
-        // Stored A, B, C; displayed C, B, A.
-        let mut editor = state(vec![named_path("A"), named_path("B"), named_path("C")]);
+        // Stored A, B, C; displayed A, B, C.
+        let mut editor = state(vec![
+            named_shape("A", 0.0),
+            named_shape("B", 1.0),
+            named_shape("C", 2.0),
+        ]);
 
-        // The top slot above B.
-        apply_drop(&mut editor, &item(&[0]), &item(&[1]), DropKind::Before);
+        // The slot above B takes C up to sit between A and B.
+        apply_drop(&mut editor, &shape(&[2]), &shape(&[1]), DropKind::Before);
 
-        assert_eq!(names(&editor.document.layers[0].items), ["B", "A", "C"]);
+        assert_eq!(names(&editor.document.shapes), ["A", "C", "B"]);
+        assert_eq!(displayed_shapes(&editor), ["A", "C", "B"]);
     }
 
     #[test]
     fn an_after_slot_inserts_below_the_target() {
-        let mut editor = state(vec![named_path("A"), named_path("B"), named_path("C")]);
+        let mut editor = state(vec![
+            named_shape("A", 0.0),
+            named_shape("B", 1.0),
+            named_shape("C", 2.0),
+        ]);
 
-        // The slot between C and B puts C below B.
-        apply_drop(&mut editor, &item(&[2]), &item(&[1]), DropKind::After);
+        // The slot below B takes A down to sit between B and C.
+        apply_drop(&mut editor, &shape(&[0]), &shape(&[1]), DropKind::After);
 
-        assert_eq!(names(&editor.document.layers[0].items), ["A", "C", "B"]);
+        assert_eq!(names(&editor.document.shapes), ["B", "A", "C"]);
+        assert_eq!(displayed_shapes(&editor), ["B", "A", "C"]);
     }
 
     #[test]
-    fn the_slot_below_the_last_item_lands_at_the_bottom() {
-        let mut editor = state(vec![named_path("A"), named_path("B"), named_path("C")]);
+    fn the_slot_below_the_last_shape_lands_at_the_bottom() {
+        let mut editor = state(vec![
+            named_shape("A", 0.0),
+            named_shape("B", 1.0),
+            named_shape("C", 2.0),
+        ]);
 
-        // Below the bottom row, which is A.
-        apply_drop(&mut editor, &item(&[2]), &item(&[0]), DropKind::After);
+        // Below the bottom row, which is C.
+        apply_drop(&mut editor, &shape(&[0]), &shape(&[2]), DropKind::After);
 
-        assert_eq!(names(&editor.document.layers[0].items), ["C", "A", "B"]);
+        assert_eq!(names(&editor.document.shapes), ["B", "C", "A"]);
+        assert_eq!(displayed_shapes(&editor), ["B", "C", "A"]);
     }
 
-    /// Layer 0 holds `X` then a clip `C` with targets `t0`, `t1`. Displayed
-    /// top to bottom: `C`, `t1`, `t0`, `X`.
+    #[test]
+    fn reordering_renormalizes_sibling_z() {
+        let mut editor = state(vec![
+            named_shape("A", 10.0),
+            named_shape("B", 20.0),
+            named_shape("C", 30.0),
+        ]);
+
+        apply_drop(&mut editor, &shape(&[0]), &shape(&[2]), DropKind::After);
+
+        let zs: Vec<f32> = editor.document.shapes.iter().map(|shape| shape.z).collect();
+        assert_eq!(zs, vec![0.0, 1.0, 2.0]);
+    }
+
+    /// Top-level `X` plus parent `P` with a single child `C`.
     fn nested_state() -> EditorState {
-        state(vec![
-            named_path("X"),
-            Item::Clip(ClipGroup {
-                clip: named_line("C"),
-                style: Style::default(),
-                targets: vec![named_path("t0"), named_path("t1")],
-            }),
-        ])
+        let mut parent = named_shape("P", 1.0);
+        parent.children = vec![named_shape("C", 0.0)];
+        state(vec![named_shape("X", 0.0), parent])
     }
 
     #[test]
-    fn the_slot_below_a_clip_stays_in_the_layer() {
+    fn a_child_can_be_moved_out_below_a_top_level_shape() {
         let mut editor = nested_state();
 
-        // The layer-level slot below the clip keeps X where it is.
-        apply_drop(&mut editor, &item(&[0]), &clip(&[1]), DropKind::After);
+        // The slot below X takes C out of P.
+        apply_drop(&mut editor, &shape(&[1, 0]), &shape(&[0]), DropKind::After);
 
-        let items = &editor.document.layers[0].items;
-        assert_eq!(names(items), ["X", "C"]);
-        let Item::Clip(group) = &items[1] else {
-            panic!("expected a clip group");
-        };
-        assert_eq!(names(&group.targets), ["t0", "t1"]);
+        assert_eq!(names(&editor.document.shapes), ["X", "C", "P"]);
+        assert!(editor.document.shapes[2].children.is_empty());
+        // The child keeps its geometry, it is just reparented.
+        assert_eq!(editor.document.shapes[0].paths.len(), 1);
     }
 
     #[test]
-    fn the_slot_below_a_clips_last_child_moves_the_item_inside() {
+    fn a_shape_can_be_dropped_inside_another() {
         let mut editor = nested_state();
 
-        // The slot inside the clip, below its last displayed child t0.
-        apply_drop(&mut editor, &item(&[0]), &item(&[1, 0]), DropKind::After);
+        // Dropping X onto P makes it P's second child.
+        apply_drop(&mut editor, &shape(&[0]), &shape(&[1]), DropKind::Into);
 
-        let items = &editor.document.layers[0].items;
-        assert_eq!(names(items), ["C"]);
-        let Item::Clip(group) = &items[0] else {
-            panic!("expected a clip group");
-        };
-        assert_eq!(names(&group.targets), ["X", "t0", "t1"]);
+        assert_eq!(names(&editor.document.shapes), ["P"]);
+        assert_eq!(names(&editor.document.shapes[0].children), ["C", "X"]);
+    }
+
+    #[test]
+    fn a_path_can_be_moved_into_another_shape() {
+        let mut editor = nested_state();
+
+        // `X` has one path at [0, 0]; move it into `P` at [1].
+        apply_drop(&mut editor, &path(&[0], 0), &shape(&[1]), DropKind::Into);
+
+        assert!(editor.document.shapes[0].paths.is_empty());
+        assert_eq!(editor.document.shapes[1].paths.len(), 2);
+        assert_eq!(editor.selected, Some(path(&[1], 1)));
+    }
+
+    #[test]
+    fn a_path_reorders_within_a_shape() {
+        let mut editor = state(vec![paths_shape(&["A", "B", "C"])]);
+
+        // The slot above B takes C up to sit between A and B.
+        apply_drop(
+            &mut editor,
+            &path(&[0], 2),
+            &path(&[0], 1),
+            DropKind::Before,
+        );
+
+        assert_eq!(path_names(&editor.document.shapes[0]), ["A", "C", "B"]);
+        assert_eq!(editor.selected, Some(path(&[0], 1)));
+    }
+
+    #[test]
+    fn a_path_can_be_dropped_between_another_shapes_paths() {
+        let mut editor = state(vec![paths_shape(&["A", "B"]), paths_shape(&["C"])]);
+
+        // The slot below C takes B out of the first shape and puts it below C.
+        apply_drop(&mut editor, &path(&[0], 1), &path(&[1], 0), DropKind::After);
+
+        assert_eq!(path_names(&editor.document.shapes[0]), ["A"]);
+        assert_eq!(path_names(&editor.document.shapes[1]), ["C", "B"]);
+        assert_eq!(editor.selected, Some(path(&[1], 1)));
     }
 
     #[test]
     fn slots_respect_the_dragged_kind() {
-        // Layers only reorder, so an item target is not a layer slot.
-        assert_eq!(resolve_drop(&layer(0), &item(&[0]), DropKind::After), None);
-        // Items do not insert between layers.
-        assert_eq!(resolve_drop(&item(&[0]), &layer(0), DropKind::After), None);
-        // ...but they do append to a layer.
+        // A path does not use a shape's sibling slots, but it does use slots
+        // between paths, including a path in another shape.
         assert_eq!(
-            resolve_drop(&item(&[0]), &layer(0), DropKind::LayerAppend),
-            Some((layer(0), DropKind::LayerAppend))
+            resolve_drop(&path(&[0], 0), &shape(&[1]), DropKind::Before),
+            None
         );
-        // And they can be placed inside other items.
         assert_eq!(
-            resolve_drop(&item(&[0]), &clip(&[1]), DropKind::Into),
-            Some((clip(&[1]), DropKind::Into))
+            resolve_drop(&path(&[0], 0), &shape(&[1]), DropKind::After),
+            None
         );
-        // Layers reorder against one another.
         assert_eq!(
-            resolve_drop(&layer(0), &layer(1), DropKind::Before),
-            Some((layer(1), DropKind::Before))
+            resolve_drop(&path(&[0], 0), &shape(&[1]), DropKind::Into),
+            Some((shape(&[1]), DropKind::Into))
+        );
+        assert_eq!(
+            resolve_drop(&path(&[0], 0), &path(&[1], 0), DropKind::Before),
+            Some((path(&[1], 0), DropKind::Before))
+        );
+        assert_eq!(
+            resolve_drop(&path(&[0], 0), &path(&[0], 1), DropKind::After),
+            Some((path(&[0], 1), DropKind::After))
+        );
+        assert_eq!(
+            resolve_drop(&path(&[0], 0), &path(&[0], 1), DropKind::Into),
+            None
+        );
+
+        // A path cannot move into the shape that already owns it.
+        assert_eq!(
+            resolve_drop(&path(&[0], 0), &shape(&[0]), DropKind::Into),
+            None
+        );
+
+        // A shape cannot be dropped onto a path target.
+        assert_eq!(
+            resolve_drop(&shape(&[0]), &path(&[1], 0), DropKind::Into),
+            None
+        );
+
+        // Sibling shapes reorder and nest freely.
+        assert_eq!(
+            resolve_drop(&shape(&[0]), &shape(&[1]), DropKind::Before),
+            Some((shape(&[1]), DropKind::Before))
+        );
+        assert_eq!(
+            resolve_drop(&shape(&[0]), &shape(&[1]), DropKind::Into),
+            Some((shape(&[1]), DropKind::Into))
         );
     }
 
     #[test]
     fn a_node_cannot_drop_on_itself_or_inside_itself() {
         assert_eq!(
-            resolve_drop(&clip(&[1]), &clip(&[1]), DropKind::Before),
+            resolve_drop(&shape(&[1]), &shape(&[1]), DropKind::Before),
             None
         );
         assert_eq!(
-            resolve_drop(&clip(&[1]), &item(&[1, 0]), DropKind::After),
+            resolve_drop(&shape(&[1]), &shape(&[1, 0]), DropKind::After),
             None
         );
         assert_eq!(
-            resolve_drop(&clip(&[1]), &item(&[1, 0]), DropKind::Into),
+            resolve_drop(&shape(&[1]), &shape(&[1, 0]), DropKind::Into),
             None
         );
         assert_eq!(
-            resolve_drop(&clip(&[1]), &item(&[0]), DropKind::Before),
-            Some((item(&[0]), DropKind::Before))
+            resolve_drop(&shape(&[1]), &shape(&[0]), DropKind::Before),
+            Some((shape(&[0]), DropKind::Before))
         );
-    }
-
-    #[test]
-    fn a_layer_moved_before_another_lands_above_it() {
-        let mut editor = EditorState::new(Document {
-            version: 1,
-            layers: vec![
-                Layer {
-                    name: "A".into(),
-                    z: 1.0,
-                    items: Vec::new(),
-                },
-                Layer {
-                    name: "B".into(),
-                    z: 0.0,
-                    items: Vec::new(),
-                },
-            ],
-        });
-        assert_eq!(displayed_layers(&editor), ["A", "B"]);
-
-        // B moves into the slot above A.
-        apply_drop(&mut editor, &layer(1), &layer(0), DropKind::Before);
-
-        assert_eq!(displayed_layers(&editor), ["B", "A"]);
     }
 }
