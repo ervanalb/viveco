@@ -16,20 +16,19 @@ use crate::editor::{
     BOTTOM_BAR_HEIGHT, EditorState, PathAddress, SIDEBAR_WIDTH, TOOLBAR_WIDTH, path_closed_at,
     set_path_closed, style_at, style_at_mut,
 };
-use crate::model::{Rgba8, StrokeStyle, Style};
+use crate::model::{DEFAULT_STROKE_WIDTH, Rgba8, StrokeStyle, Style};
+use crate::theme;
 
-const PANEL_BG: Color = Color::srgba_u8(0x12, 0x15, 0x1c, 0xf2);
-const TEXT_COLOR: Color = Color::srgb_u8(0xdd, 0xe1, 0xe8);
-const MUTED_COLOR: Color = Color::srgb_u8(0x8b, 0x93, 0xa1);
-const TRACK_BG: Color = Color::srgba_u8(0xff, 0xff, 0xff, 0x14);
-const FILL_ACCENT: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0xc0);
-const THUMB_COLOR: Color = Color::srgb_u8(0xff, 0xff, 0xff);
-const TOGGLE_ON: Color = Color::srgb_u8(0x4c, 0xc9, 0xf0);
 const TOGGLE_OFF: Color = Color::NONE;
-const TOGGLE_BORDER: Color = Color::srgba_u8(0xff, 0xff, 0xff, 0x40);
 
 /// Maximum stroke width exposed by the width slider, in document units.
 const MAX_STROKE_WIDTH: f32 = 24.0;
+
+/// Value range of the 8-bit color sliders.
+const CHANNEL_MAX: f32 = 255.0;
+
+/// Smallest slider movement that counts as an edit, in channel units.
+const DIRTY_EPSILON: f32 = 1e-3;
 
 pub struct StylePanelPlugin;
 
@@ -104,7 +103,7 @@ impl SliderKind {
     fn range(self) -> (f32, f32) {
         match self {
             Self::StrokeWidth => (0.0, MAX_STROKE_WIDTH),
-            _ => (0.0, 255.0),
+            _ => (0.0, CHANNEL_MAX),
         }
     }
 
@@ -134,10 +133,10 @@ struct ColorState {
 
 impl ColorState {
     const WHITE: Self = Self {
-        r: 255.0,
-        g: 255.0,
-        b: 255.0,
-        a: 255.0,
+        r: CHANNEL_MAX,
+        g: CHANNEL_MAX,
+        b: CHANNEL_MAX,
+        a: CHANNEL_MAX,
     };
 
     fn from_rgba8(color: Rgba8) -> Self {
@@ -160,16 +159,16 @@ impl ColorState {
 
     fn color(self) -> Color {
         Color::srgba(
-            self.r / 255.0,
-            self.g / 255.0,
-            self.b / 255.0,
-            self.a / 255.0,
+            self.r / CHANNEL_MAX,
+            self.g / CHANNEL_MAX,
+            self.b / CHANNEL_MAX,
+            self.a / CHANNEL_MAX,
         )
     }
 }
 
 fn channel_round(value: f32) -> u8 {
-    value.clamp(0.0, 255.0).round() as u8
+    value.clamp(0.0, CHANNEL_MAX).round() as u8
 }
 
 /// Editor-side state of the style panel for the current selection.
@@ -195,7 +194,7 @@ impl Default for StylePanelState {
             stroke: ColorState::WHITE,
             fill_enabled: false,
             stroke_enabled: false,
-            stroke_width: 2.0,
+            stroke_width: DEFAULT_STROKE_WIDTH,
             closed: false,
             synced: None,
             dirty: false,
@@ -243,7 +242,7 @@ impl StylePanelState {
     fn set_normalized(&mut self, kind: SliderKind, t: f32) {
         let (min, max) = kind.range();
         let value = min + t.clamp(0.0, 1.0) * (max - min);
-        if (self.value(kind) - value).abs() > 1e-3 {
+        if (self.value(kind) - value).abs() > DIRTY_EPSILON {
             self.set_value(kind, value);
             self.dirty = true;
         }
@@ -338,7 +337,7 @@ fn spawn_panel(mut commands: Commands) {
                 padding: UiRect::all(Val::Px(14.0)),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme::PANEL_BG),
         ))
         .with_children(|panel| {
             spawn_color_group(panel, ColorTarget::Fill);
@@ -360,7 +359,7 @@ fn spawn_path_group(parent: &mut ChildSpawnerCommands) {
             group.spawn((
                 Text::new("Path"),
                 TextFont::from_font_size(13.0),
-                TextColor(TEXT_COLOR),
+                TextColor(theme::TEXT),
                 Node {
                     height: Val::Px(24.0),
                     ..default()
@@ -386,14 +385,14 @@ fn spawn_path_group(parent: &mut ChildSpawnerCommands) {
                             ..default()
                         },
                         BackgroundColor(TOGGLE_OFF),
-                        BorderColor::all(TOGGLE_BORDER),
+                        BorderColor::all(theme::BORDER),
                         ClosedCheckbox,
                         Visual::ClosedMark,
                     ));
                     row.spawn((
                         Text::new("Closed"),
                         TextFont::from_font_size(13.0),
-                        TextColor(TEXT_COLOR),
+                        TextColor(theme::TEXT),
                     ));
                 });
         });
@@ -437,7 +436,7 @@ fn spawn_header(row: &mut ChildSpawnerCommands, target: ColorTarget) {
                 ..default()
             },
             BackgroundColor(TOGGLE_OFF),
-            BorderColor::all(TOGGLE_BORDER),
+            BorderColor::all(theme::BORDER),
             ToggleButton { target },
             Visual::ToggleMark(target),
         ));
@@ -445,7 +444,7 @@ fn spawn_header(row: &mut ChildSpawnerCommands, target: ColorTarget) {
         header.spawn((
             Text::new(target.label()),
             TextFont::from_font_size(13.0),
-            TextColor(TEXT_COLOR),
+            TextColor(theme::TEXT),
         ));
 
         // Push the swatch and hex code to the right edge of the column.
@@ -462,15 +461,15 @@ fn spawn_header(row: &mut ChildSpawnerCommands, target: ColorTarget) {
                 border_radius: BorderRadius::all(Val::Px(4.0)),
                 ..default()
             },
-            BackgroundColor(Color::WHITE),
-            BorderColor::all(TOGGLE_BORDER),
+            BackgroundColor(theme::WHITE),
+            BorderColor::all(theme::BORDER),
             Visual::Swatch(target),
         ));
 
         header.spawn((
             Text::new("#ffffff"),
             TextFont::from_font_size(12.0),
-            TextColor(MUTED_COLOR),
+            TextColor(theme::MUTED),
             Node {
                 width: Val::Px(72.0),
                 ..default()
@@ -492,7 +491,7 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
         slider.spawn((
             Text::new(kind.label()),
             TextFont::from_font_size(11.0),
-            TextColor(MUTED_COLOR),
+            TextColor(theme::MUTED),
             Node {
                 width: Val::Px(12.0),
                 ..default()
@@ -508,7 +507,7 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
                     border_radius: BorderRadius::all(Val::Px(6.0)),
                     ..default()
                 },
-                BackgroundColor(TRACK_BG),
+                BackgroundColor(theme::TRACK_BG),
                 RelativeCursorPosition::default(),
                 SliderTrack { kind },
             ))
@@ -523,7 +522,7 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
                         border_radius: BorderRadius::all(Val::Px(6.0)),
                         ..default()
                     },
-                    BackgroundColor(FILL_ACCENT),
+                    BackgroundColor(theme::ACCENT_STRONG),
                     Visual::SliderFill(kind),
                 ));
 
@@ -538,7 +537,7 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
                         ..default()
                     },
                     UiTransform::from_translation(Val2::percent(-50.0, -50.0)),
-                    BackgroundColor(THUMB_COLOR),
+                    BackgroundColor(theme::WHITE),
                     Visual::SliderThumb(kind),
                 ));
             });
@@ -546,7 +545,7 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
         slider.spawn((
             Text::new("0"),
             TextFont::from_font_size(11.0),
-            TextColor(TEXT_COLOR),
+            TextColor(theme::TEXT),
             Node {
                 width: Val::Px(30.0),
                 ..default()
@@ -722,24 +721,28 @@ fn update_visuals(
         match *visual {
             Visual::SliderFill(kind) => {
                 node.width = Val::Percent(panel.normalized(kind) * 100.0);
-                background.0 = FILL_ACCENT;
+                background.0 = theme::ACCENT_STRONG;
             }
             Visual::SliderThumb(kind) => {
                 node.left = Val::Percent(panel.normalized(kind) * 100.0);
-                background.0 = THUMB_COLOR;
+                background.0 = theme::WHITE;
             }
             Visual::Swatch(target) => {
                 background.0 = panel.color(target).color();
             }
             Visual::ToggleMark(target) => {
                 background.0 = if panel.enabled(target) {
-                    TOGGLE_ON
+                    theme::ACCENT
                 } else {
                     TOGGLE_OFF
                 };
             }
             Visual::ClosedMark => {
-                background.0 = if panel.closed { TOGGLE_ON } else { TOGGLE_OFF };
+                background.0 = if panel.closed {
+                    theme::ACCENT
+                } else {
+                    TOGGLE_OFF
+                };
             }
         }
     }
@@ -770,7 +773,7 @@ mod tests {
 
         // Out-of-range positions are clamped to the slider's bounds.
         panel.set_normalized(SliderKind::FillA, 2.0);
-        assert_eq!(panel.fill.a, 255.0);
+        assert_eq!(panel.fill.a, CHANNEL_MAX);
         panel.set_normalized(SliderKind::StrokeWidth, -1.0);
         assert_eq!(panel.stroke_width, 0.0);
 

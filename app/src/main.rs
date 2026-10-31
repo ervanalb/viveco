@@ -20,17 +20,19 @@ use vector_anim_app::model::Document;
 use vector_anim_app::render::build_scene;
 use vector_anim_app::sidebar::SidebarPlugin;
 use vector_anim_app::style_panel::StylePanelPlugin;
+use vector_anim_app::theme;
 use vector_anim_app::toolbar::ToolbarPlugin;
 
-const BACKGROUND: Color = Color::srgb_u8(0x1a, 0x1d, 0x24);
+/// Initial window size, in logical pixels.
+const WINDOW_SIZE: u32 = 900;
 
 fn main() {
     App::new()
-        .insert_resource(ClearColor(BACKGROUND))
+        .insert_resource(ClearColor(theme::CANVAS_BG))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Vector Anim".into(),
-                resolution: (900, 900).into(),
+                resolution: (WINDOW_SIZE, WINDOW_SIZE).into(),
                 ..default()
             }),
             ..default()
@@ -64,7 +66,7 @@ fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
     let (viewport_width, viewport_height) = window
         .single()
         .map(|window| (window.width(), window.height()))
-        .unwrap_or((900.0, 900.0));
+        .unwrap_or((WINDOW_SIZE as f32, WINDOW_SIZE as f32));
 
     // `VelloScene2d` has no intrinsic bounds, so provide them for picking.
     let aabb = Aabb::from_min_max(

@@ -4,19 +4,14 @@
 //! user select any paintable path. Selection lives in [`EditorState`], the same
 //! resource the canvas uses, so the tree and the canvas stay in sync.
 
-use std::cmp::Ordering;
-
 use bevy::prelude::*;
 
 use crate::editor::{EditorState, PathAddress, SIDEBAR_WIDTH};
 use crate::model::{Item, Layer, Path};
+use crate::theme;
 
-const PANEL_BG: Color = Color::srgba_u8(0x12, 0x15, 0x1c, 0xf2);
-const TEXT_COLOR: Color = Color::srgb_u8(0xdd, 0xe1, 0xe8);
-const HEADER_COLOR: Color = Color::srgb_u8(0x8b, 0x93, 0xa1);
+/// Unselected rows are transparent.
 const ROW_BG: Color = Color::NONE;
-const ROW_HOVER: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0x26);
-const ROW_SELECTED: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0x59);
 
 pub struct SidebarPlugin;
 
@@ -51,13 +46,13 @@ fn spawn_sidebar(mut commands: Commands) {
                 row_gap: Val::Px(8.0),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme::PANEL_BG),
         ))
         .with_children(|panel| {
             panel.spawn((
                 Text::new("Objects"),
                 TextFont::from_font_size(16.0),
-                TextColor(TEXT_COLOR),
+                TextColor(theme::TEXT),
             ));
             panel.spawn((
                 Node {
@@ -73,7 +68,7 @@ fn spawn_sidebar(mut commands: Commands) {
             panel.spawn((
                 Text::new("Click to select - Delete to remove"),
                 TextFont::from_font_size(11.0),
-                TextColor(HEADER_COLOR),
+                TextColor(theme::MUTED),
             ));
         });
 }
@@ -89,11 +84,15 @@ fn select_from_tree(
                 editor.select(Some(row.address.clone()));
             }
             Interaction::Hovered => {
-                background.0 = ROW_HOVER;
+                background.0 = theme::ACCENT_FAINT;
             }
             Interaction::None => {
                 let selected = editor.selected.as_ref() == Some(&row.address);
-                background.0 = if selected { ROW_SELECTED } else { ROW_BG };
+                background.0 = if selected {
+                    theme::ACCENT_SELECTED
+                } else {
+                    ROW_BG
+                };
             }
         }
     }
@@ -126,15 +125,10 @@ fn rebuild_tree(
 
 fn spawn_rows(parent: &mut ChildSpawnerCommands, editor: &EditorState) {
     // Topmost layer first, matching the way the picture stacks on screen.
-    let mut layers: Vec<usize> = (0..editor.document.layers.len()).collect();
-    layers.sort_by(|&a, &b| {
-        let left = &editor.document.layers[a];
-        let right = &editor.document.layers[b];
-        right.z.partial_cmp(&left.z).unwrap_or(Ordering::Equal)
-    });
+    let layers = editor.document.layer_indices_in_paint_order();
 
     let selected = editor.selected.as_ref();
-    for layer_index in layers {
+    for layer_index in layers.into_iter().rev() {
         let layer = &editor.document.layers[layer_index];
         spawn_header(parent, &layer_label(layer, layer_index), 0);
         spawn_items(parent, &layer.items, layer_index, &[], 1, selected);
@@ -210,14 +204,18 @@ fn spawn_row(
                 border_radius: BorderRadius::all(Val::Px(4.0)),
                 ..default()
             },
-            BackgroundColor(if selected { ROW_SELECTED } else { ROW_BG }),
+            BackgroundColor(if selected {
+                theme::ACCENT_SELECTED
+            } else {
+                ROW_BG
+            }),
             TreeRow { address },
         ))
         .with_children(|row| {
             row.spawn((
                 Text::new(label),
                 TextFont::from_font_size(13.0),
-                TextColor(TEXT_COLOR),
+                TextColor(theme::TEXT),
             ));
         });
 }
@@ -226,7 +224,7 @@ fn spawn_header(parent: &mut ChildSpawnerCommands, label: &str, depth: usize) {
     parent.spawn((
         Text::new(label),
         TextFont::from_font_size(12.0),
-        TextColor(HEADER_COLOR),
+        TextColor(theme::MUTED),
         Node {
             margin: UiRect::new(
                 Val::Px(8.0 + depth as f32 * 14.0),

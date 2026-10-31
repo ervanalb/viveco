@@ -143,11 +143,25 @@ impl Document {
         }
     }
 
+    /// Indices of [`Self::layers`] in painting order (ascending Z, stable for
+    /// equal Z). The first index is painted furthest back.
+    pub fn layer_indices_in_paint_order(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.layers.len()).collect();
+        indices.sort_by(|&a, &b| {
+            self.layers[a]
+                .z
+                .partial_cmp(&self.layers[b].z)
+                .unwrap_or(Ordering::Equal)
+        });
+        indices
+    }
+
     /// Layers in painting order (ascending Z, stable for equal Z).
     pub fn sorted_layers(&self) -> Vec<&Layer> {
-        let mut layers: Vec<&Layer> = self.layers.iter().collect();
-        layers.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
-        layers
+        self.layer_indices_in_paint_order()
+            .into_iter()
+            .map(|index| &self.layers[index])
+            .collect()
     }
 
     /// Axis-aligned bounds of all geometry in the document.
@@ -383,6 +397,9 @@ impl Segment {
 // ---------------------------------------------------------------------------
 // Paint
 // ---------------------------------------------------------------------------
+
+/// Stroke width used for new and default strokes, in document units.
+pub const DEFAULT_STROKE_WIDTH: f32 = 2.0;
 
 /// Solid fills and/or strokes applied to a path.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

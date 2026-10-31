@@ -8,12 +8,7 @@
 use bevy::prelude::*;
 
 use crate::editor::{EditorState, TOOLBAR_WIDTH, Tool, ToolState, finish_pen};
-
-const PANEL_BG: Color = Color::srgba_u8(0x12, 0x15, 0x1c, 0xf2);
-const TEXT_COLOR: Color = Color::srgb_u8(0xdd, 0xe1, 0xe8);
-const HEADER_COLOR: Color = Color::srgb_u8(0x8b, 0x93, 0xa1);
-const BUTTON_BG: Color = Color::srgba_u8(0xff, 0xff, 0xff, 0x0a);
-const BUTTON_ACTIVE: Color = Color::srgba_u8(0x4c, 0xc9, 0xf0, 0x59);
+use crate::theme;
 
 pub struct ToolbarPlugin;
 
@@ -43,13 +38,13 @@ fn spawn_toolbar(mut commands: Commands) {
                 row_gap: Val::Px(6.0),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme::PANEL_BG),
         ))
         .with_children(|panel| {
             panel.spawn((
                 Text::new("Tools"),
                 TextFont::from_font_size(10.0),
-                TextColor(HEADER_COLOR),
+                TextColor(theme::MUTED),
             ));
             spawn_tool_button(panel, Tool::Select, "Select");
             spawn_tool_button(panel, Tool::Pen, "Pen");
@@ -69,15 +64,15 @@ fn spawn_tool_button(parent: &mut ChildSpawnerCommands, tool: Tool, label: &str)
                 border_radius: BorderRadius::all(Val::Px(6.0)),
                 ..default()
             },
-            BackgroundColor(BUTTON_BG),
-            BorderColor::all(Color::srgba_u8(0xff, 0xff, 0xff, 0x1f)),
+            BackgroundColor(theme::BUTTON_BG),
+            BorderColor::all(theme::BORDER_FAINT),
             ToolButton(tool),
         ))
         .with_children(|button| {
             button.spawn((
                 Text::new(label),
                 TextFont::from_font_size(10.0),
-                TextColor(TEXT_COLOR),
+                TextColor(theme::TEXT),
             ));
         });
 }
@@ -126,9 +121,9 @@ fn update_tool_visuals(
 
     for (button, mut background) in &mut buttons {
         background.0 = if button.0 == tool.0 {
-            BUTTON_ACTIVE
+            theme::ACCENT_SELECTED
         } else {
-            BUTTON_BG
+            theme::BUTTON_BG
         };
     }
 }

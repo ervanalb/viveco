@@ -4,24 +4,22 @@
 //! done against the CPU-side [`Document`]: clicks are mapped from screen pixels
 //! into document space and tested against the path geometry in painting order.
 
-use std::cmp::Ordering;
-
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_vello::prelude::{VelloScene2d, vello};
 use vello::Scene;
 use vello::kurbo::{
-    Affine, Circle, Line as KurboLine, ParamCurveNearest, Point as KurboPoint, Shape,
-    Stroke as KurboStroke,
+    Affine, Circle, CubicBez, Line as KurboLine, ParamCurveNearest, PathSeg, Point as KurboPoint,
+    Shape, Stroke as KurboStroke,
 };
 use vello::peniko::{Color, Fill};
 
 use crate::model::{
-    Bounds, ClipGroup, Document, Item, Layer, Path, PathEnds, PathItem, Rgba8, Segment,
+    Bounds, DEFAULT_STROKE_WIDTH, Document, Item, Layer, Path, PathEnds, PathItem, Rgba8, Segment,
     StrokeStyle, Style,
 };
-use crate::render::{build_scene, path_to_bez_path};
+use crate::render::{build_scene, path_to_bez_path, to_kurbo_point};
 
 /// Width of the layer sidebar on the right, in screen pixels.
 ///
@@ -87,6 +85,50 @@ impl Default for Viewport {
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 32.0;
 
+/// Longest gap between two clicks that still counts as a double-click, in
+/// seconds.
+const DOUBLE_CLICK_SECONDS: f64 = 0.35;
+
+/// Largest cursor travel between the two clicks of a double-click, in pixels.
+const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
+
+/// Fraction of the available canvas area the fitted document occupies.
+const FIT_FRACTION: f32 = 0.9;
+
+/// Radius, in screen pixels, within which a click grabs a control point.
+const HANDLE_HIT_RADIUS: f32 = 8.0;
+
+/// Extra distance, in screen pixels, within which a click counts as hitting a
+/// path outline.
+const PATH_HIT_SLACK: f32 = 3.0;
+
+/// Distance, in screen pixels, a shift-drag must travel before it decides
+/// which segment to bend.
+const BEND_THRESHOLD: f32 = 3.0;
+
+/// Accuracy passed to kurbo's nearest-point search.
+const NEAREST_ACCURACY: f64 = 0.01;
+
+/// Multiplier applied per wheel notch when zooming.
+const ZOOM_STEP: f32 = 1.1;
+
+/// Control overlay dimensions, in screen pixels.
+const OVERLAY_OUTLINE_WIDTH: f32 = 2.0;
+const OVERLAY_ARM_WIDTH: f32 = 1.0;
+const OVERLAY_HANDLE_RADIUS: f32 = 4.0;
+const OVERLAY_SELECTED_HANDLE_RADIUS: f32 = 5.5;
+const OVERLAY_HANDLE_OUTLINE_WIDTH: f32 = 1.5;
+const RUBBER_BAND_WIDTH: f32 = 1.5;
+
+/// Default paint for a newly drawn pen path.
+const PEN_STROKE_COLOR: Rgba8 = Rgba8::rgb(0xdd, 0xe1, 0xe8);
+
+/// Control overlay colors, matching the UI accent.
+const OVERLAY_ACCENT: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xff);
+const OVERLAY_BAND: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x80);
+const OVERLAY_HANDLE_FILL: Color = Color::from_rgba8(0xff, 0xff, 0xff, 0xff);
+const OVERLAY_HANDLE_OUTLINE: Color = Color::from_rgba8(0x0b, 0x2a, 0x40, 0xff);
+
 /// The path currently selected for editing, addressed by tree position.
 ///
 /// `items` is a chain of item indices: `[i]` addresses `layer.items[i]`, while
@@ -97,7 +139,7 @@ const MAX_ZOOM: f32 = 32.0;
 pub enum PathAddress {
     /// A painted path stored in a [`PathItem`].
     Item { layer: usize, items: Vec<usize> },
-    /// The clip path of the [`ClipGroup`] at the given position.
+    /// The clip path of the [`crate::model::ClipGroup`] at the given position.
     Clip { layer: usize, items: Vec<usize> },
 }
 
@@ -213,6 +255,9 @@ pub struct EditorState {
     drag: Option<Drag>,
     /// The in-progress pen path, if any.
     pen: Option<PenDraft>,
+    /// When and where the last canvas click happened, for double-click
+    /// detection.
+    last_click: Option<(f64, Vec2)>,
 }
 
 impl EditorState {
@@ -224,6 +269,7 @@ impl EditorState {
             structure_revision: 0,
             drag: None,
             pen: None,
+            last_click: None,
         }
     }
 
@@ -267,7 +313,7 @@ pub fn fit_transform(bounds: Bounds, viewport_width: f32, viewport_height: f32) 
     let available_height = (viewport_height - BOTTOM_BAR_HEIGHT).max(1.0);
     let doc_width = bounds.width().max(f32::EPSILON);
     let doc_height = bounds.height().max(f32::EPSILON);
-    let scale = 0.9 * (available_width / doc_width).min(available_height / doc_height);
+    let scale = FIT_FRACTION * (available_width / doc_width).min(available_height / doc_height);
 
     // Document Y points down, so shifting the document's centre to the content
     // area's centre means moving the entity *up* by `scale * centre.y`. That
@@ -340,7 +386,7 @@ fn handle_viewport_input(
             let anchor = window
                 .cursor_position()
                 .unwrap_or(Vec2::new(width * 0.5, height * 0.5));
-            let factor = 1.1f32.powf(dy / conversion);
+            let factor = ZOOM_STEP.powf(dy / conversion);
             zoom_around(&mut viewport, bounds.0, width, height, anchor, factor);
         } else if shift {
             // A vertical wheel becomes horizontal panning.
@@ -418,6 +464,7 @@ impl ViewMapping {
 fn handle_input(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
@@ -425,9 +472,15 @@ fn handle_input(
     mut editor: ResMut<EditorState>,
 ) {
     match tool.0 {
-        Tool::Select => {
-            handle_select_input(&mouse, &keys, &windows, &bounds, &viewport, &mut editor)
-        }
+        Tool::Select => handle_select_input(
+            &mouse,
+            &keys,
+            &time,
+            &windows,
+            &bounds,
+            &viewport,
+            &mut editor,
+        ),
         Tool::Pen => handle_pen_input(&mouse, &keys, &windows, &bounds, &viewport, &mut editor),
     }
 }
@@ -448,6 +501,7 @@ fn over_ui(cursor: Vec2, window: &Window) -> bool {
 fn handle_select_input(
     mouse: &ButtonInput<MouseButton>,
     keys: &ButtonInput<KeyCode>,
+    time: &Time,
     windows: &Query<&Window, With<PrimaryWindow>>,
     bounds: &DocumentBounds,
     viewport: &Viewport,
@@ -485,6 +539,21 @@ fn handle_select_input(
     }
 
     if mouse.just_pressed(MouseButton::Left) {
+        // A double-click on the outline of a path inserts a new anchor there,
+        // subdivided so the path keeps its shape.
+        let now = time.elapsed_secs_f64();
+        let double_click = editor.last_click.is_some_and(|(last_time, last_cursor)| {
+            now - last_time <= DOUBLE_CLICK_SECONDS
+                && cursor.distance(last_cursor) <= DOUBLE_CLICK_DISTANCE
+        });
+        if double_click
+            && insert_point(editor, point, view.document_per_pixel() * HANDLE_HIT_RADIUS)
+        {
+            editor.last_click = None;
+            return;
+        }
+        editor.last_click = Some((now, cursor));
+
         // Control points of the current selection take priority over picking a
         // different path, otherwise clicking a handle next to another shape
         // would re-select that shape.
@@ -492,7 +561,8 @@ fn handle_select_input(
         let mut started_drag = false;
         if let Some(address) = editor.selected.clone()
             && let Some(path) = path_at(&editor.document, &address)
-            && let Some(handle) = find_handle(path, point, view.document_per_pixel() * 8.0)
+            && let Some(handle) =
+                find_handle(path, point, view.document_per_pixel() * HANDLE_HIT_RADIUS)
         {
             let endpoint = matches!(handle, Handle::Start | Handle::Anchor(_));
             let bending = shift && endpoint && !bend_candidates(path, handle).is_empty();
@@ -516,7 +586,11 @@ fn handle_select_input(
         if !started_drag {
             // Pressing a path selects it and starts moving it as a whole;
             // pressing empty space clears the selection.
-            let picked = pick_path(&editor.document, point, view.document_per_pixel() * 3.0);
+            let picked = pick_path(
+                &editor.document,
+                point,
+                view.document_per_pixel() * PATH_HIT_SLACK,
+            );
             editor.selected_handle = None;
             editor.drag = picked.clone().map(|address| Drag::Object {
                 address,
@@ -546,7 +620,7 @@ fn handle_select_input(
                     handle,
                     target,
                 } => {
-                    let threshold = view.document_per_pixel() * 3.0;
+                    let threshold = view.document_per_pixel() * BEND_THRESHOLD;
                     let mut decided = target;
                     if let Some(path) = path_at_mut(&mut editor.document, &address) {
                         if let Some(target) = target {
@@ -627,7 +701,7 @@ fn handle_pen_input(
 
     let view = ViewMapping::new(bounds.0, window.width(), window.height(), viewport);
     let point = view.screen_to_document(cursor);
-    let slack = view.document_per_pixel() * 8.0;
+    let slack = view.document_per_pixel() * HANDLE_HIT_RADIUS;
 
     if over_ui(cursor, window) {
         if mouse.just_released(MouseButton::Left)
@@ -716,8 +790,8 @@ fn refresh_scene(
                 &mut scene,
                 path_end(&draft.path),
                 view.screen_to_document(cursor),
-                f64::from(1.5 / scale.max(f32::EPSILON)),
-                &Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x80),
+                f64::from(RUBBER_BAND_WIDTH / scale.max(f32::EPSILON)),
+                &OVERLAY_BAND,
             );
         }
     }
@@ -731,14 +805,31 @@ fn refresh_scene(
 // Tree addressing
 // ---------------------------------------------------------------------------
 
+/// Resolves an item address to the item it names.
+fn item_in<'a>(items: &'a [Item], indices: &[usize]) -> Option<&'a Item> {
+    let (last, parents) = indices.split_last()?;
+    items_at(items, parents)?.get(*last)
+}
+
+fn item_in_mut<'a>(items: &'a mut [Item], indices: &[usize]) -> Option<&'a mut Item> {
+    let (last, parents) = indices.split_last()?;
+    items_at_mut(items, parents)?.get_mut(*last)
+}
+
 /// Resolves an address to the path it names.
 fn path_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Path> {
     match address {
         PathAddress::Item { layer, items } => {
-            path_item_at(document, *layer, items).map(|item| &item.path)
+            match item_in(&document.layers.get(*layer)?.items, items)? {
+                Item::Path(path_item) => Some(&path_item.path),
+                Item::Clip(_) => None,
+            }
         }
         PathAddress::Clip { layer, items } => {
-            clip_group_at(document, *layer, items).map(|group| &group.clip)
+            match item_in(&document.layers.get(*layer)?.items, items)? {
+                Item::Clip(group) => Some(&group.clip),
+                Item::Path(_) => None,
+            }
         }
     }
 }
@@ -746,10 +837,16 @@ fn path_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Path
 fn path_at_mut<'a>(document: &'a mut Document, address: &PathAddress) -> Option<&'a mut Path> {
     match address {
         PathAddress::Item { layer, items } => {
-            path_item_at_mut(document, *layer, items).map(|item| &mut item.path)
+            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
+                Item::Path(path_item) => Some(&mut path_item.path),
+                Item::Clip(_) => None,
+            }
         }
         PathAddress::Clip { layer, items } => {
-            clip_group_at_mut(document, *layer, items).map(|group| &mut group.clip)
+            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
+                Item::Clip(group) => Some(&mut group.clip),
+                Item::Path(_) => None,
+            }
         }
     }
 }
@@ -758,10 +855,16 @@ fn path_at_mut<'a>(document: &'a mut Document, address: &PathAddress) -> Option<
 pub fn style_at<'a>(document: &'a Document, address: &PathAddress) -> Option<&'a Style> {
     match address {
         PathAddress::Item { layer, items } => {
-            path_item_at(document, *layer, items).map(|item| &item.style)
+            match item_in(&document.layers.get(*layer)?.items, items)? {
+                Item::Path(path_item) => Some(&path_item.style),
+                Item::Clip(_) => None,
+            }
         }
         PathAddress::Clip { layer, items } => {
-            clip_group_at(document, *layer, items).map(|group| &group.style)
+            match item_in(&document.layers.get(*layer)?.items, items)? {
+                Item::Clip(group) => Some(&group.style),
+                Item::Path(_) => None,
+            }
         }
     }
 }
@@ -773,10 +876,16 @@ pub fn style_at_mut<'a>(
 ) -> Option<&'a mut Style> {
     match address {
         PathAddress::Item { layer, items } => {
-            path_item_at_mut(document, *layer, items).map(|item| &mut item.style)
+            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
+                Item::Path(path_item) => Some(&mut path_item.style),
+                Item::Clip(_) => None,
+            }
         }
         PathAddress::Clip { layer, items } => {
-            clip_group_at_mut(document, *layer, items).map(|group| &mut group.style)
+            match item_in_mut(&mut document.layers.get_mut(*layer)?.items, items)? {
+                Item::Clip(group) => Some(&mut group.style),
+                Item::Path(_) => None,
+            }
         }
     }
 }
@@ -845,89 +954,15 @@ fn items_vec_at_mut<'a>(
     Some(items)
 }
 
-fn path_item_at<'a>(
-    document: &'a Document,
-    layer: usize,
-    indices: &[usize],
-) -> Option<&'a PathItem> {
-    path_item_in(&document.layers.get(layer)?.items, indices)
-}
-
-fn path_item_in<'a>(items: &'a [Item], indices: &[usize]) -> Option<&'a PathItem> {
-    let (last, parents) = indices.split_last()?;
-    match items_at(items, parents)?.get(*last)? {
-        Item::Path(path_item) => Some(path_item),
-        Item::Clip(_) => None,
-    }
-}
-
-fn path_item_at_mut<'a>(
-    document: &'a mut Document,
-    layer: usize,
-    indices: &[usize],
-) -> Option<&'a mut PathItem> {
-    let layer = document.layers.get_mut(layer)?;
-    path_item_in_mut(&mut layer.items, indices)
-}
-
-fn path_item_in_mut<'a>(items: &'a mut [Item], indices: &[usize]) -> Option<&'a mut PathItem> {
-    let (last, parents) = indices.split_last()?;
-    match items_at_mut(items, parents)?.get_mut(*last)? {
-        Item::Path(path_item) => Some(path_item),
-        Item::Clip(_) => None,
-    }
-}
-
-fn clip_group_at<'a>(
-    document: &'a Document,
-    layer: usize,
-    indices: &[usize],
-) -> Option<&'a ClipGroup> {
-    clip_group_in(&document.layers.get(layer)?.items, indices)
-}
-
-fn clip_group_in<'a>(items: &'a [Item], indices: &[usize]) -> Option<&'a ClipGroup> {
-    let (last, parents) = indices.split_last()?;
-    match items_at(items, parents)?.get(*last)? {
-        Item::Clip(group) => Some(group),
-        Item::Path(_) => None,
-    }
-}
-
-fn clip_group_at_mut<'a>(
-    document: &'a mut Document,
-    layer: usize,
-    indices: &[usize],
-) -> Option<&'a mut ClipGroup> {
-    let layer = document.layers.get_mut(layer)?;
-    clip_group_in_mut(&mut layer.items, indices)
-}
-
-fn clip_group_in_mut<'a>(items: &'a mut [Item], indices: &[usize]) -> Option<&'a mut ClipGroup> {
-    let (last, parents) = indices.split_last()?;
-    match items_at_mut(items, parents)?.get_mut(*last)? {
-        Item::Clip(group) => Some(group),
-        Item::Path(_) => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Hit testing
 // ---------------------------------------------------------------------------
 
 /// Returns the topmost paintable path under `point`.
 fn pick_path(document: &Document, point: [f32; 2], slack: f32) -> Option<PathAddress> {
-    // Later indices are painted later, so descend through layers by Z and
+    // Later indices are painted later, so walk the paint order backwards and
     // reverse document order within each layer.
-    let mut layer_indices: Vec<usize> = (0..document.layers.len()).rev().collect();
-    layer_indices.sort_by(|&a, &b| {
-        document.layers[b]
-            .z
-            .partial_cmp(&document.layers[a].z)
-            .unwrap_or(Ordering::Equal)
-    });
-
-    for layer_index in layer_indices {
+    for layer_index in document.layer_indices_in_paint_order().into_iter().rev() {
         let layer = &document.layers[layer_index];
         if let Some(address) = pick_items(&layer.items, point, slack, layer_index) {
             return Some(address);
@@ -1009,9 +1044,149 @@ fn path_distance(path: &Path, point: [f32; 2]) -> f32 {
     let point = to_kurbo_point(point);
     path_to_bez_path(path)
         .segments()
-        .map(|segment| segment.nearest(point, 0.01).distance_sq)
+        .map(|segment| segment.nearest(point, NEAREST_ACCURACY).distance_sq)
         .fold(f64::INFINITY, f64::min)
         .sqrt() as f32
+}
+
+// ---------------------------------------------------------------------------
+// Inserting points
+// ---------------------------------------------------------------------------
+
+/// The curve of one model segment, starting at the previous anchor.
+fn segment_curve(path: &Path, index: usize) -> Option<PathSeg> {
+    let segment = *path.segments.get(index)?;
+    let start = segment_start(path, index);
+    let curve = if segment.is_line() {
+        PathSeg::Line(KurboLine::new(
+            to_kurbo_point(start),
+            to_kurbo_point(segment.to),
+        ))
+    } else {
+        PathSeg::Cubic(CubicBez::new(
+            to_kurbo_point(start),
+            to_kurbo_point(segment.ctrl1.unwrap_or(start)),
+            to_kurbo_point(segment.ctrl2.unwrap_or(segment.to)),
+            to_kurbo_point(segment.to),
+        ))
+    };
+    Some(curve)
+}
+
+/// The segment nearest to `point`, as `(index, parameter, distance)`.
+fn nearest_point_on_path(path: &Path, point: [f32; 2]) -> Option<(usize, f64, f32)> {
+    let point = to_kurbo_point(point);
+    let mut best: Option<(usize, f64, f64)> = None;
+    for index in 0..path.segments.len() {
+        let Some(curve) = segment_curve(path, index) else {
+            continue;
+        };
+        let nearest = curve.nearest(point, NEAREST_ACCURACY);
+        if best.is_none_or(|(_, _, distance_sq)| nearest.distance_sq < distance_sq) {
+            best = Some((index, nearest.t, nearest.distance_sq));
+        }
+    }
+    best.map(|(index, t, distance_sq)| (index, t, distance_sq.sqrt() as f32))
+}
+
+fn lerp_point(from: KurboPoint, to: KurboPoint, t: f64) -> KurboPoint {
+    KurboPoint::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
+}
+
+fn from_kurbo_point(point: KurboPoint) -> [f32; 2] {
+    [point.x as f32, point.y as f32]
+}
+
+/// Splits segment `index` at parameter `t` with de Casteljau's algorithm,
+/// keeping the drawn shape unchanged, and returns the index of the new anchor.
+///
+/// A straight segment is split into two straight segments so no handles
+/// appear. For a curve, the split controls are stored and controls that were
+/// omitted stay omitted, so only genuinely curved sides gain handles.
+fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
+    let segment = *path.segments.get(index)?;
+    if !(0.0..=1.0).contains(&t) {
+        return None;
+    }
+    let start = segment_start(path, index);
+    let p0 = to_kurbo_point(start);
+    let p3 = to_kurbo_point(segment.to);
+
+    if segment.is_line() {
+        let split = from_kurbo_point(lerp_point(p0, p3, t));
+        path.segments[index].to = split;
+        path.segments.insert(index + 1, Segment::line(segment.to));
+        return Some(index);
+    }
+
+    // Resolve omitted controls to their endpoints, then subdivide the cubic.
+    let p1 = to_kurbo_point(segment.ctrl1.unwrap_or(start));
+    let p2 = to_kurbo_point(segment.ctrl2.unwrap_or(segment.to));
+    let q0 = lerp_point(p0, p1, t);
+    let q1 = lerp_point(p1, p2, t);
+    let q2 = lerp_point(p2, p3, t);
+    let r0 = lerp_point(q0, q1, t);
+    let r1 = lerp_point(q1, q2, t);
+    let split = lerp_point(r0, r1, t);
+
+    path.segments[index] = Segment {
+        ctrl1: segment.ctrl1.map(|_| from_kurbo_point(q0)),
+        ctrl2: Some(from_kurbo_point(r0)),
+        to: from_kurbo_point(split),
+    };
+    path.segments.insert(
+        index + 1,
+        Segment {
+            ctrl1: Some(from_kurbo_point(r1)),
+            ctrl2: segment.ctrl2.map(|_| from_kurbo_point(q2)),
+            to: segment.to,
+        },
+    );
+
+    // The split point is the modified segment's endpoint, i.e. `Anchor(index)`.
+    Some(index)
+}
+
+/// Inserts a new anchor at the point of the path outline nearest to `point`.
+///
+/// Only the outline is eligible: clicking the interior of a filled shape far
+/// from its edge does nothing. Returns `true` when a point was inserted.
+fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
+    let Some(address) = pick_path(&editor.document, point, slack) else {
+        return false;
+    };
+    let Some(path) = path_at(&editor.document, &address) else {
+        return false;
+    };
+    let Some((index, t, distance)) = nearest_point_on_path(path, point) else {
+        return false;
+    };
+
+    // Clicking on a wide stroke still counts as clicking its outline.
+    let stroke_half_width = style_at(&editor.document, &address)
+        .and_then(|style| style.stroke)
+        .map_or(0.0, |stroke| stroke.width * 0.5);
+    if distance > slack + stroke_half_width {
+        return false;
+    }
+
+    // Do not create a duplicate anchor on top of an existing one.
+    const EDGE_T: f64 = 1e-3;
+    if !(EDGE_T..=1.0 - EDGE_T).contains(&t) {
+        return false;
+    }
+
+    let Some(path) = path_at_mut(&mut editor.document, &address) else {
+        return false;
+    };
+    let Some(new_index) = split_segment(path, index, t) else {
+        return false;
+    };
+
+    editor.selected = Some(address);
+    editor.selected_handle = Some(Handle::Anchor(new_index));
+    editor.drag = None;
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,10 +1478,6 @@ fn distance(a: [f32; 2], b: [f32; 2]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
-fn to_kurbo_point(point: [f32; 2]) -> KurboPoint {
-    KurboPoint::new(f64::from(point[0]), f64::from(point[1]))
-}
-
 // ---------------------------------------------------------------------------
 // Object dragging
 // ---------------------------------------------------------------------------
@@ -1334,14 +1505,7 @@ fn translate_path(path: &mut Path, delta: [f32; 2]) {
 /// Returns the index of the layer new pen paths should go into: the topmost
 /// (highest Z) layer, creating one when the document is empty.
 fn ensure_drawing_layer(document: &mut Document) -> usize {
-    let top = document
-        .layers
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal))
-        .map(|(index, _)| index);
-
-    match top {
+    match document.layer_indices_in_paint_order().last().copied() {
         Some(index) => index,
         None => {
             document.layers.push(Layer {
@@ -1399,8 +1563,8 @@ fn pen_style() -> Style {
     Style {
         fill: None,
         stroke: Some(StrokeStyle {
-            color: Rgba8::rgb(0xdd, 0xe1, 0xe8),
-            width: 2.0,
+            color: PEN_STROKE_COLOR,
+            width: DEFAULT_STROKE_WIDTH,
         }),
     }
 }
@@ -1527,14 +1691,10 @@ fn draw_control_overlay(
     let scale = scale.max(f32::EPSILON);
     let pixels = |amount: f32| f64::from(amount / scale);
 
-    let accent = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xff);
-    let handle_fill = Color::from_rgba8(0xff, 0xff, 0xff, 0xff);
-    let handle_outline = Color::from_rgba8(0x0b, 0x2a, 0x40, 0xff);
-
     scene.stroke(
-        &KurboStroke::new(pixels(2.0)),
+        &KurboStroke::new(pixels(OVERLAY_OUTLINE_WIDTH)),
         Affine::IDENTITY,
-        &accent,
+        &OVERLAY_ACCENT,
         None,
         &path_to_bez_path(path),
     );
@@ -1545,10 +1705,22 @@ fn draw_control_overlay(
     let mut previous = path.start().unwrap_or([0.0, 0.0]);
     for segment in &path.segments {
         if let Some(ctrl1) = segment.ctrl1 {
-            stroke_segment(scene, previous, ctrl1, pixels(1.0), &accent);
+            stroke_segment(
+                scene,
+                previous,
+                ctrl1,
+                pixels(OVERLAY_ARM_WIDTH),
+                &OVERLAY_ACCENT,
+            );
         }
         if let Some(ctrl2) = segment.ctrl2 {
-            stroke_segment(scene, ctrl2, segment.to, pixels(1.0), &accent);
+            stroke_segment(
+                scene,
+                ctrl2,
+                segment.to,
+                pixels(OVERLAY_ARM_WIDTH),
+                &OVERLAY_ACCENT,
+            );
         }
         previous = segment.to;
     }
@@ -1557,14 +1729,22 @@ fn draw_control_overlay(
         // The selected control point is the one the Delete key will remove, so
         // make it stand out.
         let selected = selected_handle == Some(handle);
-        let radius = pixels(if selected { 5.5 } else { 4.0 });
-        let fill = if selected { &accent } else { &handle_fill };
+        let radius = pixels(if selected {
+            OVERLAY_SELECTED_HANDLE_RADIUS
+        } else {
+            OVERLAY_HANDLE_RADIUS
+        });
+        let fill = if selected {
+            &OVERLAY_ACCENT
+        } else {
+            &OVERLAY_HANDLE_FILL
+        };
         let circle = Circle::new(to_kurbo_point(position), radius);
         scene.fill(Fill::NonZero, Affine::IDENTITY, fill, None, &circle);
         scene.stroke(
-            &KurboStroke::new(pixels(1.5)),
+            &KurboStroke::new(pixels(OVERLAY_HANDLE_OUTLINE_WIDTH)),
             Affine::IDENTITY,
-            &handle_outline,
+            &OVERLAY_HANDLE_OUTLINE,
             None,
             &circle,
         );
@@ -1584,7 +1764,7 @@ fn stroke_segment(scene: &mut Scene, from: [f32; 2], to: [f32; 2], width: f64, c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipGroup, Layer, Rgba8, Style};
+    use crate::model::{ClipGroup, Layer, Rgba8, StrokeStyle, Style};
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Path {
         Path::new([x0, y0])
@@ -2223,6 +2403,171 @@ mod tests {
         );
         assert!(apply_bend(&mut path, BendTarget::Incoming(2), [6.0, 4.0]));
         assert_eq!(path.segments[2].ctrl2, Some([6.0, 4.0]));
+    }
+
+    #[test]
+    fn splitting_a_cubic_uses_de_casteljau() {
+        let mut path = Path::new([0.0, 0.0]).cubic_to([0.0, 100.0], [100.0, 100.0], [100.0, 0.0]);
+
+        assert_eq!(split_segment(&mut path, 0, 0.5), Some(0));
+        assert_eq!(
+            path.segments[0],
+            Segment {
+                ctrl1: Some([0.0, 50.0]),
+                ctrl2: Some([25.0, 75.0]),
+                to: [50.0, 75.0],
+            }
+        );
+        assert_eq!(
+            path.segments[1],
+            Segment {
+                ctrl1: Some([75.0, 75.0]),
+                ctrl2: Some([100.0, 50.0]),
+                to: [100.0, 0.0],
+            }
+        );
+    }
+
+    #[test]
+    fn splitting_preserves_the_curve_pointwise() {
+        use vello::kurbo::ParamCurve;
+
+        let original = CubicBez::new(
+            KurboPoint::new(0.0, 0.0),
+            KurboPoint::new(0.0, 100.0),
+            KurboPoint::new(100.0, 100.0),
+            KurboPoint::new(100.0, 0.0),
+        );
+        let mut path = Path::new([0.0, 0.0]).cubic_to([0.0, 100.0], [100.0, 100.0], [100.0, 0.0]);
+
+        let t = 0.37;
+        assert_eq!(split_segment(&mut path, 0, t), Some(0));
+
+        let first = segment_curve(&path, 0).unwrap();
+        let second = segment_curve(&path, 1).unwrap();
+
+        for step in 0..=100 {
+            let u = f64::from(step) / 100.0;
+            let expected = original.eval(u);
+            let actual = if u <= t {
+                first.eval(u / t)
+            } else {
+                second.eval((u - t) / (1.0 - t))
+            };
+            let dx = expected.x - actual.x;
+            let dy = expected.y - actual.y;
+            assert!((dx * dx + dy * dy).sqrt() < 1e-3, "curve drifted at u={u}");
+        }
+    }
+
+    #[test]
+    fn splitting_a_line_adds_a_plain_anchor() {
+        let mut path = Path::new([0.0, 0.0]).line_to([10.0, 0.0]);
+
+        assert_eq!(split_segment(&mut path, 0, 0.5), Some(0));
+        assert_eq!(
+            path.segments,
+            vec![Segment::line([5.0, 0.0]), Segment::line([10.0, 0.0])]
+        );
+    }
+
+    #[test]
+    fn split_preserves_an_omitted_control() {
+        // Only the outgoing control exists on this segment.
+        let mut path = Path::new([0.0, 0.0]).cubic_to([0.0, 100.0], [100.0, 100.0], [100.0, 0.0]);
+        path.segments[0].ctrl2 = None;
+
+        assert_eq!(split_segment(&mut path, 0, 0.5), Some(0));
+
+        // The first half keeps its missing control near the start; the second
+        // half keeps its missing control near the end.
+        assert_eq!(path.segments[0].ctrl1, Some([0.0, 50.0]));
+        assert_eq!(path.segments[1].ctrl2, None);
+    }
+
+    #[test]
+    fn the_closing_edge_can_be_split() {
+        let mut path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([10.0, 10.0])
+            .closed();
+
+        // The closing edge runs from [10, 10] back to the start.
+        assert_eq!(split_segment(&mut path, 2, 0.5), Some(2));
+        assert_eq!(path.segments.len(), 4);
+        assert_eq!(path.segments[2], Segment::line([5.0, 5.0]));
+        assert_eq!(path.segments[3], Segment::line([0.0, 0.0]));
+        assert_eq!(path.start(), Some([0.0, 0.0]));
+    }
+
+    #[test]
+    fn nearest_point_finds_the_closest_segment() {
+        let path = Path::new([0.0, 0.0])
+            .line_to([0.0, 100.0])
+            .line_to([100.0, 100.0]);
+
+        let (index, t, distance) = nearest_point_on_path(&path, [0.0, 25.0]).unwrap();
+        assert_eq!(index, 0);
+        assert!((t - 0.25).abs() < 1e-6);
+        assert!(distance < 1e-3);
+
+        let (index, _, _) = nearest_point_on_path(&path, [90.0, 100.0]).unwrap();
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn inserting_a_point_selects_the_new_anchor() {
+        let document = Document {
+            version: 1,
+            layers: vec![Layer {
+                name: String::new(),
+                z: 0.0,
+                items: vec![Item::Path(PathItem {
+                    path: Path::new([0.0, 0.0]).line_to([100.0, 0.0]),
+                    style: Style {
+                        fill: None,
+                        stroke: Some(StrokeStyle {
+                            color: Rgba8::rgb(0, 0, 0),
+                            width: 2.0,
+                        }),
+                    },
+                })],
+            }],
+        };
+        let mut editor = EditorState::new(document);
+        let address = PathAddress::Item {
+            layer: 0,
+            items: vec![0],
+        };
+
+        assert!(insert_point(&mut editor, [50.0, 0.0], 1.0));
+        assert_eq!(editor.selected, Some(address.clone()));
+        assert_eq!(editor.selected_handle, Some(Handle::Anchor(0)));
+
+        let path = path_at(&editor.document, &address).unwrap();
+        assert_eq!(path.segments.len(), 2);
+        assert_eq!(path.segments[0], Segment::line([50.0, 0.0]));
+        assert_eq!(path.segments[1], Segment::line([100.0, 0.0]));
+    }
+
+    #[test]
+    fn insertion_ignores_the_interior_of_a_filled_shape() {
+        let document = Document {
+            version: 1,
+            layers: vec![Layer {
+                name: String::new(),
+                z: 0.0,
+                items: vec![Item::Path(PathItem {
+                    path: rect(0.0, 0.0, 100.0, 100.0),
+                    style: filled(Rgba8::rgb(0, 0, 0)),
+                })],
+            }],
+        };
+        let mut editor = EditorState::new(document);
+
+        // Far from any edge: the fill is hit but no point is inserted.
+        assert!(!insert_point(&mut editor, [50.0, 50.0], 1.0));
+        assert!(editor.selected.is_none());
     }
 
     #[test]

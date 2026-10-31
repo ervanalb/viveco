@@ -104,10 +104,12 @@ pub fn path_to_bez_path(path: &Path) -> BezPath {
     bez
 }
 
-fn to_kurbo_point(point: [f32; 2]) -> KurboPoint {
+/// Converts a model point into a kurbo point.
+pub(crate) fn to_kurbo_point(point: [f32; 2]) -> KurboPoint {
     KurboPoint::new(f64::from(point[0]), f64::from(point[1]))
 }
 
-fn to_color(color: Rgba8) -> Color {
+/// Converts a model color into a peniko color.
+pub(crate) fn to_color(color: Rgba8) -> Color {
     Color::from_rgba8(color.r, color.g, color.b, color.a)
 }
