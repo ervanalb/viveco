@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use bevy::camera::primitives::Aabb;
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_vello::VelloPlugin;
@@ -19,6 +20,7 @@ use vector_anim_app::model::Document;
 use vector_anim_app::render::build_scene;
 use vector_anim_app::sidebar::SidebarPlugin;
 use vector_anim_app::style_panel::StylePanelPlugin;
+use vector_anim_app::toolbar::ToolbarPlugin;
 
 const BACKGROUND: Color = Color::srgb_u8(0x1a, 0x1d, 0x24);
 
@@ -37,6 +39,7 @@ fn main() {
         .add_plugins(EditorPlugin)
         .add_plugins(SidebarPlugin)
         .add_plugins(StylePanelPlugin)
+        .add_plugins(ToolbarPlugin)
         .add_systems(Startup, setup)
         .run();
 }
@@ -63,8 +66,7 @@ fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
         .map(|window| (window.width(), window.height()))
         .unwrap_or((900.0, 900.0));
 
-    // `VelloScene2d` has no intrinsic bounds, so provide them for visibility
-    // culling.
+    // `VelloScene2d` has no intrinsic bounds, so provide them for picking.
     let aabb = Aabb::from_min_max(
         Vec3::new(bounds.min[0], bounds.min[1], -1.0),
         Vec3::new(bounds.max[0], bounds.max[1], 1.0),
@@ -77,6 +79,12 @@ fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
         VelloScene2d::from(scene),
         fit_transform(bounds, viewport_width, viewport_height),
         aabb,
+        // Vello renders the scene with its own Y-flip, so the entity's `Aabb`
+        // does not describe where the document actually appears. Frustum
+        // culling against it can hide the whole document once panning or
+        // zooming moves the mismatch into view, and there is nothing else on
+        // screen to cull against anyway.
+        NoFrustumCulling,
         DocumentScene,
     ));
 }

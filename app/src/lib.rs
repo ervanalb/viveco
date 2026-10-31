@@ -5,3 +5,4 @@ pub mod model;
 pub mod render;
 pub mod sidebar;
 pub mod style_panel;
+pub mod toolbar;

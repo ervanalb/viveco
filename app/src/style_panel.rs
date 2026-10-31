@@ -13,7 +13,8 @@ use bevy::prelude::*;
 use bevy::ui::{RelativeCursorPosition, Val2};
 
 use crate::editor::{
-    BOTTOM_BAR_HEIGHT, EditorState, PathAddress, SIDEBAR_WIDTH, style_at, style_at_mut,
+    BOTTOM_BAR_HEIGHT, EditorState, PathAddress, SIDEBAR_WIDTH, TOOLBAR_WIDTH, path_closed_at,
+    set_path_closed, style_at, style_at_mut,
 };
 use crate::model::{Rgba8, StrokeStyle, Style};
 
@@ -43,6 +44,7 @@ impl Plugin for StylePanelPlugin {
                     sync_from_selection,
                     drag_sliders,
                     handle_toggles,
+                    handle_closed_checkbox,
                     apply_edits,
                     update_visuals,
                 )
@@ -178,6 +180,8 @@ struct StylePanelState {
     fill_enabled: bool,
     stroke_enabled: bool,
     stroke_width: f32,
+    /// Whether the selected path is closed.
+    closed: bool,
     /// The selection the panel currently mirrors; used to detect changes.
     synced: Option<PathAddress>,
     /// Set when the panel has edits that still need writing to the document.
@@ -192,6 +196,7 @@ impl Default for StylePanelState {
             fill_enabled: false,
             stroke_enabled: false,
             stroke_width: 2.0,
+            closed: false,
             synced: None,
             dirty: false,
         }
@@ -294,6 +299,10 @@ struct ToggleButton {
     target: ColorTarget,
 }
 
+/// The button that closes or opens the selected path.
+#[derive(Component, Clone, Copy)]
+struct ClosedCheckbox;
+
 /// Nodes whose appearance follows the panel state.
 #[derive(Component, Clone, Copy)]
 enum Visual {
@@ -301,6 +310,7 @@ enum Visual {
     SliderThumb(SliderKind),
     Swatch(ColorTarget),
     ToggleMark(ColorTarget),
+    ClosedMark,
 }
 
 /// Text nodes whose contents follow the panel state.
@@ -319,7 +329,7 @@ fn spawn_panel(mut commands: Commands) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
+                left: Val::Px(TOOLBAR_WIDTH),
                 bottom: Val::Px(0.0),
                 right: Val::Px(SIDEBAR_WIDTH),
                 height: Val::Px(BOTTOM_BAR_HEIGHT),
@@ -333,6 +343,59 @@ fn spawn_panel(mut commands: Commands) {
         .with_children(|panel| {
             spawn_color_group(panel, ColorTarget::Fill);
             spawn_color_group(panel, ColorTarget::Stroke);
+            spawn_path_group(panel);
+        });
+}
+
+/// A narrow column holding path-shaped options.
+fn spawn_path_group(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            width: Val::Px(96.0),
+            row_gap: Val::Px(6.0),
+            ..default()
+        })
+        .with_children(|group| {
+            group.spawn((
+                Text::new("Path"),
+                TextFont::from_font_size(13.0),
+                TextColor(TEXT_COLOR),
+                Node {
+                    height: Val::Px(24.0),
+                    ..default()
+                },
+            ));
+
+            group
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    height: Val::Px(18.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(18.0),
+                            height: Val::Px(18.0),
+                            border: UiRect::all(Val::Px(1.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(TOGGLE_OFF),
+                        BorderColor::all(TOGGLE_BORDER),
+                        ClosedCheckbox,
+                        Visual::ClosedMark,
+                    ));
+                    row.spawn((
+                        Text::new("Closed"),
+                        TextFont::from_font_size(13.0),
+                        TextColor(TEXT_COLOR),
+                    ));
+                });
         });
 }
 
@@ -508,8 +571,10 @@ fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelSta
     let Some(address) = editor.selected.as_ref() else {
         panel.fill_enabled = false;
         panel.stroke_enabled = false;
+        panel.closed = false;
         return;
     };
+    panel.closed = path_closed_at(&editor.document, address).unwrap_or(false);
     let Some(style) = style_at(&editor.document, address) else {
         return;
     };
@@ -579,7 +644,23 @@ fn handle_toggles(
     }
 }
 
-/// Writes pending panel edits into the selected path's style.
+/// Closes or opens the selected path from the checkbox.
+fn handle_closed_checkbox(
+    checkboxes: Query<&Interaction, (With<ClosedCheckbox>, Changed<Interaction>)>,
+    mut panel: ResMut<StylePanelState>,
+) {
+    if panel.synced.is_none() {
+        return;
+    }
+    for interaction in &checkboxes {
+        if *interaction == Interaction::Pressed {
+            panel.closed = !panel.closed;
+            panel.dirty = true;
+        }
+    }
+}
+
+/// Writes pending panel edits into the selected path's style and closed state.
 fn apply_edits(mut editor: ResMut<EditorState>, mut panel: ResMut<StylePanelState>) {
     if !panel.dirty {
         return;
@@ -592,10 +673,11 @@ fn apply_edits(mut editor: ResMut<EditorState>, mut panel: ResMut<StylePanelStat
     if editor.selected.as_ref() != Some(&address) {
         return;
     }
-    let Some(style) = style_at_mut(&mut editor.document, &address) else {
-        return;
-    };
-    panel.write_to(style);
+    let closed = panel.closed;
+    if let Some(style) = style_at_mut(&mut editor.document, &address) {
+        panel.write_to(style);
+    }
+    set_path_closed(&mut editor.document, &address, closed);
 }
 
 /// A cheap summary of everything the widgets display, used to avoid per-frame
@@ -607,6 +689,7 @@ struct PanelSignature {
     fill_enabled: bool,
     stroke_enabled: bool,
     stroke_width: f32,
+    closed: bool,
 }
 
 /// Reflects the panel values into slider fills, thumbs, swatches, toggles, and
@@ -628,6 +711,7 @@ fn update_visuals(
         fill_enabled: panel.fill_enabled,
         stroke_enabled: panel.stroke_enabled,
         stroke_width: panel.stroke_width,
+        closed: panel.closed,
     };
     if last.as_ref() == Some(&signature) {
         return;
@@ -653,6 +737,9 @@ fn update_visuals(
                 } else {
                     TOGGLE_OFF
                 };
+            }
+            Visual::ClosedMark => {
+                background.0 = if panel.closed { TOGGLE_ON } else { TOGGLE_OFF };
             }
         }
     }

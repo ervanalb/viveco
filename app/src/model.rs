@@ -2,9 +2,8 @@
 //!
 //! The document is a stack of [`Layer`]s ordered by a Z coordinate. Each layer
 //! holds zero or more [`Item`]s: plain [`PathItem`]s or [`ClipGroup`]s. Paths are
-//! built from straight [`Segment::Line`]s and cubic Bézier
-//! [`Segment::Cubic`]s, may be open or closed, and may be filled and/or stroked
-//! with a solid color.
+//! built from [`Segment`]s whose Bézier control points are optional, may be open
+//! or closed, and may be filled and/or stroked with a solid color.
 //!
 //! Coordinates are plain document units with the origin at the top-left and Y
 //! pointing down (the usual vector-graphics convention).
@@ -238,36 +237,40 @@ pub struct ClipGroup {
 // Geometry
 // ---------------------------------------------------------------------------
 
-/// A single path: a start point followed by line/cubic segments.
+/// A single path: how it ends, followed by its segments.
 ///
-/// When `closed` is set, an implicit line joins the final point back to
-/// `start`. An open path is still implicitly closed when filled, matching
-/// common vector-graphics behavior; use stroke-only styles when you need an
-/// open outline.
+/// A closed path has no separate start point: its first segment begins at the
+/// end point of the last segment, so the closing edge is an ordinary segment
+/// that can be edited like any other. An open path is still implicitly closed
+/// when filled, matching common vector-graphics behavior; use stroke-only
+/// styles when you need an open outline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Path {
     /// Optional human-readable name, shown in the editor's layer tree.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
 
-    pub start: Point,
+    pub ends: PathEnds,
     #[serde(default)]
     pub segments: Vec<Segment>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub closed: bool,
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
+/// How a path begins, and whether it loops back to that point.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathEnds {
+    /// An open path starting at the given point.
+    Open(Point),
+    /// A closed loop. The loop starts at the end point of the last segment.
+    Closed,
 }
 
 impl Path {
     pub fn new(start: Point) -> Self {
         Self {
             name: String::new(),
-            start,
+            ends: PathEnds::Open(start),
             segments: Vec::new(),
-            closed: false,
         }
     }
 
@@ -277,35 +280,104 @@ impl Path {
         self
     }
 
+    /// Appends a straight segment ending at `to`.
     pub fn line_to(mut self, to: Point) -> Self {
-        self.segments.push(Segment::Line { to });
+        self.segments.push(Segment::line(to));
         self
     }
 
     /// Appends a cubic Bézier segment ending at `to`.
     pub fn cubic_to(mut self, ctrl1: Point, ctrl2: Point, to: Point) -> Self {
-        self.segments.push(Segment::Cubic { ctrl1, ctrl2, to });
+        self.segments.push(Segment {
+            ctrl1: Some(ctrl1),
+            ctrl2: Some(ctrl2),
+            to,
+        });
         self
     }
 
+    /// Closes the path, adding a straight segment back to the start when the
+    /// last point is not already there.
     pub fn closed(mut self) -> Self {
-        self.closed = true;
+        self.close();
         self
+    }
+
+    /// The first anchor of the path, or `None` for an empty closed loop.
+    pub fn start(&self) -> Option<Point> {
+        match self.ends {
+            PathEnds::Open(start) => Some(start),
+            PathEnds::Closed => self.segments.last().map(|segment| segment.to),
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self.ends, PathEnds::Closed)
+    }
+
+    /// Closes the loop, adding a straight edge from the last point back to the
+    /// start when needed. Returns `false` when the path has no geometry.
+    pub fn close(&mut self) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        if let Some(start) = self.start()
+            && !self
+                .segments
+                .last()
+                .is_some_and(|segment| segment.to == start)
+        {
+            self.segments.push(Segment::line(start));
+        }
+        self.ends = PathEnds::Closed;
+        true
+    }
+
+    /// Opens the loop, dropping the closing segment and using its end point as
+    /// the new start. Returns `false` when there is no closing segment.
+    pub fn open(&mut self) -> bool {
+        match self.ends {
+            PathEnds::Open(_) => true,
+            PathEnds::Closed => {
+                let Some(last) = self.segments.pop() else {
+                    return false;
+                };
+                self.ends = PathEnds::Open(last.to);
+                true
+            }
+        }
     }
 }
 
-/// One segment of a [`Path`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Segment {
-    Line {
-        to: Point,
-    },
-    Cubic {
-        ctrl1: Point,
-        ctrl2: Point,
-        to: Point,
-    },
+/// One segment of a [`Path`], ending at `to`.
+///
+/// `ctrl1` is the Bézier control point near the segment's start and `ctrl2`
+/// the one near `to`. An omitted control is treated as lying exactly on its
+/// endpoint, so it has no visible effect and the editor draws no handle for
+/// it. A segment with no controls is a straight line.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Segment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctrl1: Option<Point>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctrl2: Option<Point>,
+    pub to: Point,
+}
+
+impl Segment {
+    /// A straight segment: both control points are omitted.
+    pub fn line(to: Point) -> Self {
+        Self {
+            ctrl1: None,
+            ctrl2: None,
+            to,
+        }
+    }
+
+    /// True when neither control point is present.
+    pub fn is_line(&self) -> bool {
+        self.ctrl1.is_none() && self.ctrl2.is_none()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,16 +450,17 @@ impl BoundsAccumulator {
     }
 
     fn add_path(&mut self, path: &Path) {
-        self.add_point(path.start);
+        if let Some(start) = path.start() {
+            self.add_point(start);
+        }
         for segment in &path.segments {
-            match segment {
-                Segment::Line { to } => self.add_point(*to),
-                Segment::Cubic { ctrl1, ctrl2, to } => {
-                    self.add_point(*ctrl1);
-                    self.add_point(*ctrl2);
-                    self.add_point(*to);
-                }
+            if let Some(ctrl1) = segment.ctrl1 {
+                self.add_point(ctrl1);
             }
+            if let Some(ctrl2) = segment.ctrl2 {
+                self.add_point(ctrl2);
+            }
+            self.add_point(segment.to);
         }
     }
 
@@ -459,6 +532,24 @@ mod tests {
             Rgba8::rgba(0x12, 0x34, 0x56, 0x78)
         );
         assert!(Rgba8::from_hex("#12345").is_err());
+    }
+
+    #[test]
+    fn closing_and_opening_around_a_loop_round_trips() {
+        let mut path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([10.0, 10.0]);
+
+        assert!(path.close());
+        assert!(path.is_closed());
+        assert_eq!(path.start(), Some([0.0, 0.0]));
+        assert_eq!(path.segments.len(), 3);
+        assert_eq!(path.segments[2], Segment::line([0.0, 0.0]));
+
+        assert!(path.open());
+        assert!(!path.is_closed());
+        assert_eq!(path.start(), Some([0.0, 0.0]));
+        assert_eq!(path.segments.len(), 2);
     }
 
     #[test]

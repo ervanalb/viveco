@@ -6,6 +6,7 @@
 
 use std::cmp::Ordering;
 
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_vello::prelude::{VelloScene2d, vello};
@@ -16,7 +17,10 @@ use vello::kurbo::{
 };
 use vello::peniko::{Color, Fill};
 
-use crate::model::{Bounds, ClipGroup, Document, Item, Path, PathItem, Segment, Style};
+use crate::model::{
+    Bounds, ClipGroup, Document, Item, Layer, Path, PathEnds, PathItem, Rgba8, Segment,
+    StrokeStyle, Style,
+};
 use crate::render::{build_scene, path_to_bez_path};
 
 /// Width of the layer sidebar on the right, in screen pixels.
@@ -29,6 +33,25 @@ pub const SIDEBAR_WIDTH: f32 = 260.0;
 /// The document is fitted into the remaining area above it.
 pub const BOTTOM_BAR_HEIGHT: f32 = 200.0;
 
+/// Width of the tool palette along the left, in screen pixels.
+///
+/// The document is fitted into the remaining area to the right of it.
+pub const TOOLBAR_WIDTH: f32 = 56.0;
+
+/// The active editing tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tool {
+    /// Select existing paths and drag them or their control points.
+    #[default]
+    Select,
+    /// Draw new paths by clicking, optionally dragging to round the corners.
+    Pen,
+}
+
+/// Which tool is currently active.
+#[derive(Resource, Default)]
+pub struct ToolState(pub Tool);
+
 /// Bounds of the loaded document, used to fit it to the window.
 ///
 /// Kept fixed for the session so that dragging a point does not rescale the
@@ -39,6 +62,30 @@ pub struct DocumentBounds(pub Bounds);
 /// Marks the entity holding the rendered document.
 #[derive(Component)]
 pub struct DocumentScene;
+
+/// Pan and zoom applied on top of the automatic fit.
+///
+/// `pan` is a screen-pixel offset: increasing it moves the document right and
+/// down. `zoom` multiplies the fit scale. Both are reset only by restarting
+/// the app; the document stays fitted when the window is resized.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct Viewport {
+    pub zoom: f32,
+    pub pan: Vec2,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+        }
+    }
+}
+
+/// Zoom limits for the mouse wheel.
+const MIN_ZOOM: f32 = 0.1;
+const MAX_ZOOM: f32 = 32.0;
 
 /// The path currently selected for editing, addressed by tree position.
 ///
@@ -66,17 +113,90 @@ impl PathAddress {
 /// A draggable point of a [`Path`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
+    /// The start anchor of an open path.
     Start,
-    LineTo(usize),
-    CubicCtrl1(usize),
-    CubicCtrl2(usize),
-    CubicTo(usize),
+    /// The end anchor of segment `index`.
+    Anchor(usize),
+    /// The Bézier control point near the start of segment `index`.
+    Ctrl1(usize),
+    /// The Bézier control point near the end of segment `index`.
+    Ctrl2(usize),
 }
 
 #[derive(Clone, Debug)]
-struct Drag {
-    address: PathAddress,
-    handle: Handle,
+enum Drag {
+    /// Dragging one control point of a path.
+    Handle {
+        address: PathAddress,
+        handle: Handle,
+        /// Shift was held: keep the neighbouring handle symmetric around the
+        /// shared anchor.
+        symmetric: bool,
+    },
+    /// Shift-dragging an anchor instantiate a missing control point there.
+    /// `target` is chosen from the drag direction on the first movement.
+    Bend {
+        address: PathAddress,
+        handle: Handle,
+        target: Option<BendTarget>,
+    },
+    /// Dragging a whole path by its body. The last document-space point is
+    /// remembered so each frame only applies the incremental movement.
+    Object {
+        address: PathAddress,
+        last: [f32; 2],
+    },
+}
+
+/// A line segment that a bend drag will turn into a cubic.
+///
+/// The index is the segment in `Path::segments`. `Incoming` bends the segment
+/// that ends at the dragged anchor; `Outgoing` bends the one that starts there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BendTarget {
+    Incoming(usize),
+    Outgoing(usize),
+}
+
+/// Which control point of a cubic segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CtrlSlot {
+    First,
+    Second,
+}
+
+/// A path being drawn with the pen tool.
+#[derive(Clone, Debug)]
+struct PenDraft {
+    /// Layer the finished path will be appended to.
+    layer: usize,
+    path: Path,
+    /// Outgoing control of the most recent anchor, carried into the next
+    /// segment so smooth drags continue smoothly.
+    pending_out: Option<[f32; 2]>,
+    /// True while the mouse is held after placing an anchor (shaping handles).
+    dragging: bool,
+}
+
+impl PenDraft {
+    /// Shapes smooth handles around, and mirrors them across, the most recently
+    /// placed anchor. `point` is the current cursor position in document space.
+    fn shape_last_anchor(&mut self, point: [f32; 2]) {
+        let Some(index) = self.path.segments.len().checked_sub(1) else {
+            return;
+        };
+        let anchor = self.path.segments[index].to;
+        let delta = offset(anchor, point);
+        if delta == [0.0, 0.0] {
+            return;
+        }
+
+        // The incoming control mirrors the outgoing one, which is carried into
+        // the next segment. The start-side control is left as it is (omitted
+        // controls already lie on the previous anchor).
+        self.path.segments[index].ctrl2 = Some(translate(anchor, [-delta[0], -delta[1]]));
+        self.pending_out = Some(translate(anchor, delta));
+    }
 }
 
 /// Editor state: the mutable document plus the current selection.
@@ -91,6 +211,8 @@ pub struct EditorState {
     /// so the sidebar knows to rebuild its rows.
     pub structure_revision: u64,
     drag: Option<Drag>,
+    /// The in-progress pen path, if any.
+    pen: Option<PenDraft>,
 }
 
 impl EditorState {
@@ -101,6 +223,7 @@ impl EditorState {
             selected_handle: None,
             structure_revision: 0,
             drag: None,
+            pen: None,
         }
     }
 
@@ -120,16 +243,27 @@ pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (handle_input, refresh_scene, fit_document).chain());
+        app.init_resource::<ToolState>()
+            .init_resource::<Viewport>()
+            .add_systems(
+                Update,
+                (
+                    handle_viewport_input,
+                    handle_input,
+                    refresh_scene,
+                    fit_document,
+                )
+                    .chain(),
+            );
     }
 }
 
-/// Centers the document in the area left of the sidebar and above the style
-/// panel, scaling it to fill 90% of that area.
+/// Centers the document in the area right of the toolbar, left of the sidebar,
+/// and above the style panel, scaling it to fill 90% of that area.
 pub fn fit_transform(bounds: Bounds, viewport_width: f32, viewport_height: f32) -> Transform {
-    // The sidebar covers the right edge and the style panel the bottom edge,
-    // so fit into what remains.
-    let available_width = (viewport_width - SIDEBAR_WIDTH).max(1.0);
+    // The toolbar, sidebar, and style panel cover the edges, so fit into what
+    // remains.
+    let available_width = (viewport_width - SIDEBAR_WIDTH - TOOLBAR_WIDTH).max(1.0);
     let available_height = (viewport_height - BOTTOM_BAR_HEIGHT).max(1.0);
     let doc_width = bounds.width().max(f32::EPSILON);
     let doc_height = bounds.height().max(f32::EPSILON);
@@ -137,29 +271,113 @@ pub fn fit_transform(bounds: Bounds, viewport_width: f32, viewport_height: f32) 
 
     // Document Y points down, so shifting the document's centre to the content
     // area's centre means moving the entity *up* by `scale * centre.y`. That
-    // centre sits half a sidebar left of the window centre and half a panel
-    // above it.
+    // centre sits between the toolbar and the sidebar and half a style panel
+    // above the bottom edge.
     let center = bounds.center();
     Transform::from_xyz(
-        -scale * center[0] - SIDEBAR_WIDTH * 0.5,
+        -scale * center[0] + (TOOLBAR_WIDTH - SIDEBAR_WIDTH) * 0.5,
         scale * center[1] + BOTTOM_BAR_HEIGHT * 0.5,
         0.0,
     )
     .with_scale(Vec3::splat(scale))
 }
 
+/// The scene transform for the current pan and zoom on top of the automatic
+/// fit.
+fn view_transform(bounds: Bounds, width: f32, height: f32, viewport: &Viewport) -> Transform {
+    let base = fit_transform(bounds, width, height);
+    Transform::from_xyz(
+        base.translation.x + viewport.pan.x,
+        base.translation.y - viewport.pan.y,
+        0.0,
+    )
+    .with_scale(Vec3::splat(base.scale.x * viewport.zoom))
+}
+
 fn fit_document(
     window: Query<&Window, With<PrimaryWindow>>,
     bounds: Res<DocumentBounds>,
+    viewport: Res<Viewport>,
     mut scenes: Query<&mut Transform, With<DocumentScene>>,
 ) {
     let Ok(window) = window.single() else {
         return;
     };
-    let transform = fit_transform(bounds.0, window.width(), window.height());
+    let transform = view_transform(bounds.0, window.width(), window.height(), &viewport);
     for mut scene_transform in &mut scenes {
         *scene_transform = transform;
     }
+}
+
+/// Applies mouse-wheel panning and zooming to the [`Viewport`].
+///
+/// Plain scrolling pans vertically, shift-scrolling horizontally, and
+/// control-scrolling zooms around the cursor.
+fn handle_viewport_input(
+    mut wheel: MessageReader<MouseWheel>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    bounds: Res<DocumentBounds>,
+    mut viewport: ResMut<Viewport>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+
+    let width = window.width();
+    let height = window.height();
+
+    for event in wheel.read() {
+        let conversion = MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR;
+        let (dx, dy) = match event.unit {
+            MouseScrollUnit::Line => (event.x * conversion, event.y * conversion),
+            MouseScrollUnit::Pixel => (event.x, event.y),
+        };
+
+        if ctrl {
+            let anchor = window
+                .cursor_position()
+                .unwrap_or(Vec2::new(width * 0.5, height * 0.5));
+            let factor = 1.1f32.powf(dy / conversion);
+            zoom_around(&mut viewport, bounds.0, width, height, anchor, factor);
+        } else if shift {
+            // A vertical wheel becomes horizontal panning.
+            let horizontal = if dx != 0.0 { dx } else { dy };
+            viewport.pan.x += horizontal;
+        } else {
+            viewport.pan += Vec2::new(dx, dy);
+        }
+    }
+}
+
+/// Multiplies the zoom by `factor`, keeping the document point under `anchor`
+/// pinned to that screen position.
+fn zoom_around(
+    view: &mut Viewport,
+    bounds: Bounds,
+    width: f32,
+    height: f32,
+    anchor: Vec2,
+    factor: f32,
+) {
+    let zoom = (view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    if (zoom - view.zoom).abs() <= f32::EPSILON {
+        return;
+    }
+
+    let current = ViewMapping::new(bounds, width, height, view);
+    let document = current.screen_to_document(anchor);
+
+    // Solve for the pan that keeps `document` under `anchor` at the new zoom.
+    let base = fit_transform(bounds, width, height);
+    let scale = base.scale.x * zoom;
+    view.zoom = zoom;
+    view.pan = Vec2::new(
+        anchor.x - width * 0.5 - base.translation.x - scale * document[0],
+        anchor.y - height * 0.5 + base.translation.y - scale * document[1],
+    );
 }
 
 /// Maps between window pixels and document coordinates for the current fit.
@@ -173,8 +391,8 @@ struct ViewMapping {
 }
 
 impl ViewMapping {
-    fn new(bounds: Bounds, width: f32, height: f32) -> Self {
-        let transform = fit_transform(bounds, width, height);
+    fn new(bounds: Bounds, width: f32, height: f32, viewport: &Viewport) -> Self {
+        let transform = view_transform(bounds, width, height, viewport);
         Self {
             scale: transform.scale.x,
             tx: transform.translation.x,
@@ -202,7 +420,38 @@ fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     bounds: Res<DocumentBounds>,
+    viewport: Res<Viewport>,
+    tool: Res<ToolState>,
     mut editor: ResMut<EditorState>,
+) {
+    match tool.0 {
+        Tool::Select => {
+            handle_select_input(&mouse, &keys, &windows, &bounds, &viewport, &mut editor)
+        }
+        Tool::Pen => handle_pen_input(&mouse, &keys, &windows, &bounds, &viewport, &mut editor),
+    }
+}
+
+/// True while either shift key is held.
+fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
+}
+
+/// True when the cursor is over one of the editor's panels rather than the
+/// canvas.
+fn over_ui(cursor: Vec2, window: &Window) -> bool {
+    cursor.x < TOOLBAR_WIDTH
+        || cursor.x >= window.width() - SIDEBAR_WIDTH
+        || cursor.y >= window.height() - BOTTOM_BAR_HEIGHT
+}
+
+fn handle_select_input(
+    mouse: &ButtonInput<MouseButton>,
+    keys: &ButtonInput<KeyCode>,
+    windows: &Query<&Window, With<PrimaryWindow>>,
+    bounds: &DocumentBounds,
+    viewport: &Viewport,
+    editor: &mut EditorState,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
         editor.selected = None;
@@ -212,7 +461,7 @@ fn handle_input(
     }
 
     if keys.just_pressed(KeyCode::Delete) {
-        delete_selection(&mut editor);
+        delete_selection(editor);
         return;
     }
 
@@ -223,45 +472,121 @@ fn handle_input(
         return;
     };
 
-    if cursor.x >= window.width() - SIDEBAR_WIDTH || cursor.y >= window.height() - BOTTOM_BAR_HEIGHT
-    {
-        // The pointer is over the sidebar or the style panel, where the UI
-        // handles clicks. Still finish a drag that was released there.
+    let view = ViewMapping::new(bounds.0, window.width(), window.height(), viewport);
+    let point = view.screen_to_document(cursor);
+
+    if over_ui(cursor, window) {
+        // The UI handles clicks here. Still finish a drag that was released
+        // over a panel.
         if mouse.just_released(MouseButton::Left) {
             editor.drag = None;
         }
         return;
     }
 
-    let view = ViewMapping::new(bounds.0, window.width(), window.height());
-    let point = view.screen_to_document(cursor);
-
     if mouse.just_pressed(MouseButton::Left) {
         // Control points of the current selection take priority over picking a
         // different path, otherwise clicking a handle next to another shape
         // would re-select that shape.
+        let shift = shift_held(keys);
         let mut started_drag = false;
         if let Some(address) = editor.selected.clone()
             && let Some(path) = path_at(&editor.document, &address)
             && let Some(handle) = find_handle(path, point, view.document_per_pixel() * 8.0)
         {
-            editor.drag = Some(Drag { address, handle });
+            let endpoint = matches!(handle, Handle::Start | Handle::Anchor(_));
+            let bending = shift && endpoint && !bend_candidates(path, handle).is_empty();
+            editor.drag = Some(if bending {
+                Drag::Bend {
+                    address,
+                    handle,
+                    target: None,
+                }
+            } else {
+                Drag::Handle {
+                    address,
+                    handle,
+                    symmetric: shift,
+                }
+            });
             editor.selected_handle = Some(handle);
             started_drag = true;
         }
 
         if !started_drag {
-            editor.selected = pick_path(&editor.document, point, view.document_per_pixel() * 3.0);
+            // Pressing a path selects it and starts moving it as a whole;
+            // pressing empty space clears the selection.
+            let picked = pick_path(&editor.document, point, view.document_per_pixel() * 3.0);
             editor.selected_handle = None;
-            editor.drag = None;
+            editor.drag = picked.clone().map(|address| Drag::Object {
+                address,
+                last: point,
+            });
+            editor.selected = picked;
         }
     }
 
     if let Some(drag) = editor.drag.clone() {
-        if mouse.pressed(MouseButton::Left)
-            && let Some(path) = path_at_mut(&mut editor.document, &drag.address)
-        {
-            set_handle(path, drag.handle, point);
+        if mouse.pressed(MouseButton::Left) {
+            match drag {
+                Drag::Handle {
+                    address,
+                    handle,
+                    symmetric,
+                } => {
+                    if let Some(path) = path_at_mut(&mut editor.document, &address) {
+                        set_handle(path, handle, point);
+                        if symmetric {
+                            symmetrize(path, handle, point);
+                        }
+                    }
+                }
+                Drag::Bend {
+                    address,
+                    handle,
+                    target,
+                } => {
+                    let threshold = view.document_per_pixel() * 3.0;
+                    let mut decided = target;
+                    if let Some(path) = path_at_mut(&mut editor.document, &address) {
+                        if let Some(target) = target {
+                            // Already bending: keep the handle under the cursor.
+                            apply_bend(path, target, point);
+                            decided = Some(target);
+                        } else {
+                            // Choose which of the lines meeting here to bend
+                            // once the drag has a clear direction.
+                            let anchor = endpoint_anchor(path, handle).unwrap_or(point);
+                            if distance(anchor, point) >= threshold
+                                && let Some(target) =
+                                    choose_bend(path, handle, offset(anchor, point))
+                                && apply_bend(path, target, point)
+                            {
+                                decided = Some(target);
+                            }
+                        }
+                    }
+                    if decided != target {
+                        editor.drag = Some(Drag::Bend {
+                            address,
+                            handle,
+                            target: decided,
+                        });
+                    }
+                }
+                Drag::Object { address, last } => {
+                    let delta = offset(last, point);
+                    if delta != [0.0, 0.0]
+                        && let Some(path) = path_at_mut(&mut editor.document, &address)
+                    {
+                        translate_path(path, delta);
+                    }
+                    editor.drag = Some(Drag::Object {
+                        address,
+                        last: point,
+                    });
+                }
+            }
         }
         if mouse.just_released(MouseButton::Left) {
             editor.drag = None;
@@ -269,26 +594,132 @@ fn handle_input(
     }
 }
 
+fn handle_pen_input(
+    mouse: &ButtonInput<MouseButton>,
+    keys: &ButtonInput<KeyCode>,
+    windows: &Query<&Window, With<PrimaryWindow>>,
+    bounds: &DocumentBounds,
+    viewport: &Viewport,
+    editor: &mut EditorState,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        if editor.pen.is_some() {
+            // Escape abandons the path being drawn.
+            editor.pen = None;
+        } else {
+            editor.selected = None;
+            editor.selected_handle = None;
+        }
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Enter) {
+        finish_pen(editor, true);
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+
+    let view = ViewMapping::new(bounds.0, window.width(), window.height(), viewport);
+    let point = view.screen_to_document(cursor);
+    let slack = view.document_per_pixel() * 8.0;
+
+    if over_ui(cursor, window) {
+        if mouse.just_released(MouseButton::Left)
+            && let Some(draft) = &mut editor.pen
+        {
+            draft.dragging = false;
+        }
+        return;
+    }
+
+    if mouse.just_pressed(MouseButton::Left) {
+        if editor.pen.is_none() {
+            let layer = ensure_drawing_layer(&mut editor.document);
+            editor.pen = Some(PenDraft {
+                layer,
+                path: Path::new(point),
+                pending_out: None,
+                dragging: false,
+            });
+            editor.selected = None;
+            editor.selected_handle = None;
+        } else if pen_should_close(editor, point, slack) {
+            if let Some(draft) = &mut editor.pen {
+                draft.path.close();
+            }
+            finish_pen(editor, true);
+            return;
+        } else if let Some(draft) = &mut editor.pen {
+            // The next segment starts from the last anchor and uses the
+            // outgoing control left by a previous drag, if any.
+            draft.path.segments.push(Segment {
+                ctrl1: draft.pending_out.take(),
+                ctrl2: None,
+                to: point,
+            });
+            draft.dragging = true;
+        }
+    }
+
+    // While the mouse is held after placing an anchor, dragging shapes smooth
+    // handles around it.
+    if mouse.pressed(MouseButton::Left)
+        && let Some(draft) = &mut editor.pen
+        && draft.dragging
+    {
+        draft.shape_last_anchor(point);
+    }
+
+    if mouse.just_released(MouseButton::Left)
+        && let Some(draft) = &mut editor.pen
+    {
+        draft.dragging = false;
+    }
+}
+
 fn refresh_scene(
     editor: Res<EditorState>,
     bounds: Res<DocumentBounds>,
+    viewport: Res<Viewport>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut scenes: Query<&mut VelloScene2d, With<DocumentScene>>,
 ) {
-    let scale = windows
-        .single()
-        .map(|window| {
-            fit_transform(bounds.0, window.width(), window.height())
-                .scale
-                .x
-        })
-        .unwrap_or(1.0);
+    let window = windows.single().ok();
+    let view =
+        window.map(|window| ViewMapping::new(bounds.0, window.width(), window.height(), &viewport));
+    let scale = view.map(|view| view.scale).unwrap_or(1.0);
 
     let mut scene = build_scene(&editor.document);
     if let Some(address) = &editor.selected
         && let Some(path) = path_at(&editor.document, address)
     {
         draw_control_overlay(&mut scene, path, scale, editor.selected_handle);
+    }
+
+    if let Some(draft) = &editor.pen {
+        draw_control_overlay(&mut scene, &draft.path, scale, None);
+
+        // Rubber band from the last anchor to the cursor while the next point
+        // is being chosen.
+        if !draft.dragging
+            && let (Some(view), Some(window)) = (view, window)
+            && let Some(cursor) = window.cursor_position()
+            && !over_ui(cursor, window)
+        {
+            stroke_segment(
+                &mut scene,
+                path_end(&draft.path),
+                view.screen_to_document(cursor),
+                f64::from(1.5 / scale.max(f32::EPSILON)),
+                &Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x80),
+            );
+        }
     }
 
     if let Ok(mut scene_component) = scenes.single_mut() {
@@ -347,6 +778,29 @@ pub fn style_at_mut<'a>(
         PathAddress::Clip { layer, items } => {
             clip_group_at_mut(document, *layer, items).map(|group| &mut group.style)
         }
+    }
+}
+
+/// Whether the path named by `address` is closed. `None` when the address does
+/// not resolve to a path.
+pub fn path_closed_at(document: &Document, address: &PathAddress) -> Option<bool> {
+    path_at(document, address).map(Path::is_closed)
+}
+
+/// Closes or opens the path named by `address`.
+///
+/// Closing adds a straight segment back to the start; opening removes the
+/// closing segment. Returns whether the path was actually changed.
+pub fn set_path_closed(document: &mut Document, address: &PathAddress, closed: bool) -> bool {
+    match path_at_mut(document, address) {
+        Some(path) => {
+            if closed {
+                path.close()
+            } else {
+                path.open()
+            }
+        }
+        None => false,
     }
 }
 
@@ -544,7 +998,7 @@ fn path_hit(path: &Path, style: &Style, point: [f32; 2], slack: f32) -> bool {
 
 fn path_contains(path: &Path, point: [f32; 2]) -> bool {
     let mut bez = path_to_bez_path(path);
-    if !path.closed {
+    if !path.is_closed() {
         // Fills implicitly close open subpaths.
         bez.close_path();
     }
@@ -564,44 +1018,21 @@ fn path_distance(path: &Path, point: [f32; 2]) -> f32 {
 // Control points
 // ---------------------------------------------------------------------------
 
-/// Tolerance for treating the end of the last segment as the start anchor.
-const JOIN_EPSILON: f32 = 1e-3;
-
-/// Index of the last segment when it ends exactly at the start of a closed
-/// path.
-///
-/// Such a segment closes the loop with no gap, so its endpoint is the same
-/// anchor as [`Path::start`].
-fn closing_segment(path: &Path) -> Option<usize> {
-    if !path.closed {
-        return None;
-    }
-    let index = path.segments.len().checked_sub(1)?;
-    let last = path.segments.last()?;
-    (distance(segment_to(last), path.start) <= JOIN_EPSILON).then_some(index)
-}
-
-/// All draggable points of a path, including cubic control handles.
+/// All draggable points of a path, including the control points that exist.
 fn handles(path: &Path) -> Vec<(Handle, [f32; 2])> {
-    let mut handles = vec![(Handle::Start, path.start)];
-    let closing = closing_segment(path);
+    let mut handles = Vec::new();
+    // A closed loop has no separate start anchor: it is the last segment's
+    // endpoint, listed below like any other anchor.
+    if let (false, Some(start)) = (path.is_closed(), path.start()) {
+        handles.push((Handle::Start, start));
+    }
     for (index, segment) in path.segments.iter().enumerate() {
-        // The closing segment's endpoint is the start anchor and is already
-        // listed above; do not offer a second handle on top of it.
-        let duplicate = closing == Some(index);
-        match segment {
-            Segment::Line { to } => {
-                if !duplicate {
-                    handles.push((Handle::LineTo(index), *to));
-                }
-            }
-            Segment::Cubic { ctrl1, ctrl2, to } => {
-                handles.push((Handle::CubicCtrl1(index), *ctrl1));
-                handles.push((Handle::CubicCtrl2(index), *ctrl2));
-                if !duplicate {
-                    handles.push((Handle::CubicTo(index), *to));
-                }
-            }
+        handles.push((Handle::Anchor(index), segment.to));
+        if let Some(ctrl1) = segment.ctrl1 {
+            handles.push((Handle::Ctrl1(index), ctrl1));
+        }
+        if let Some(ctrl2) = segment.ctrl2 {
+            handles.push((Handle::Ctrl2(index), ctrl2));
         }
     }
     handles
@@ -621,73 +1052,243 @@ fn find_handle(path: &Path, point: [f32; 2], radius: f32) -> Option<Handle> {
 fn set_handle(path: &mut Path, handle: Handle, point: [f32; 2]) {
     match handle {
         Handle::Start => {
-            let delta = offset(path.start, point);
-            let closing = closing_segment(path);
-            path.start = point;
+            let PathEnds::Open(start) = &mut path.ends else {
+                return;
+            };
+            let delta = offset(*start, point);
+            *start = point;
 
-            // The control handles attached to the anchor follow it.
-            if let Some(Segment::Cubic { ctrl1, .. }) = path.segments.first_mut() {
+            // The outgoing control attached to the anchor follows it.
+            if let Some(segment) = path.segments.first_mut()
+                && let Some(ctrl1) = segment.ctrl1.as_mut()
+            {
                 *ctrl1 = translate(*ctrl1, delta);
             }
-            if let Some(index) = closing
-                && let Some(segment) = path.segments.get_mut(index)
-            {
-                match segment {
-                    Segment::Line { to } => *to = point,
-                    Segment::Cubic { ctrl2, to, .. } => {
-                        *ctrl2 = translate(*ctrl2, delta);
-                        *to = point;
-                    }
-                }
-            }
         }
-        Handle::LineTo(index) | Handle::CubicTo(index) => {
+        Handle::Anchor(index) => {
             let Some(segment) = path.segments.get(index) else {
                 return;
             };
-            let delta = offset(segment_to(segment), point);
-            let closing = closing_segment(path);
+            let delta = offset(segment.to, point);
+            let len = path.segments.len();
 
-            match &mut path.segments[index] {
-                Segment::Line { to } => *to = point,
-                Segment::Cubic { to, .. } => *to = point,
-            }
-            // Incoming control of this segment and outgoing control of the
-            // following one travel with the anchor.
-            if let Segment::Cubic { ctrl2, .. } = &mut path.segments[index] {
+            path.segments[index].to = point;
+            // The incoming control of this segment and the outgoing control of
+            // the following one travel with the anchor.
+            if let Some(ctrl2) = path.segments[index].ctrl2.as_mut() {
                 *ctrl2 = translate(*ctrl2, delta);
             }
-            if let Some(Segment::Cubic { ctrl1, .. }) = path.segments.get_mut(index + 1) {
+            let next = if index + 1 < len {
+                Some(index + 1)
+            } else if path.is_closed() {
+                Some(0)
+            } else {
+                None
+            };
+            if let Some(next) = next
+                && let Some(ctrl1) = path.segments[next].ctrl1.as_mut()
+            {
                 *ctrl1 = translate(*ctrl1, delta);
             }
-
-            // If this endpoint is the start anchor of a closed loop, move the
-            // start point and the loop's outgoing control with it.
-            if closing == Some(index) {
-                path.start = point;
-                if let Some(Segment::Cubic { ctrl1, .. }) = path.segments.first_mut() {
-                    *ctrl1 = translate(*ctrl1, delta);
-                }
-            }
         }
-        Handle::CubicCtrl1(index) => {
-            if let Some(Segment::Cubic { ctrl1, .. }) = path.segments.get_mut(index) {
+        Handle::Ctrl1(index) => {
+            if let Some(ctrl1) = path
+                .segments
+                .get_mut(index)
+                .and_then(|segment| segment.ctrl1.as_mut())
+            {
                 *ctrl1 = point;
             }
         }
-        Handle::CubicCtrl2(index) => {
-            if let Some(Segment::Cubic { ctrl2, .. }) = path.segments.get_mut(index) {
+        Handle::Ctrl2(index) => {
+            if let Some(ctrl2) = path
+                .segments
+                .get_mut(index)
+                .and_then(|segment| segment.ctrl2.as_mut())
+            {
                 *ctrl2 = point;
             }
         }
     }
 }
 
-fn segment_to(segment: &Segment) -> [f32; 2] {
-    match segment {
-        Segment::Line { to } => *to,
-        Segment::Cubic { to, .. } => *to,
+// ---------------------------------------------------------------------------
+// Instantiating control points and symmetric handles
+// ---------------------------------------------------------------------------
+
+/// The anchor a segment starts at.
+fn segment_start(path: &Path, index: usize) -> [f32; 2] {
+    if index == 0 {
+        path.start().unwrap_or([0.0, 0.0])
+    } else {
+        path.segments[index - 1].to
     }
+}
+
+/// The position of an anchor handle.
+fn endpoint_anchor(path: &Path, handle: Handle) -> Option<[f32; 2]> {
+    match handle {
+        Handle::Start => path.start(),
+        Handle::Anchor(index) => path.segments.get(index).map(|segment| segment.to),
+        Handle::Ctrl1(_) | Handle::Ctrl2(_) => None,
+    }
+}
+
+/// Segments that a shift-drag starting at `handle` can give a control point.
+///
+/// Only sides without a control yet are candidates. Each entry pairs the
+/// segment with the direction from the anchor to the segment's far end, so
+/// when two segments meet at the anchor the drag direction picks one.
+fn bend_candidates(path: &Path, handle: Handle) -> Vec<(BendTarget, [f32; 2])> {
+    let Some(anchor) = endpoint_anchor(path, handle) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+
+    // The segment ending at the dragged anchor.
+    let incoming = match handle {
+        Handle::Anchor(index) => Some(index),
+        Handle::Start | Handle::Ctrl1(_) | Handle::Ctrl2(_) => None,
+    };
+    if let Some(index) = incoming
+        && let Some(segment) = path.segments.get(index)
+        && segment.ctrl2.is_none()
+    {
+        let far = segment_start(path, index);
+        candidates.push((BendTarget::Incoming(index), offset(anchor, far)));
+    }
+
+    // The segment starting at the dragged anchor.
+    let len = path.segments.len();
+    let outgoing = match handle {
+        Handle::Start => Some(0),
+        Handle::Anchor(index) if index + 1 < len => Some(index + 1),
+        Handle::Anchor(_) if path.is_closed() => Some(0),
+        _ => None,
+    };
+    if let Some(index) = outgoing
+        && let Some(segment) = path.segments.get(index)
+        && segment.ctrl1.is_none()
+    {
+        candidates.push((BendTarget::Outgoing(index), offset(anchor, segment.to)));
+    }
+
+    candidates
+}
+
+/// Picks the candidate whose direction best matches the drag.
+fn choose_bend(path: &Path, handle: Handle, drag: [f32; 2]) -> Option<BendTarget> {
+    let drag_length = (drag[0] * drag[0] + drag[1] * drag[1]).sqrt();
+    if drag_length <= f32::EPSILON {
+        return None;
+    }
+
+    bend_candidates(path, handle)
+        .into_iter()
+        .map(|(target, direction)| {
+            let length = (direction[0] * direction[0] + direction[1] * direction[1])
+                .sqrt()
+                .max(f32::EPSILON);
+            let alignment = (direction[0] * drag[0] + direction[1] * drag[1]) / length;
+            (alignment, target)
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, target)| target)
+}
+
+/// Gives the targeted side of a segment a control point at `point`, creating
+/// it when missing. Calling it again keeps moving that control. Returns
+/// `false` when the segment does not exist.
+fn apply_bend(path: &mut Path, target: BendTarget, point: [f32; 2]) -> bool {
+    let (index, slot) = match target {
+        BendTarget::Outgoing(index) => (index, CtrlSlot::First),
+        BendTarget::Incoming(index) => (index, CtrlSlot::Second),
+    };
+    let Some(segment) = path.segments.get_mut(index) else {
+        return false;
+    };
+    match slot {
+        CtrlSlot::First => segment.ctrl1 = Some(point),
+        CtrlSlot::Second => segment.ctrl2 = Some(point),
+    }
+    true
+}
+
+/// Mirrors the neighbouring handle of a shift-dragged control point.
+///
+/// Symmetry only applies across a shared node: when the adjacent segment has a
+/// control at the anchor this handle meets, that control is mirrored across the
+/// anchor so the joint stays smooth. A missing neighbour control is left
+/// missing, so a lone cubic's other control never moves.
+fn symmetrize(path: &mut Path, handle: Handle, point: [f32; 2]) {
+    match handle {
+        Handle::Ctrl1(index) => {
+            let anchor = segment_start(path, index);
+            if let Some(location) = incoming_control(path, index) {
+                set_control(path, location, mirror(anchor, point));
+            }
+        }
+        Handle::Ctrl2(index) => {
+            let Some(segment) = path.segments.get(index) else {
+                return;
+            };
+            let anchor = segment.to;
+            if let Some(location) = outgoing_control(path, index) {
+                set_control(path, location, mirror(anchor, point));
+            }
+        }
+        Handle::Start | Handle::Anchor(_) => {}
+    }
+}
+
+/// The control that meets the start of segment `index` at its anchor.
+fn incoming_control(path: &Path, index: usize) -> Option<(usize, CtrlSlot)> {
+    let previous = if index > 0 {
+        index - 1
+    } else if path.is_closed() {
+        path.segments.len().checked_sub(1)?
+    } else {
+        return None;
+    };
+    path.segments
+        .get(previous)?
+        .ctrl2
+        .is_some()
+        .then_some((previous, CtrlSlot::Second))
+}
+
+/// The control that meets the end of segment `index` at its anchor.
+fn outgoing_control(path: &Path, index: usize) -> Option<(usize, CtrlSlot)> {
+    let len = path.segments.len();
+    let next = if index + 1 < len {
+        index + 1
+    } else if path.is_closed() {
+        0
+    } else {
+        return None;
+    };
+    path.segments
+        .get(next)?
+        .ctrl1
+        .is_some()
+        .then_some((next, CtrlSlot::First))
+}
+
+fn set_control(path: &mut Path, location: (usize, CtrlSlot), point: [f32; 2]) {
+    if let Some(segment) = path.segments.get_mut(location.0) {
+        match location.1 {
+            CtrlSlot::First => segment.ctrl1 = Some(point),
+            CtrlSlot::Second => segment.ctrl2 = Some(point),
+        }
+    }
+}
+
+fn mirror(anchor: [f32; 2], point: [f32; 2]) -> [f32; 2] {
+    [2.0 * anchor[0] - point[0], 2.0 * anchor[1] - point[1]]
+}
+
+fn segment_to(segment: &Segment) -> [f32; 2] {
+    segment.to
 }
 
 fn offset(from: [f32; 2], to: [f32; 2]) -> [f32; 2] {
@@ -704,6 +1305,113 @@ fn distance(a: [f32; 2], b: [f32; 2]) -> f32 {
 
 fn to_kurbo_point(point: [f32; 2]) -> KurboPoint {
     KurboPoint::new(f64::from(point[0]), f64::from(point[1]))
+}
+
+// ---------------------------------------------------------------------------
+// Object dragging
+// ---------------------------------------------------------------------------
+
+/// Moves every point of `path` by `delta`.
+fn translate_path(path: &mut Path, delta: [f32; 2]) {
+    if let PathEnds::Open(start) = &mut path.ends {
+        *start = translate(*start, delta);
+    }
+    for segment in &mut path.segments {
+        if let Some(ctrl1) = segment.ctrl1.as_mut() {
+            *ctrl1 = translate(*ctrl1, delta);
+        }
+        if let Some(ctrl2) = segment.ctrl2.as_mut() {
+            *ctrl2 = translate(*ctrl2, delta);
+        }
+        segment.to = translate(segment.to, delta);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pen tool
+// ---------------------------------------------------------------------------
+
+/// Returns the index of the layer new pen paths should go into: the topmost
+/// (highest Z) layer, creating one when the document is empty.
+fn ensure_drawing_layer(document: &mut Document) -> usize {
+    let top = document
+        .layers
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal))
+        .map(|(index, _)| index);
+
+    match top {
+        Some(index) => index,
+        None => {
+            document.layers.push(Layer {
+                name: "Drawing".into(),
+                z: 0.0,
+                items: Vec::new(),
+            });
+            document.layers.len() - 1
+        }
+    }
+}
+
+/// True when the next click should close the current pen path rather than add
+/// another anchor.
+fn pen_should_close(editor: &EditorState, point: [f32; 2], slack: f32) -> bool {
+    editor.pen.as_ref().is_some_and(|draft| {
+        !draft.path.segments.is_empty()
+            && draft
+                .path
+                .start()
+                .is_some_and(|start| distance(point, start) <= slack)
+    })
+}
+
+/// Ends the pen draft. When `finalize` is set and the draft has at least one
+/// segment, the path is added to the document and selected.
+pub fn finish_pen(editor: &mut EditorState, finalize: bool) {
+    let Some(draft) = editor.pen.take() else {
+        return;
+    };
+    if !finalize || draft.path.segments.is_empty() {
+        return;
+    }
+    let Some(layer) = editor.document.layers.get_mut(draft.layer) else {
+        return;
+    };
+
+    let index = layer.items.len();
+    layer.items.push(Item::Path(PathItem {
+        path: draft.path,
+        style: pen_style(),
+    }));
+
+    editor.selected = Some(PathAddress::Item {
+        layer: draft.layer,
+        items: vec![index],
+    });
+    editor.selected_handle = None;
+    editor.drag = None;
+    editor.structure_revision += 1;
+}
+
+/// Default paint for a newly drawn path: a light stroke with no fill.
+fn pen_style() -> Style {
+    Style {
+        fill: None,
+        stroke: Some(StrokeStyle {
+            color: Rgba8::rgb(0xdd, 0xe1, 0xe8),
+            width: 2.0,
+        }),
+    }
+}
+
+/// The last anchor of `path`.
+fn path_end(path: &Path) -> [f32; 2] {
+    path.segments
+        .last()
+        .map(segment_to)
+        .or_else(|| path.start())
+        .unwrap_or([0.0, 0.0])
 }
 
 // ---------------------------------------------------------------------------
@@ -735,43 +1443,48 @@ fn delete_selection(editor: &mut EditorState) {
     editor.drag = None;
 }
 
-/// Removes one control point from `path`.
+/// Removes one point from `path`.
+///
+/// Removing a control point leaves the segment's other control intact, so a
+/// segment only becomes a line once both controls are gone.
 ///
 /// Returns `false` when the handle cannot be deleted on its own:
 ///
-/// * the start of a closed path is also the loop's join,
 /// * an open path's start has no successor to become the new start,
-/// * a line segment has no control points to remove.
+/// * a closed loop cannot lose its only segment,
+/// * the control point is already missing.
 fn delete_handle(path: &mut Path, handle: Handle) -> bool {
     match handle {
         Handle::Start => {
-            if path.closed || path.segments.is_empty() {
+            if path.is_closed() || path.segments.is_empty() {
                 return false;
             }
             // The first segment's endpoint becomes the new start.
             let first = path.segments.remove(0);
-            path.start = segment_to(&first);
+            path.ends = PathEnds::Open(first.to);
             true
         }
-        Handle::LineTo(index) | Handle::CubicTo(index) => {
+        Handle::Anchor(index) => {
             if index >= path.segments.len() {
+                return false;
+            }
+            if path.is_closed() && path.segments.len() <= 1 {
                 return false;
             }
             path.segments.remove(index);
             true
         }
-        Handle::CubicCtrl1(index) | Handle::CubicCtrl2(index) => {
+        Handle::Ctrl1(index) => {
             let Some(segment) = path.segments.get_mut(index) else {
                 return false;
             };
-            if matches!(segment, Segment::Cubic { .. }) {
-                // Dropping a control point straightens the segment.
-                let to = segment_to(segment);
-                *segment = Segment::Line { to };
-                true
-            } else {
-                false
-            }
+            segment.ctrl1.take().is_some()
+        }
+        Handle::Ctrl2(index) => {
+            let Some(segment) = path.segments.get_mut(index) else {
+                return false;
+            };
+            segment.ctrl2.take().is_some()
         }
     }
 }
@@ -826,17 +1539,18 @@ fn draw_control_overlay(
         &path_to_bez_path(path),
     );
 
-    // Arms from cubic control points to the anchors they influence.
-    let mut previous = path.start;
+    // Arms from cubic control points to the anchors they influence. Only the
+    // control points that actually exist have arms; omitted ones lie on their
+    // anchors and would draw a zero-length arm anyway.
+    let mut previous = path.start().unwrap_or([0.0, 0.0]);
     for segment in &path.segments {
-        match segment {
-            Segment::Line { to } => previous = *to,
-            Segment::Cubic { ctrl1, ctrl2, to } => {
-                stroke_segment(scene, previous, *ctrl1, pixels(1.0), &accent);
-                stroke_segment(scene, *ctrl2, *to, pixels(1.0), &accent);
-                previous = *to;
-            }
+        if let Some(ctrl1) = segment.ctrl1 {
+            stroke_segment(scene, previous, ctrl1, pixels(1.0), &accent);
         }
+        if let Some(ctrl2) = segment.ctrl2 {
+            stroke_segment(scene, ctrl2, segment.to, pixels(1.0), &accent);
+        }
+        previous = segment.to;
     }
 
     for (handle, position) in handles(path) {
@@ -1116,11 +1830,11 @@ mod tests {
             min: [0.0, 0.0],
             max: [400.0, 200.0],
         };
-        let view = ViewMapping::new(bounds, 900.0, 900.0);
+        let view = ViewMapping::new(bounds, 900.0, 900.0, &Viewport::default());
 
-        // The content is centered in the window area left of the sidebar and
-        // above the style panel.
-        let content_center_x = (900.0 - SIDEBAR_WIDTH) * 0.5;
+        // The content is centered in the window area between the toolbar and
+        // the sidebar, above the style panel.
+        let content_center_x = TOOLBAR_WIDTH + (900.0 - SIDEBAR_WIDTH - TOOLBAR_WIDTH) * 0.5;
         let content_center_y = (900.0 - BOTTOM_BAR_HEIGHT) * 0.5;
         let center = view.screen_to_document(Vec2::new(content_center_x, content_center_y));
         assert!((center[0] - 200.0).abs() < 1e-4);
@@ -1137,12 +1851,12 @@ mod tests {
     #[test]
     fn set_handle_updates_the_right_point() {
         let mut path = Path::new([0.0, 0.0]).cubic_to([10.0, 0.0], [20.0, 0.0], [30.0, 0.0]);
-        set_handle(&mut path, Handle::CubicCtrl2(0), [12.0, 34.0]);
+        set_handle(&mut path, Handle::Ctrl2(0), [12.0, 34.0]);
         assert_eq!(
             path.segments[0],
-            Segment::Cubic {
-                ctrl1: [10.0, 0.0],
-                ctrl2: [12.0, 34.0],
+            Segment {
+                ctrl1: Some([10.0, 0.0]),
+                ctrl2: Some([12.0, 34.0]),
                 to: [30.0, 0.0]
             }
         );
@@ -1155,9 +1869,10 @@ mod tests {
             .cubic_to([20.0, 30.0], [10.0, 30.0], [0.0, 0.0])
             .closed();
 
+        let join = path.start().unwrap();
         let at_join = handles(&path)
             .into_iter()
-            .filter(|(_, position)| distance(*position, path.start) <= JOIN_EPSILON)
+            .filter(|(_, position)| distance(*position, join) <= 1e-3)
             .count();
         assert_eq!(at_join, 1);
     }
@@ -1168,23 +1883,23 @@ mod tests {
             .cubic_to([10.0, 0.0], [20.0, 10.0], [30.0, 0.0])
             .cubic_to([40.0, 10.0], [50.0, 0.0], [60.0, 0.0]);
 
-        set_handle(&mut path, Handle::CubicTo(0), [40.0, 0.0]);
+        set_handle(&mut path, Handle::Anchor(0), [40.0, 0.0]);
 
         // The anchor's incoming and outgoing controls both moved by the
         // anchor's delta, while the far ends of the segments stayed put.
         assert_eq!(
             path.segments[0],
-            Segment::Cubic {
-                ctrl1: [10.0, 0.0],
-                ctrl2: [30.0, 10.0],
+            Segment {
+                ctrl1: Some([10.0, 0.0]),
+                ctrl2: Some([30.0, 10.0]),
                 to: [40.0, 0.0]
             }
         );
         assert_eq!(
             path.segments[1],
-            Segment::Cubic {
-                ctrl1: [50.0, 10.0],
-                ctrl2: [50.0, 0.0],
+            Segment {
+                ctrl1: Some([50.0, 10.0]),
+                ctrl2: Some([50.0, 0.0]),
                 to: [60.0, 0.0]
             }
         );
@@ -1197,22 +1912,23 @@ mod tests {
             .cubic_to([20.0, 30.0], [10.0, 30.0], [0.0, 0.0])
             .closed();
 
-        set_handle(&mut path, Handle::Start, [5.0, 5.0]);
+        // The join is the last segment's endpoint, not a separate start handle.
+        set_handle(&mut path, Handle::Anchor(1), [5.0, 5.0]);
 
-        assert_eq!(path.start, [5.0, 5.0]);
+        assert_eq!(path.start(), Some([5.0, 5.0]));
         assert_eq!(
             path.segments[0],
-            Segment::Cubic {
-                ctrl1: [15.0, 5.0],
-                ctrl2: [20.0, 0.0],
+            Segment {
+                ctrl1: Some([15.0, 5.0]),
+                ctrl2: Some([20.0, 0.0]),
                 to: [30.0, 0.0]
             }
         );
         assert_eq!(
             path.segments[1],
-            Segment::Cubic {
-                ctrl1: [20.0, 30.0],
-                ctrl2: [15.0, 35.0],
+            Segment {
+                ctrl1: Some([20.0, 30.0]),
+                ctrl2: Some([15.0, 35.0]),
                 to: [5.0, 5.0]
             }
         );
@@ -1224,17 +1940,28 @@ mod tests {
             .line_to([10.0, 0.0])
             .line_to([20.0, 0.0]);
 
-        assert!(delete_handle(&mut path, Handle::LineTo(0)));
-        assert_eq!(path.start, [0.0, 0.0]);
-        assert_eq!(path.segments, vec![Segment::Line { to: [20.0, 0.0] }]);
+        assert!(delete_handle(&mut path, Handle::Anchor(0)));
+        assert_eq!(path.start(), Some([0.0, 0.0]));
+        assert_eq!(path.segments, vec![Segment::line([20.0, 0.0])]);
     }
 
     #[test]
-    fn deleting_a_control_point_straightens_the_segment() {
+    fn deleting_a_control_point_removes_only_that_control() {
         let mut path = Path::new([0.0, 0.0]).cubic_to([10.0, 0.0], [20.0, 0.0], [30.0, 0.0]);
 
-        assert!(delete_handle(&mut path, Handle::CubicCtrl1(0)));
-        assert_eq!(path.segments, vec![Segment::Line { to: [30.0, 0.0] }]);
+        assert!(delete_handle(&mut path, Handle::Ctrl1(0)));
+        assert_eq!(
+            path.segments,
+            vec![Segment {
+                ctrl1: None,
+                ctrl2: Some([20.0, 0.0]),
+                to: [30.0, 0.0]
+            }]
+        );
+
+        // With both controls gone the segment is a line.
+        assert!(delete_handle(&mut path, Handle::Ctrl2(0)));
+        assert_eq!(path.segments, vec![Segment::line([30.0, 0.0])]);
     }
 
     #[test]
@@ -1244,8 +1971,8 @@ mod tests {
             .line_to([20.0, 0.0]);
 
         assert!(delete_handle(&mut path, Handle::Start));
-        assert_eq!(path.start, [10.0, 0.0]);
-        assert_eq!(path.segments, vec![Segment::Line { to: [20.0, 0.0] }]);
+        assert_eq!(path.start(), Some([10.0, 0.0]));
+        assert_eq!(path.segments, vec![Segment::line([20.0, 0.0])]);
 
         // A closed path's start is its join, so it cannot be removed on its
         // own.
@@ -1299,5 +2026,286 @@ mod tests {
             }
         ));
         assert_eq!(document.layers[0].items.len(), 1);
+    }
+
+    #[test]
+    fn dragging_a_path_translates_all_points() {
+        let mut path = Path::new([0.0, 0.0])
+            .cubic_to([10.0, 0.0], [20.0, 10.0], [30.0, 10.0])
+            .line_to([40.0, 20.0]);
+
+        translate_path(&mut path, [5.0, -3.0]);
+
+        assert_eq!(path.start(), Some([5.0, -3.0]));
+        assert_eq!(
+            path.segments[0],
+            Segment {
+                ctrl1: Some([15.0, -3.0]),
+                ctrl2: Some([25.0, 7.0]),
+                to: [35.0, 7.0],
+            }
+        );
+        assert_eq!(path.segments[1], Segment::line([45.0, 17.0]));
+    }
+
+    #[test]
+    fn pen_creates_a_layer_for_an_empty_document() {
+        let mut document = Document::new();
+
+        assert_eq!(ensure_drawing_layer(&mut document), 0);
+        assert_eq!(document.layers.len(), 1);
+
+        // An existing document keeps using its topmost layer.
+        assert_eq!(ensure_drawing_layer(&mut document), 0);
+    }
+
+    #[test]
+    fn finishing_the_pen_adds_and_selects_the_path() {
+        let document = Document {
+            version: 1,
+            layers: vec![Layer {
+                name: String::new(),
+                z: 0.0,
+                items: Vec::new(),
+            }],
+        };
+        let mut editor = EditorState::new(document);
+        editor.pen = Some(PenDraft {
+            layer: 0,
+            path: Path::new([0.0, 0.0]).line_to([10.0, 10.0]),
+            pending_out: None,
+            dragging: false,
+        });
+
+        finish_pen(&mut editor, true);
+
+        assert!(editor.pen.is_none());
+        assert_eq!(editor.document.layers[0].items.len(), 1);
+        assert_eq!(
+            editor.selected,
+            Some(PathAddress::Item {
+                layer: 0,
+                items: vec![0],
+            })
+        );
+        assert_eq!(editor.structure_revision, 1);
+    }
+
+    #[test]
+    fn pen_drag_shapes_smooth_handles() {
+        // Starting from a straight segment, dragging the anchor bends it into a
+        // cubic whose incoming control mirrors the outgoing one across the
+        // anchor.
+        let mut draft = PenDraft {
+            layer: 0,
+            path: Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
+            pending_out: None,
+            dragging: true,
+        };
+
+        draft.shape_last_anchor([10.0, 5.0]);
+
+        assert_eq!(
+            draft.path.segments[0],
+            Segment {
+                ctrl1: None,
+                ctrl2: Some([10.0, -5.0]),
+                to: [10.0, 0.0],
+            }
+        );
+        // The outgoing control is carried into the next segment.
+        assert_eq!(draft.pending_out, Some([10.0, 5.0]));
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_cursor() {
+        let bounds = Bounds {
+            min: [0.0, 0.0],
+            max: [400.0, 200.0],
+        };
+        let mut viewport = Viewport::default();
+        let anchor = Vec2::new(300.0, 420.0);
+
+        let before = ViewMapping::new(bounds, 900.0, 900.0, &viewport).screen_to_document(anchor);
+        zoom_around(&mut viewport, bounds, 900.0, 900.0, anchor, 2.0);
+        let after = ViewMapping::new(bounds, 900.0, 900.0, &viewport).screen_to_document(anchor);
+
+        assert!((viewport.zoom - 2.0).abs() < 1e-5);
+        assert!((after[0] - before[0]).abs() < 1e-3);
+        assert!((after[1] - before[1]).abs() < 1e-3);
+    }
+
+    #[test]
+    fn viewport_pan_moves_the_document_with_the_scroll() {
+        let bounds = Bounds {
+            min: [0.0, 0.0],
+            max: [400.0, 200.0],
+        };
+        let anchor = Vec2::new(450.0, 450.0);
+        let mut viewport = Viewport::default();
+        let before = ViewMapping::new(bounds, 900.0, 900.0, &viewport).screen_to_document(anchor);
+
+        viewport.pan = Vec2::new(20.0, 10.0);
+        let after = ViewMapping::new(bounds, 900.0, 900.0, &viewport).screen_to_document(anchor);
+        let scale = fit_transform(bounds, 900.0, 900.0).scale.x;
+
+        assert!((after[0] - (before[0] - 20.0 / scale)).abs() < 1e-3);
+        assert!((after[1] - (before[1] - 10.0 / scale)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn shift_dragging_an_anchor_instantiates_a_control_point() {
+        let mut path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([10.0, 10.0]);
+
+        // Instantiating the outgoing control of the second segment.
+        assert!(apply_bend(&mut path, BendTarget::Outgoing(1), [14.0, 2.0]));
+        assert_eq!(
+            path.segments[1],
+            Segment {
+                ctrl1: Some([14.0, 2.0]),
+                ctrl2: None,
+                to: [10.0, 10.0]
+            }
+        );
+
+        // Further dragging moves that control only.
+        assert!(apply_bend(&mut path, BendTarget::Outgoing(1), [16.0, 4.0]));
+        assert_eq!(path.segments[1].ctrl1, Some([16.0, 4.0]));
+
+        // The incoming side puts the control in `ctrl2`.
+        let mut path = Path::new([0.0, 0.0]).line_to([10.0, 0.0]);
+        assert!(apply_bend(&mut path, BendTarget::Incoming(0), [8.0, -4.0]));
+        assert_eq!(
+            path.segments[0],
+            Segment {
+                ctrl1: None,
+                ctrl2: Some([8.0, -4.0]),
+                to: [10.0, 0.0]
+            }
+        );
+    }
+
+    #[test]
+    fn bend_direction_picks_between_two_segments() {
+        let path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([10.0, 10.0]);
+
+        // Dragging toward the second segment picks it.
+        assert_eq!(
+            choose_bend(&path, Handle::Anchor(0), [0.0, 20.0]),
+            Some(BendTarget::Outgoing(1))
+        );
+        // Dragging back toward the first picks that one instead.
+        assert_eq!(
+            choose_bend(&path, Handle::Anchor(0), [-20.0, 0.0]),
+            Some(BendTarget::Incoming(0))
+        );
+    }
+
+    #[test]
+    fn the_closing_edge_of_a_closed_path_can_be_curved() {
+        let mut path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([10.0, 10.0])
+            .closed();
+
+        // Closing adds a real segment back to the start.
+        assert_eq!(path.segments.len(), 3);
+        assert_eq!(path.start(), Some([0.0, 0.0]));
+
+        // Dragging the join toward the closing edge picks that edge.
+        assert_eq!(
+            choose_bend(&path, Handle::Anchor(2), [5.0, 5.0]),
+            Some(BendTarget::Incoming(2))
+        );
+        assert!(apply_bend(&mut path, BendTarget::Incoming(2), [6.0, 4.0]));
+        assert_eq!(path.segments[2].ctrl2, Some([6.0, 4.0]));
+    }
+
+    #[test]
+    fn shift_dragging_a_handle_mirrors_the_neighbouring_handle() {
+        let mut path = Path::new([0.0, 0.0])
+            .cubic_to([10.0, 0.0], [20.0, 0.0], [30.0, 0.0])
+            .cubic_to([40.0, 10.0], [50.0, 20.0], [60.0, 30.0]);
+
+        set_handle(&mut path, Handle::Ctrl2(0), [35.0, 5.0]);
+        symmetrize(&mut path, Handle::Ctrl2(0), [35.0, 5.0]);
+
+        // The anchor is [30, 0]; the next segment's control mirrors around it.
+        assert_eq!(path.segments[1].ctrl1, Some([25.0, -5.0]));
+
+        // The same happens when dragging from the other side of the anchor.
+        set_handle(&mut path, Handle::Ctrl1(1), [36.0, 6.0]);
+        symmetrize(&mut path, Handle::Ctrl1(1), [36.0, 6.0]);
+        assert_eq!(path.segments[0].ctrl2, Some([24.0, -6.0]));
+    }
+
+    #[test]
+    fn shift_dragging_a_lone_cubic_leaves_its_other_control_alone() {
+        let mut path = Path::new([0.0, 0.0]).cubic_to([10.0, 5.0], [20.0, 5.0], [30.0, 0.0]);
+
+        set_handle(&mut path, Handle::Ctrl1(0), [12.0, 40.0]);
+        symmetrize(&mut path, Handle::Ctrl1(0), [12.0, 40.0]);
+
+        // Symmetry is only across a shared node; with no neighbouring segment
+        // the same cubic's other control must not move.
+        assert_eq!(path.segments[0].ctrl2, Some([20.0, 5.0]));
+    }
+
+    #[test]
+    fn closed_state_can_be_read_and_written() {
+        let mut document = Document {
+            version: 1,
+            layers: vec![Layer {
+                name: String::new(),
+                z: 0.0,
+                items: vec![
+                    Item::Path(PathItem {
+                        path: Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
+                        style: Style::default(),
+                    }),
+                    Item::Clip(ClipGroup {
+                        clip: Path::new([0.0, 0.0]).line_to([5.0, 5.0]),
+                        style: Style::default(),
+                        targets: Vec::new(),
+                    }),
+                ],
+            }],
+        };
+
+        let item = PathAddress::Item {
+            layer: 0,
+            items: vec![0],
+        };
+        let clip = PathAddress::Clip {
+            layer: 0,
+            items: vec![1],
+        };
+
+        assert_eq!(path_closed_at(&document, &item), Some(false));
+        assert!(set_path_closed(&mut document, &item, true));
+        assert_eq!(path_closed_at(&document, &item), Some(true));
+
+        // Closing adds the edge that joins the last point to the start.
+        let path = path_at(&document, &item).unwrap();
+        assert_eq!(path.start(), Some([0.0, 0.0]));
+        assert_eq!(path.segments.len(), 2);
+        assert_eq!(path.segments[1], Segment::line([0.0, 0.0]));
+
+        // Opening removes it again.
+        assert!(set_path_closed(&mut document, &item, false));
+        assert_eq!(path_at(&document, &item).unwrap().segments.len(), 1);
+
+        assert!(set_path_closed(&mut document, &clip, true));
+        assert_eq!(path_closed_at(&document, &clip), Some(true));
+
+        let missing = PathAddress::Item {
+            layer: 0,
+            items: vec![9],
+        };
+        assert!(!set_path_closed(&mut document, &missing, true));
     }
 }

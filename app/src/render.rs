@@ -6,7 +6,7 @@ use bevy_vello::vello::{
     peniko::{Color, Fill},
 };
 
-use crate::model::{ClipGroup, Document, Item, Path, PathItem, Rgba8, Segment, Style};
+use crate::model::{ClipGroup, Document, Item, Path, PathItem, Rgba8, Style};
 
 /// Builds a Vello scene in document coordinates.
 ///
@@ -72,21 +72,33 @@ fn draw_stroke(scene: &mut Scene, style: &Style, path: &BezPath) {
     }
 }
 
-/// Converts a model path into a kurbo path (closing it when `path.closed`).
+/// Converts a model path into a kurbo path (closing it when it is a loop).
+///
+/// Omitted control points are resolved to their endpoints. Segments with no
+/// controls are emitted as lines so strokes keep sharp joins.
 pub fn path_to_bez_path(path: &Path) -> BezPath {
     let mut bez = BezPath::new();
-    bez.move_to(to_kurbo_point(path.start));
+    let Some(start) = path.start() else {
+        return bez;
+    };
+    bez.move_to(to_kurbo_point(start));
+
+    let mut previous = start;
     for segment in &path.segments {
-        match segment {
-            Segment::Line { to } => bez.line_to(to_kurbo_point(*to)),
-            Segment::Cubic { ctrl1, ctrl2, to } => bez.curve_to(
-                to_kurbo_point(*ctrl1),
-                to_kurbo_point(*ctrl2),
-                to_kurbo_point(*to),
-            ),
+        let ctrl1 = segment.ctrl1.unwrap_or(previous);
+        let ctrl2 = segment.ctrl2.unwrap_or(segment.to);
+        if segment.is_line() {
+            bez.line_to(to_kurbo_point(segment.to));
+        } else {
+            bez.curve_to(
+                to_kurbo_point(ctrl1),
+                to_kurbo_point(ctrl2),
+                to_kurbo_point(segment.to),
+            );
         }
+        previous = segment.to;
     }
-    if path.closed {
+    if path.is_closed() {
         bez.close_path();
     }
     bez
