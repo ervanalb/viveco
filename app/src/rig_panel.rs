@@ -1,9 +1,7 @@
 //! Bottom panel for rig mode.
 //!
-//! Shows the selected bone's endpoints and, while the weight-paint tool is
-//! active, the brush settings. The bone values are read-only: this stage
-//! covers creating, parenting, and reshaping bones plus painting weights. The
-//! panel makes the stored endpoints visible so the rig's state is inspectable.
+//! Shows the pose controls and, while the weight-paint tool is active, the
+//! brush settings.
 //!
 //! The brush sliders reuse the style panel's approach: a track (`Button` +
 //! [`RelativeCursorPosition`]) with a fill bar and a thumb, where the cursor's
@@ -15,7 +13,6 @@ use bevy::ui::{RelativeCursorPosition, Val2};
 use crate::editor::{
     BOTTOM_BAR_HEIGHT, EditorMode, EditorState, SIDEBAR_WIDTH, TOOLBAR_WIDTH, Tool, ToolState,
 };
-use crate::rig::{bone_at, bone_endpoints};
 use crate::theme;
 use crate::weight_paint::{MAX_BRUSH_SIZE, MIN_BRUSH_SIZE, WeightPaintBrush};
 
@@ -29,10 +26,10 @@ impl Plugin for RigPanelPlugin {
                 Update,
                 (
                     sync_visibility,
-                    sync_values,
                     sync_brush_visibility,
                     drag_brush_sliders,
                     update_brush_visuals,
+                    handle_reset_pose_button,
                 )
                     .chain(),
             );
@@ -43,13 +40,13 @@ impl Plugin for RigPanelPlugin {
 #[derive(Component)]
 struct RigPanelRoot;
 
-/// The text block describing the selected bone.
-#[derive(Component)]
-struct BoneInfo;
-
 /// The brush settings column, shown only while weight painting.
 #[derive(Component)]
 struct BrushControls;
+
+/// The button that returns the skeleton to its rest pose.
+#[derive(Component)]
+struct ResetPoseButton;
 
 /// One adjustable brush value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,22 +117,35 @@ fn spawn_rig_panel(mut commands: Commands) {
             panel
                 .spawn(Node {
                     flex_direction: FlexDirection::Column,
-                    width: Val::Px(240.0),
                     row_gap: Val::Px(8.0),
                     ..default()
                 })
                 .with_children(|column| {
                     column.spawn((
-                        Text::new("Bone"),
+                        Text::new("Pose"),
                         TextFont::from_font_size(14.0),
                         TextColor(theme::MUTED),
                     ));
-                    column.spawn((
-                        Text::new("No bone selected"),
-                        TextFont::from_font_size(13.0),
-                        TextColor(theme::TEXT),
-                        BoneInfo,
-                    ));
+                    column
+                        .spawn((
+                            Button,
+                            Node {
+                                padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                border_radius: BorderRadius::all(Val::Px(6.0)),
+                                ..default()
+                            },
+                            BackgroundColor(theme::BUTTON_BG),
+                            BorderColor::all(theme::BORDER_FAINT),
+                            ResetPoseButton,
+                        ))
+                        .with_children(|button| {
+                            button.spawn((
+                                Text::new("Reset Pose"),
+                                TextFont::from_font_size(12.0),
+                                TextColor(theme::TEXT),
+                            ));
+                        });
                 });
 
             panel
@@ -275,49 +285,15 @@ fn sync_brush_visibility(
     }
 }
 
-/// Rebuilds the info text from the selected bone.
-///
-/// Endpoint drags change the transform without touching the structure
-/// revision, so the rendered string itself is the change signature.
-fn sync_values(
-    editor: Res<EditorState>,
-    mut info: Query<&mut Text, With<BoneInfo>>,
-    mut last: Local<Option<String>>,
+/// Clears the transient pose, returning the skeleton to rest.
+fn handle_reset_pose_button(
+    buttons: Query<&Interaction, (Changed<Interaction>, With<ResetPoseButton>)>,
+    mut editor: ResMut<EditorState>,
 ) {
-    let address = editor.selected_bone.as_ref();
-    let bone = address.and_then(|address| bone_at(&editor.document, address));
-    let endpoints = address.and_then(|address| bone_endpoints(&editor.document, address));
-    let value = match (bone, endpoints) {
-        (Some(bone), Some((head, tail))) => {
-            let dx = tail[0] - head[0];
-            let dy = tail[1] - head[1];
-            let length = (dx * dx + dy * dy).sqrt();
-            let angle = dy.atan2(dx).to_degrees();
-            format!(
-                "{}\nHead: {:.2}, {:.2}\nTail: {:.2}, {:.2}\nLength: {:.2}\nAngle: {:.1}°",
-                if bone.name.is_empty() {
-                    "Unnamed bone"
-                } else {
-                    &bone.name
-                },
-                head[0],
-                head[1],
-                tail[0],
-                tail[1],
-                length,
-                angle,
-            )
+    for interaction in &buttons {
+        if *interaction == Interaction::Pressed {
+            editor.pose.clear();
         }
-        _ => "No bone selected".to_string(),
-    };
-
-    if last.as_deref() == Some(value.as_str()) {
-        return;
-    }
-    *last = Some(value.clone());
-
-    for mut text in &mut info {
-        text.0 = value.clone();
     }
 }
 

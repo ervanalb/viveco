@@ -8,6 +8,7 @@ pub mod history;
 pub mod menu_bar;
 pub mod mode_tabs;
 pub mod model;
+pub mod pose;
 pub mod render;
 pub mod rig;
 pub mod rig_panel;

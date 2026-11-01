@@ -69,7 +69,12 @@ impl History {
         };
         let current = std::mem::replace(&mut self.last, previous.clone());
         self.redo.push(current);
+        // Undo swaps document geometry, but the transient pose is editor state
+        // that lives outside the document. Preserve it so undo never silently
+        // returns a posed rig to rest.
+        let pose = editor.pose.clone();
         editor.replace_document(previous);
+        editor.pose = pose;
         true
     }
 
@@ -81,7 +86,10 @@ impl History {
         };
         let current = std::mem::replace(&mut self.last, next.clone());
         self.undo.push(current);
+        // Like undo, redo must not disturb the transient pose.
+        let pose = editor.pose.clone();
         editor.replace_document(next);
+        editor.pose = pose;
         true
     }
 }
@@ -132,6 +140,7 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 mod tests {
     use super::*;
     use crate::model::{FORMAT_VERSION, Path, Shape, Style};
+    use crate::pose::BonePose;
 
     fn document_with_path(name: &str) -> Document {
         Document {
@@ -161,6 +170,32 @@ mod tests {
         assert_eq!(editor.document, original);
         assert!(history.redo(&mut editor));
         assert_eq!(editor.document, edited);
+    }
+
+    #[test]
+    fn undoing_keeps_the_transient_pose() {
+        let original = document_with_path("original");
+        let mut editor = EditorState::new(original.clone());
+        let mut history = History::new(original);
+        editor.pose.set(
+            "Bone",
+            BonePose {
+                rotation: 0.5,
+                ..Default::default()
+            },
+        );
+
+        editor.document = document_with_path("edited");
+        history.observe(&editor.document, false);
+
+        assert!(history.undo(&mut editor));
+        assert_eq!(
+            editor.pose.get("Bone").rotation,
+            0.5,
+            "undo must not return the rig to rest"
+        );
+        assert!(history.redo(&mut editor));
+        assert_eq!(editor.pose.get("Bone").rotation, 0.5);
     }
 
     #[test]

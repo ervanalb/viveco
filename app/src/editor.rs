@@ -106,6 +106,8 @@ pub enum Tool {
     Pen,
     /// Paint bone weights onto existing curve points.
     WeightPaint,
+    /// Pose bones, deforming the artwork on the rig page.
+    Pose,
 }
 
 /// Which tool is currently active.
@@ -345,6 +347,11 @@ pub struct EditorState {
     pub selected_bone: Option<BoneAddress>,
     /// The bone whose name is being edited inline, if any.
     pub bone_renaming: Option<BoneRename>,
+    /// The transient bone pose applied on the rig page.
+    ///
+    /// Poses are editor state, not document data: they are never saved, and
+    /// they only deform what the rig page shows.
+    pub pose: crate::pose::Pose,
     /// Transient rig-mode editing state (bone drag, pen chain, preview).
     ///
     /// Stored here rather than in its own resource so a document replacement or
@@ -368,6 +375,7 @@ impl EditorState {
             renaming: None,
             selected_bone: None,
             bone_renaming: None,
+            pose: crate::pose::Pose::default(),
             rig: RigEditing::default(),
             drag: None,
             pen: None,
@@ -425,6 +433,7 @@ impl EditorState {
         self.renaming = None;
         self.selected_bone = None;
         self.bone_renaming = None;
+        self.pose.clear();
         self.rig.cancel_editing();
         self.drag = None;
         self.pen = None;
@@ -675,8 +684,9 @@ fn handle_input(
             &mut editor,
         ),
         Tool::Pen => handle_pen_input(&mouse, &keys, &windows, &bounds, &viewport, &mut editor),
-        // Weight painting only exists in rig mode, which has its own input.
-        Tool::WeightPaint => {}
+        // Weight painting and posing only exist in rig mode, which has its own
+        // input.
+        Tool::WeightPaint | Tool::Pose => {}
     }
 }
 
@@ -980,7 +990,13 @@ fn refresh_scene(
         window.map(|window| ViewMapping::new(bounds.0, window.width(), window.height(), &viewport));
     let scale = view.map(|view| view.scale).unwrap_or(1.0);
 
-    let mut scene = build_scene(&editor.document);
+    // The rig page shows the posed artwork; the draw page always shows the
+    // rest pose that the document actually stores. Poses are transient, so the
+    // deformed copy is built only for display.
+    let posed = (*mode == EditorMode::Rig && !editor.pose.is_identity())
+        .then(|| crate::pose::deform_document(&editor.document, &editor.pose));
+    let displayed = posed.as_ref().unwrap_or(&editor.document);
+    let mut scene = build_scene(displayed);
 
     if *mode == EditorMode::Draw {
         if let Some(address) = &editor.selected_node {
@@ -1018,6 +1034,7 @@ fn refresh_scene(
         crate::rig::draw_bone_overlay(
             &mut scene,
             &editor.document,
+            &editor.pose,
             editor.selected_bone.as_ref(),
             editor.rig.preview(),
             scale,
@@ -1035,13 +1052,10 @@ fn refresh_scene(
                 .and_then(|(view, window)| window.cursor_position().map(|at| (view, window, at)))
                 .filter(|(_, window, at)| !over_ui(*at, *window))
                 .map(|(view, _, at)| view.screen_to_document(at));
+            // The points follow the posed artwork, matching the painting
+            // hit-test, so the overlay lines up with what is drawn.
             crate::weight_paint::draw_overlay(
-                &mut scene,
-                &editor.document,
-                selected,
-                &brush,
-                scale,
-                cursor,
+                &mut scene, displayed, selected, &brush, scale, cursor,
             );
         }
     }

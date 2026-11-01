@@ -22,7 +22,10 @@ use vello::Scene;
 use vello::kurbo::{Affine, Circle, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
+use std::collections::HashMap;
+
 use crate::model::{Document, Path, PathEnds, Point, Shape, Weights};
+use crate::pose::{Pose, Similarity};
 use crate::render::to_kurbo_point;
 
 /// Smallest brush radius, in screen pixels.
@@ -93,9 +96,14 @@ pub fn paint_document(
     radius: f32,
     selected_bone: Option<&str>,
     brush: &WeightPaintBrush,
+    pose: &Pose,
 ) {
+    // Points are painted where they appear on the posed rig page, so the brush
+    // hit-tests posed positions while still editing the rest-pose weights.
+    let worlds = (!pose.is_identity()).then(|| crate::pose::worlds_by_name(document, pose));
+    let worlds = worlds.as_ref();
     for shape in &mut document.shapes {
-        paint_shape(shape, center, radius, selected_bone, brush);
+        paint_shape(shape, center, radius, selected_bone, brush, worlds);
     }
 }
 
@@ -105,12 +113,13 @@ fn paint_shape(
     radius: f32,
     selected_bone: Option<&str>,
     brush: &WeightPaintBrush,
+    worlds: Option<&HashMap<String, Similarity>>,
 ) {
     for path in &mut shape.paths {
-        paint_path(path, center, radius, selected_bone, brush);
+        paint_path(path, center, radius, selected_bone, brush, worlds);
     }
     for child in &mut shape.children {
-        paint_shape(child, center, radius, selected_bone, brush);
+        paint_shape(child, center, radius, selected_bone, brush, worlds);
     }
 }
 
@@ -120,6 +129,7 @@ fn paint_path(
     radius: f32,
     selected_bone: Option<&str>,
     brush: &WeightPaintBrush,
+    worlds: Option<&HashMap<String, Similarity>>,
 ) {
     // A closed loop has no separate start anchor: its first anchor is the last
     // segment's end point, whose weights that segment carries.
@@ -131,6 +141,7 @@ fn paint_path(
             radius,
             selected_bone,
             brush,
+            worlds,
         );
     }
     for segment in &mut path.segments {
@@ -142,6 +153,7 @@ fn paint_path(
                 radius,
                 selected_bone,
                 brush,
+                worlds,
             );
         }
         if let Some(ctrl2) = segment.ctrl2 {
@@ -152,6 +164,7 @@ fn paint_path(
                 radius,
                 selected_bone,
                 brush,
+                worlds,
             );
         }
         paint_weights(
@@ -161,6 +174,7 @@ fn paint_path(
             radius,
             selected_bone,
             brush,
+            worlds,
         );
     }
 }
@@ -172,11 +186,17 @@ fn paint_weights(
     radius: f32,
     selected_bone: Option<&str>,
     brush: &WeightPaintBrush,
+    worlds: Option<&HashMap<String, Similarity>>,
 ) {
     if radius <= f32::EPSILON {
         return;
     }
-    let distance = ((position[0] - center[0]).powi(2) + (position[1] - center[1]).powi(2)).sqrt();
+    // The brush is measured against where the point appears on the posed rig
+    // page, not its rest position.
+    let posed = worlds
+        .map(|worlds| crate::pose::deform_point(position, weights, worlds))
+        .unwrap_or(position);
+    let distance = ((posed[0] - center[0]).powi(2) + (posed[1] - center[1]).powi(2)).sqrt();
     if distance > radius {
         return;
     }
@@ -307,7 +327,7 @@ fn draw_brush(scene: &mut Scene, center: Point, brush: &WeightPaintBrush, scale:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FORMAT_VERSION, Path, Shape};
+    use crate::model::{Bone, FORMAT_VERSION, Path, Shape};
 
     fn brush() -> WeightPaintBrush {
         WeightPaintBrush {
@@ -354,7 +374,14 @@ mod tests {
     #[test]
     fn painting_only_affects_points_under_the_brush() {
         let mut document = document_with(&[[0.0, 0.0], [100.0, 0.0], [5.0, 0.0]]);
-        paint_document(&mut document, [0.0, 0.0], 10.0, Some("Arm"), &brush());
+        paint_document(
+            &mut document,
+            [0.0, 0.0],
+            10.0,
+            Some("Arm"),
+            &brush(),
+            &Pose::default(),
+        );
 
         // The start point and the nearby end point were painted; the far one
         // was not.
@@ -371,7 +398,14 @@ mod tests {
             .to_weights
             .set("Leg", 1.0);
 
-        paint_document(&mut document, [10.0, 0.0], 10.0, Some("Arm"), &brush());
+        paint_document(
+            &mut document,
+            [10.0, 0.0],
+            10.0,
+            Some("Arm"),
+            &brush(),
+            &Pose::default(),
+        );
 
         let weights = weights_at(&document, 0);
         assert_eq!(weights.get("Arm"), Some(1.0));
@@ -388,7 +422,14 @@ mod tests {
             strength: 0.1,
         };
 
-        paint_document(&mut document, [0.0, 0.0], 10.0, Some("Arm"), &brush);
+        paint_document(
+            &mut document,
+            [0.0, 0.0],
+            10.0,
+            Some("Arm"),
+            &brush,
+            &Pose::default(),
+        );
 
         let weights = &document.shapes[0].paths[0].start_weights;
         assert!((weights.get("Arm").unwrap() - 0.1).abs() < 1e-6);
@@ -401,10 +442,67 @@ mod tests {
             .to_weights
             .set("Leg", 0.5);
 
-        paint_document(&mut document, [10.0, 0.0], 10.0, None, &brush());
+        paint_document(
+            &mut document,
+            [10.0, 0.0],
+            10.0,
+            None,
+            &brush(),
+            &Pose::default(),
+        );
 
         // With no bone selected, a brush value of one clears the influence.
         assert!(weights_at(&document, 0).is_empty());
+    }
+
+    #[test]
+    fn painting_hit_tests_the_posed_position() {
+        let mut document = document_with(&[[10.0, 0.0]]);
+        document.bones.push(Bone {
+            name: "Arm".into(),
+            head: Some([0.0, 0.0]),
+            tail: [10.0, 0.0],
+            children: Vec::new(),
+        });
+        document.shapes[0].paths[0].start_weights.set("Arm", 1.0);
+        let mut pose = Pose::default();
+        pose.set(
+            "Arm",
+            crate::pose::BonePose {
+                scale: 2.0,
+                ..Default::default()
+            },
+        );
+
+        // The point is drawn at [20, 0] under the scale, so a brush there
+        // paints it even though its rest position is [10, 0].
+        paint_document(
+            &mut document,
+            [20.0, 0.0],
+            2.0,
+            Some("Arm"),
+            &brush(),
+            &pose,
+        );
+        assert_eq!(
+            document.shapes[0].paths[0].start_weights.get("Arm"),
+            Some(1.0)
+        );
+
+        // A brush at the rest position misses it.
+        document.shapes[0].paths[0].start_weights.set("Arm", 0.5);
+        paint_document(
+            &mut document,
+            [10.0, 0.0],
+            2.0,
+            Some("Arm"),
+            &brush(),
+            &pose,
+        );
+        assert_eq!(
+            document.shapes[0].paths[0].start_weights.get("Arm"),
+            Some(0.5)
+        );
     }
 
     #[test]
