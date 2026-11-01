@@ -23,6 +23,7 @@ use crate::model::{
 use crate::render::{
     build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
 };
+use crate::rig::{BoneAddress, BoneRename, RigState};
 
 /// Width of the layer sidebar on the right, in screen pixels.
 ///
@@ -43,6 +44,23 @@ pub const TOOLBAR_WIDTH: f32 = 56.0;
 ///
 /// The document is fitted into the remaining area below it.
 pub const MENU_BAR_HEIGHT: f32 = 28.0;
+
+/// Height of the mode tab bar directly below the menu bar, in screen pixels.
+pub const TAB_BAR_HEIGHT: f32 = 30.0;
+
+/// Y coordinate where the content below the menu and mode tabs begins.
+pub const CONTENT_TOP: f32 = MENU_BAR_HEIGHT + TAB_BAR_HEIGHT;
+
+/// Which editor mode is active.
+///
+/// Draw mode edits the graphic's rest pose; Rig mode locks the graphic and
+/// edits the skeleton over it.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorMode {
+    #[default]
+    Draw,
+    Rig,
+}
 
 /// The active editing tool.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -283,6 +301,10 @@ pub struct EditorState {
     pub structure_revision: u64,
     /// The tree node whose name is being edited inline, if any.
     pub renaming: Option<RenameState>,
+    /// The selected bone in rig mode, if any.
+    pub selected_bone: Option<BoneAddress>,
+    /// The bone whose name is being edited inline, if any.
+    pub bone_renaming: Option<BoneRename>,
     drag: Option<Drag>,
     /// The in-progress pen path, if any.
     pen: Option<PenDraft>,
@@ -299,6 +321,8 @@ impl EditorState {
             selected_handle: None,
             structure_revision: 0,
             renaming: None,
+            selected_bone: None,
+            bone_renaming: None,
             drag: None,
             pen: None,
             last_click: None,
@@ -314,6 +338,17 @@ impl EditorState {
         self.selected_handle = None;
         self.renaming = None;
         self.drag = None;
+    }
+
+    /// Selects a bone (or clears the bone selection).
+    pub fn select_bone(&mut self, address: Option<BoneAddress>) {
+        self.selected_bone = address;
+        self.bone_renaming = None;
+    }
+
+    /// Whether any inline rename (shape or bone) is in progress.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming.is_some() || self.bone_renaming.is_some()
     }
 
     /// Starts renaming the node at `address`, seeding the text field with its
@@ -338,6 +373,8 @@ impl EditorState {
         self.selected = None;
         self.selected_handle = None;
         self.renaming = None;
+        self.selected_bone = None;
+        self.bone_renaming = None;
         self.drag = None;
         self.pen = None;
         self.last_click = None;
@@ -359,6 +396,7 @@ impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ToolState>()
             .init_resource::<Viewport>()
+            .init_resource::<EditorMode>()
             .add_systems(
                 Update,
                 (
@@ -373,25 +411,25 @@ impl Plugin for EditorPlugin {
 }
 
 /// Centers the document in the area right of the toolbar, left of the sidebar,
-/// below the menu bar, and above the style panel, scaling it to fill 90% of
-/// that area.
+/// below the menu bar and mode tabs, and above the style panel, scaling it to
+/// fill 90% of that area.
 pub fn fit_transform(bounds: Bounds, viewport_width: f32, viewport_height: f32) -> Transform {
-    // The menu bar, toolbar, sidebar, and style panel cover the edges, so fit
-    // into what remains.
+    // The menu bar, mode tabs, toolbar, sidebar, and style panel cover the
+    // edges, so fit into what remains.
     let available_width = (viewport_width - SIDEBAR_WIDTH - TOOLBAR_WIDTH).max(1.0);
-    let available_height = (viewport_height - MENU_BAR_HEIGHT - BOTTOM_BAR_HEIGHT).max(1.0);
+    let available_height = (viewport_height - CONTENT_TOP - BOTTOM_BAR_HEIGHT).max(1.0);
     let doc_width = bounds.width().max(f32::EPSILON);
     let doc_height = bounds.height().max(f32::EPSILON);
     let scale = FIT_FRACTION * (available_width / doc_width).min(available_height / doc_height);
 
     // Document Y points down, so shifting the document's centre to the content
     // area's centre means moving the entity *up* by `scale * centre.y`. That
-    // centre sits between the toolbar and the sidebar, half a menu bar below
-    // the top edge, and half a style panel above the bottom edge.
+    // centre sits between the toolbar and the sidebar, half of the top bars
+    // below the top edge, and half a style panel above the bottom edge.
     let center = bounds.center();
     Transform::from_xyz(
         -scale * center[0] + (TOOLBAR_WIDTH - SIDEBAR_WIDTH) * 0.5,
-        scale * center[1] + (BOTTOM_BAR_HEIGHT - MENU_BAR_HEIGHT) * 0.5,
+        scale * center[1] + (BOTTOM_BAR_HEIGHT - CONTENT_TOP) * 0.5,
         0.0,
     )
     .with_scale(Vec3::splat(scale))
@@ -497,7 +535,7 @@ fn zoom_around(
 
 /// Maps between window pixels and document coordinates for the current fit.
 #[derive(Clone, Copy)]
-struct ViewMapping {
+pub(crate) struct ViewMapping {
     scale: f32,
     tx: f32,
     ty: f32,
@@ -506,7 +544,7 @@ struct ViewMapping {
 }
 
 impl ViewMapping {
-    fn new(bounds: Bounds, width: f32, height: f32, viewport: &Viewport) -> Self {
+    pub(crate) fn new(bounds: Bounds, width: f32, height: f32, viewport: &Viewport) -> Self {
         let transform = view_transform(bounds, width, height, viewport);
         Self {
             scale: transform.scale.x,
@@ -517,7 +555,7 @@ impl ViewMapping {
         }
     }
 
-    fn screen_to_document(self, screen: Vec2) -> [f32; 2] {
+    pub(crate) fn screen_to_document(self, screen: Vec2) -> [f32; 2] {
         [
             (screen.x - self.half_width - self.tx) / self.scale,
             (screen.y - self.half_height + self.ty) / self.scale,
@@ -525,11 +563,12 @@ impl ViewMapping {
     }
 
     /// Length of one screen pixel in document units.
-    fn document_per_pixel(self) -> f32 {
+    pub(crate) fn document_per_pixel(self) -> f32 {
         1.0 / self.scale
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_input(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -537,10 +576,16 @@ fn handle_input(
     windows: Query<&Window, With<PrimaryWindow>>,
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
+    mode: Res<EditorMode>,
     mut tool: ResMut<ToolState>,
     menu: Option<Res<MenuState>>,
     mut editor: ResMut<EditorState>,
 ) {
+    // Rig mode locks the graphic. Bone editing has its own input system.
+    if *mode != EditorMode::Draw {
+        return;
+    }
+
     // An open dropdown owns the pointer: clicks on its rows run menu actions
     // and clicks elsewhere close it, but none of them may edit the canvas.
     if menu.is_some_and(|menu| menu.is_open()) {
@@ -552,7 +597,7 @@ fn handle_input(
 
     // While a tree row is being renamed, the keyboard belongs to the text
     // field. A click elsewhere commits the edit and then behaves normally.
-    if editor.renaming.is_some() {
+    if editor.is_renaming() {
         if !mouse.just_pressed(MouseButton::Left) {
             return;
         }
@@ -589,10 +634,10 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 
 /// True when the cursor is over one of the editor's panels rather than the
 /// canvas.
-fn over_ui(cursor: Vec2, window: &Window) -> bool {
+pub(crate) fn over_ui(cursor: Vec2, window: &Window) -> bool {
     cursor.x < TOOLBAR_WIDTH
         || cursor.x >= window.width() - SIDEBAR_WIDTH
-        || cursor.y < MENU_BAR_HEIGHT
+        || cursor.y < CONTENT_TOP
         || cursor.y >= window.height() - BOTTOM_BAR_HEIGHT
 }
 
@@ -860,6 +905,8 @@ fn refresh_scene(
     editor: Res<EditorState>,
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
+    mode: Res<EditorMode>,
+    rig: Res<RigState>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut scenes: Query<&mut VelloScene2d, With<DocumentScene>>,
 ) {
@@ -869,36 +916,47 @@ fn refresh_scene(
     let scale = view.map(|view| view.scale).unwrap_or(1.0);
 
     let mut scene = build_scene(&editor.document);
-    if let Some(address) = &editor.selected {
-        // A whole-shape selection shows the points of every path it owns. Only
-        // the path holding the selected point highlights it.
-        for (index, path) in selection_paths(&editor.document, address) {
-            let selected_handle = editor
-                .selected_handle
-                .filter(|node| node.path == index)
-                .map(|node| node.handle);
-            draw_control_overlay(&mut scene, path, scale, selected_handle);
-        }
-    }
 
-    if let Some(draft) = &editor.pen {
-        draw_control_overlay(&mut scene, &draft.path, scale, None);
-
-        // Rubber band from the last anchor to the cursor while the next point
-        // is being chosen.
-        if !draft.dragging
-            && let (Some(view), Some(window)) = (view, window)
-            && let Some(cursor) = window.cursor_position()
-            && !over_ui(cursor, window)
-        {
-            stroke_segment(
-                &mut scene,
-                path_end(&draft.path),
-                view.screen_to_document(cursor),
-                f64::from(RUBBER_BAND_WIDTH / scale.max(f32::EPSILON)),
-                &OVERLAY_BAND,
-            );
+    if *mode == EditorMode::Draw {
+        if let Some(address) = &editor.selected {
+            // A whole-shape selection shows the points of every path it owns.
+            // Only the path holding the selected point highlights it.
+            for (index, path) in selection_paths(&editor.document, address) {
+                let selected_handle = editor
+                    .selected_handle
+                    .filter(|node| node.path == index)
+                    .map(|node| node.handle);
+                draw_control_overlay(&mut scene, path, scale, selected_handle);
+            }
         }
+
+        if let Some(draft) = &editor.pen {
+            draw_control_overlay(&mut scene, &draft.path, scale, None);
+
+            // Rubber band from the last anchor to the cursor while the next
+            // point is being chosen.
+            if !draft.dragging
+                && let (Some(view), Some(window)) = (view, window)
+                && let Some(cursor) = window.cursor_position()
+                && !over_ui(cursor, window)
+            {
+                stroke_segment(
+                    &mut scene,
+                    path_end(&draft.path),
+                    view.screen_to_document(cursor),
+                    f64::from(RUBBER_BAND_WIDTH / scale.max(f32::EPSILON)),
+                    &OVERLAY_BAND,
+                );
+            }
+        }
+    } else {
+        crate::rig::draw_bone_overlay(
+            &mut scene,
+            &editor.document,
+            editor.selected_bone.as_ref(),
+            rig.preview,
+            scale,
+        );
     }
 
     if let Ok(mut scene_component) = scenes.single_mut() {
@@ -2241,6 +2299,7 @@ mod tests {
     fn document_of(shapes: Vec<Shape>) -> Document {
         Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes,
         }
     }
@@ -2476,15 +2535,36 @@ mod tests {
     }
 
     #[test]
-    fn example_asset_picks_the_outer_shape() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/example.vecart.json");
-        let document = Document::load_from_file(path).unwrap();
+    fn a_ring_with_children_is_picked_by_its_band() {
+        // A filled ring: an outer contour plus an opposite-wound hole, with a
+        // child painted over part of the band.
+        let hole = Path::new([30.0, 30.0])
+            .line_to([30.0, 70.0])
+            .line_to([70.0, 70.0])
+            .line_to([70.0, 30.0])
+            .closed();
+        let document = document_of(vec![Shape {
+            paths: vec![rect(0.0, 0.0, 100.0, 100.0), hole],
+            style: filled(Rgba8::rgb(0xe7, 0x6f, 0x51)),
+            children: vec![shaped(
+                rect(5.0, 5.0, 15.0, 15.0),
+                filled(Rgba8::rgb(255, 255, 255)),
+            )],
+            ..default()
+        }]);
 
-        // Inside the outer circle but away from the stripes and inner circle.
+        // The child painted over the band wins.
         assert_eq!(
-            pick_shape(&document, None, [330.0, 210.0], 0.0),
-            Some(shape_address(&[5]))
+            pick_shape(&document, None, [10.0, 10.0], 0.0),
+            Some(shape_address(&[0, 0]))
         );
+        // The band away from the child and the hole picks the ring itself.
+        assert_eq!(
+            pick_shape(&document, None, [85.0, 10.0], 0.0),
+            Some(shape_address(&[0]))
+        );
+        // The hole is not filled, so nothing is there.
+        assert_eq!(pick_shape(&document, None, [50.0, 50.0], 0.0), None);
     }
 
     #[test]
@@ -2533,8 +2613,7 @@ mod tests {
         // The content is centered in the window area between the toolbar and
         // the sidebar, below the menu bar, and above the style panel.
         let content_center_x = TOOLBAR_WIDTH + (900.0 - SIDEBAR_WIDTH - TOOLBAR_WIDTH) * 0.5;
-        let content_center_y =
-            MENU_BAR_HEIGHT + (900.0 - MENU_BAR_HEIGHT - BOTTOM_BAR_HEIGHT) * 0.5;
+        let content_center_y = CONTENT_TOP + (900.0 - CONTENT_TOP - BOTTOM_BAR_HEIGHT) * 0.5;
         let center = view.screen_to_document(Vec2::new(content_center_x, content_center_y));
         assert!((center[0] - 200.0).abs() < 1e-4);
         assert!((center[1] - 100.0).abs() < 1e-4);

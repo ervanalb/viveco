@@ -27,9 +27,9 @@ use bevy::ui::{FocusPolicy, RelativeCursorPosition};
 use bevy::window::PrimaryWindow;
 
 use crate::editor::{
-    CanvasInput, EditorState, MENU_BAR_HEIGHT, SIDEBAR_WIDTH, TreeAddress, address_is_inside,
-    cancel_rename, commit_rename, move_path_into_shape, move_path_near, move_shape_into,
-    move_shape_near, name_at,
+    CONTENT_TOP, CanvasInput, EditorMode, EditorState, SIDEBAR_WIDTH, TreeAddress,
+    address_is_inside, cancel_rename, commit_rename, move_path_into_shape, move_path_near,
+    move_shape_into, move_shape_near, name_at,
 };
 use crate::model::{Document, Path, Shape, indices_in_paint_order};
 use crate::theme;
@@ -96,6 +96,7 @@ impl Plugin for SidebarPlugin {
                     rebuild_tree,
                     sync_row_labels,
                     paint_rows,
+                    sync_sidebar_visibility,
                 )
                     .chain()
                     // Canvas input runs first so it still sees a rename as
@@ -104,6 +105,10 @@ impl Plugin for SidebarPlugin {
             );
     }
 }
+
+/// The panel that hosts the object tree.
+#[derive(Component)]
+struct SidebarRoot;
 
 /// The scrollable container holding the tree rows.
 #[derive(Component)]
@@ -169,7 +174,7 @@ fn spawn_sidebar(mut commands: Commands) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(MENU_BAR_HEIGHT),
+                top: Val::Px(CONTENT_TOP),
                 bottom: Val::Px(0.0),
                 right: Val::Px(0.0),
                 width: Val::Px(SIDEBAR_WIDTH),
@@ -179,6 +184,7 @@ fn spawn_sidebar(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(theme::PANEL_BG),
+            SidebarRoot,
         ))
         .with_children(|panel| {
             panel.spawn((
@@ -197,6 +203,21 @@ fn spawn_sidebar(mut commands: Commands) {
                 SidebarTree,
             ));
         });
+}
+
+/// Shows the object tree only in draw mode; rig mode shows the skeleton tree
+/// in the same place.
+fn sync_sidebar_visibility(mode: Res<EditorMode>, mut panels: Query<&mut Node, With<SidebarRoot>>) {
+    let display = if *mode == EditorMode::Draw {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut panels {
+        if node.display != display {
+            node.display = display;
+        }
+    }
 }
 
 /// Rebuilds the tree whenever the object hierarchy, selection, or rename
@@ -839,6 +860,7 @@ mod tests {
     fn state(shapes: Vec<Shape>) -> EditorState {
         EditorState::new(Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes,
         })
     }

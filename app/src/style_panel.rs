@@ -15,8 +15,8 @@ use bevy::prelude::*;
 use bevy::ui::{RelativeCursorPosition, Val2};
 
 use crate::editor::{
-    BOTTOM_BAR_HEIGHT, EditorState, SIDEBAR_WIDTH, TOOLBAR_WIDTH, TreeAddress, path_closed_at,
-    set_path_closed, style_at, style_at_mut,
+    BOTTOM_BAR_HEIGHT, EditorMode, EditorState, SIDEBAR_WIDTH, TOOLBAR_WIDTH, TreeAddress,
+    path_closed_at, set_path_closed, style_at, style_at_mut,
 };
 use crate::model::{DEFAULT_STROKE_WIDTH, Rgba8, StrokeStyle, Style};
 use crate::theme;
@@ -48,11 +48,16 @@ impl Plugin for StylePanelPlugin {
                     handle_closed_checkbox,
                     apply_edits,
                     update_visuals,
+                    sync_visibility,
                 )
                     .chain(),
             );
     }
 }
+
+/// The root of the bottom style panel.
+#[derive(Component)]
+struct StylePanelRoot;
 
 /// Which of the two color rows a widget belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,12 +349,27 @@ fn spawn_panel(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(theme::PANEL_BG),
+            StylePanelRoot,
         ))
         .with_children(|panel| {
             spawn_color_group(panel, ColorTarget::Fill);
             spawn_color_group(panel, ColorTarget::Stroke);
             spawn_shape_group(panel);
         });
+}
+
+/// Hides the shape style panel while the graphic is locked in rig mode.
+fn sync_visibility(mode: Res<EditorMode>, mut panels: Query<&mut Node, With<StylePanelRoot>>) {
+    let display = if *mode == EditorMode::Draw {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut panels {
+        if node.display != display {
+            node.display = display;
+        }
+    }
 }
 
 /// A narrow column holding shape-level options.
@@ -834,6 +854,7 @@ mod tests {
     fn style_accessors_reach_a_shape_and_its_paths() {
         let mut document = Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![Shape {
                 name: String::new(),
                 paths: vec![

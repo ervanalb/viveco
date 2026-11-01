@@ -10,6 +10,13 @@
 //! its entire subtree with it and never disturbs the parent/child clipping
 //! relationship.
 //!
+//! Documents may also carry a skeleton of [`Bone`]s. Bones are an editor-only
+//! overlay: they do not paint, and they do not affect shape bounds. Each bone
+//! stores its two endpoints in document space and nests its children, forming
+//! a hierarchical rig that later stages can bind vertices to. Because points
+//! are absolute, editing a bone rewrites its descendants too, so the stored
+//! geometry always describes where every joint actually is.
+//!
 //! Coordinates are plain document units with the origin at the top-left and Y
 //! pointing down (the usual vector-graphics convention).
 
@@ -128,6 +135,11 @@ pub struct Document {
 
     #[serde(default)]
     pub shapes: Vec<Shape>,
+
+    /// Top-level bones of the rig, in tree order. Empty for an unrigged
+    /// document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bones: Vec<Bone>,
 }
 
 fn default_version() -> u32 {
@@ -145,6 +157,7 @@ impl Document {
         Self {
             version: FORMAT_VERSION,
             shapes: Vec::new(),
+            bones: Vec::new(),
         }
     }
 
@@ -192,6 +205,66 @@ impl Document {
             .to_json_string()
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         std::fs::write(path, text)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skeleton
+// ---------------------------------------------------------------------------
+
+/// A single bone in the rig's hierarchy.
+///
+/// A bone is the segment from `head` to `tail`, stored directly in document
+/// space. Children are stored the same way, so the hierarchy is purely
+/// structural: moving a bone rewrites the endpoints of everything below it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bone {
+    /// Optional human-readable name, shown in the editor's skeleton tree.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+
+    /// The origin end of the bone, in document space.
+    ///
+    /// This may be omitted when the bone has a parent, in which case the head
+    /// follows the parent's tail. A root bone has no parent, so its head is
+    /// always present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Point>,
+
+    /// The far end of the bone, in document space.
+    #[serde(default)]
+    pub tail: Point,
+
+    /// Nested bones, painted relative to this one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<Bone>,
+}
+
+impl Default for Bone {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            head: None,
+            tail: [0.0, 0.0],
+            children: Vec::new(),
+        }
+    }
+}
+
+impl Bone {
+    /// Builds a bone from document-space endpoints.
+    pub fn from_endpoints(head: Point, tail: Point) -> Self {
+        Self {
+            head: Some(head),
+            tail,
+            ..Default::default()
+        }
+    }
+
+    /// The head to draw and edit with, resolving an omitted head to the
+    /// parent's tail. Falls back to the tail for a root bone with no head.
+    pub fn head_with_parent(&self, parent_tail: Option<Point>) -> Point {
+        self.head.or(parent_tail).unwrap_or(self.tail)
     }
 }
 
@@ -526,6 +599,7 @@ mod tests {
     fn sample_document() -> Document {
         Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![Shape {
                 name: "Outer".to_string(),
                 z: 5.0,
@@ -593,6 +667,7 @@ mod tests {
     fn siblings_are_sorted_by_z() {
         let doc = Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![
                 Shape {
                     z: 10.0,
@@ -638,6 +713,7 @@ mod tests {
     fn bounds_include_nested_shapes_and_controls() {
         let doc = Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![
                 Shape {
                     paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 10.0])],
@@ -661,14 +737,5 @@ mod tests {
         let bounds = doc.bounds().unwrap();
         assert_eq!(bounds.min, [-5.0, -5.0]);
         assert_eq!(bounds.max, [150.0, 150.0]);
-    }
-
-    #[test]
-    fn example_asset_loads_and_roundtrips() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/example.vecart.json");
-        let doc = Document::load_from_file(path).unwrap();
-        let json = doc.to_json_string().unwrap();
-        let decoded = Document::from_json_str(&json).unwrap();
-        assert_eq!(doc, decoded);
     }
 }

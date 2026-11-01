@@ -19,8 +19,12 @@ use vector_anim_app::editor::{
 use vector_anim_app::file::{DocumentFile, FilePlugin, bounds_for};
 use vector_anim_app::history::{History, HistoryPlugin};
 use vector_anim_app::menu_bar::MenuBarPlugin;
+use vector_anim_app::mode_tabs::ModeTabsPlugin;
 use vector_anim_app::model::Document;
 use vector_anim_app::render::build_scene;
+use vector_anim_app::rig::RigPlugin;
+use vector_anim_app::rig_panel::RigPanelPlugin;
+use vector_anim_app::rig_sidebar::RigSidebarPlugin;
 use vector_anim_app::sidebar::SidebarPlugin;
 use vector_anim_app::style_panel::StylePanelPlugin;
 use vector_anim_app::theme;
@@ -46,6 +50,10 @@ fn main() {
         .add_plugins(SidebarPlugin)
         .add_plugins(StylePanelPlugin)
         .add_plugins(ToolbarPlugin)
+        .add_plugins(ModeTabsPlugin)
+        .add_plugins(RigPlugin)
+        .add_plugins(RigSidebarPlugin)
+        .add_plugins(RigPanelPlugin)
         .add_plugins(MenuBarPlugin)
         .add_plugins(FilePlugin)
         .add_plugins(DialogPlugin)

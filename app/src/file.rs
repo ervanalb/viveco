@@ -181,7 +181,7 @@ fn handle_file_shortcuts(
 ) {
     // While a tree row is being renamed, these shortcuts belong to the text
     // field.
-    if editor.renaming.is_some() || !ctrl_held(&keys) {
+    if editor.is_renaming() || !ctrl_held(&keys) {
         return;
     }
 

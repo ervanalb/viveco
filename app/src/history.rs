@@ -94,7 +94,7 @@ fn handle_history_shortcuts(
 ) {
     // While a tree row is being renamed, these shortcuts belong to the text
     // field.
-    if editor.renaming.is_some() || !ctrl_held(&keys) {
+    if editor.is_renaming() || !ctrl_held(&keys) {
         return;
     }
     if keys.just_pressed(KeyCode::KeyZ) {
@@ -136,6 +136,7 @@ mod tests {
     fn document_with_path(name: &str) -> Document {
         Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![Shape {
                 name: name.into(),
                 z: 0.0,

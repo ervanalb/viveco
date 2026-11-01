@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use crate::editor::{EditorState, TreeAddress, shape_at, translate_shape};
+use crate::editor::{EditorMode, EditorState, TreeAddress, shape_at, translate_shape};
 use crate::model::Shape;
 
 /// Distance, in document units, that each successive paste is offset by.
@@ -95,13 +95,19 @@ pub fn paste_clipboard(editor: &mut EditorState, clipboard: &mut Clipboard) -> b
 
 /// Ctrl+C / Ctrl+V.
 fn handle_clipboard_shortcuts(
+    mode: Res<EditorMode>,
     keys: Res<ButtonInput<KeyCode>>,
     mut editor: ResMut<EditorState>,
     mut clipboard: ResMut<Clipboard>,
 ) {
+    // Shapes can only be copied and pasted while drawing; rig mode edits the
+    // skeleton instead.
+    if *mode != EditorMode::Draw {
+        return;
+    }
     // While a tree row is being renamed, these shortcuts belong to the text
     // field.
-    if editor.renaming.is_some() || !ctrl_held(&keys) {
+    if editor.is_renaming() || !ctrl_held(&keys) {
         return;
     }
     if keys.just_pressed(KeyCode::KeyC) {
@@ -130,6 +136,7 @@ mod tests {
     fn document_with_path() -> Document {
         Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![Shape {
                 style: filled(Rgba8::rgb(255, 0, 0)),
                 paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 0.0])],
@@ -185,6 +192,7 @@ mod tests {
     fn pasting_a_shape_with_children_keeps_the_subtree() {
         let source = Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 10.0])],
                 children: vec![Shape {
@@ -218,6 +226,7 @@ mod tests {
     fn copying_a_path_pastes_it_as_its_own_shape() {
         let mut document = Document {
             version: FORMAT_VERSION,
+            bones: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![
                     Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
