@@ -35,7 +35,7 @@ pub struct Clipboard {
 /// that contour, wrapped in a new shape that borrows its owner's style. Returns
 /// `false` when nothing usable is selected.
 pub fn copy_selection(editor: &EditorState, clipboard: &mut Clipboard) -> bool {
-    let Some(address) = editor.selected.as_ref() else {
+    let Some(address) = editor.selected_node.as_ref() else {
         return false;
     };
     let Some(owner) = shape_at(&editor.document, address) else {
@@ -86,7 +86,7 @@ pub fn paste_clipboard(editor: &mut EditorState, clipboard: &mut Clipboard) -> b
 
     let index = editor.document.shapes.len();
     editor.document.shapes.push(shape);
-    editor.select(Some(TreeAddress::Shape {
+    editor.select_node(Some(TreeAddress::Shape {
         shapes: vec![index],
     }));
     editor.structure_revision += 1;
@@ -100,9 +100,9 @@ fn handle_clipboard_shortcuts(
     mut editor: ResMut<EditorState>,
     mut clipboard: ResMut<Clipboard>,
 ) {
-    // Shapes can only be copied and pasted while drawing; rig mode edits the
-    // skeleton instead.
-    if *mode != EditorMode::Draw {
+    // Only modes that manage document nodes use the clipboard; rig mode edits
+    // the skeleton instead.
+    if !mode.uses_clipboard() {
         return;
     }
     // While a tree row is being renamed, these shortcuts belong to the text
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn copying_then_pasting_adds_an_offset_copy_and_selects_it() {
         let mut editor = EditorState::new(document_with_path());
-        editor.selected = Some(TreeAddress::Shape { shapes: vec![0] });
+        editor.selected_node = Some(TreeAddress::Shape { shapes: vec![0] });
         let mut clipboard = Clipboard::default();
 
         assert!(copy_selection(&editor, &mut clipboard));
@@ -163,7 +163,7 @@ mod tests {
         // The paste sits on top of the original.
         assert_eq!(shapes[1].z, 1.0);
         assert_eq!(
-            editor.selected,
+            editor.selected_node,
             Some(TreeAddress::Shape { shapes: vec![1] })
         );
 
@@ -204,7 +204,7 @@ mod tests {
         };
 
         let mut editor = EditorState::new(source.clone());
-        editor.selected = Some(TreeAddress::Shape { shapes: vec![0] });
+        editor.selected_node = Some(TreeAddress::Shape { shapes: vec![0] });
         let mut clipboard = Clipboard::default();
 
         assert!(copy_selection(&editor, &mut clipboard));
@@ -237,7 +237,7 @@ mod tests {
         };
 
         let mut editor = EditorState::new(std::mem::take(&mut document));
-        editor.selected = Some(TreeAddress::Path {
+        editor.selected_node = Some(TreeAddress::Path {
             shapes: vec![0],
             path: 1,
         });

@@ -588,13 +588,13 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
 /// Mirrors the selected shape's style into the panel when the selection
 /// changes.
 fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelState>) {
-    if panel.synced == editor.selected {
+    if panel.synced == editor.selected_node {
         return;
     }
-    panel.synced = editor.selected.clone();
+    panel.synced = editor.selected_node.clone();
     panel.dirty = false;
 
-    let Some(address) = editor.selected.as_ref() else {
+    let Some(address) = editor.selected_node.as_ref() else {
         panel.fill_enabled = false;
         panel.stroke_enabled = false;
         panel.closed = false;
@@ -711,7 +711,7 @@ fn apply_edits(mut editor: ResMut<EditorState>, mut panel: ResMut<StylePanelStat
     let Some(address) = panel.synced.clone() else {
         return;
     };
-    if editor.selected.as_ref() != Some(&address) {
+    if editor.selected_node.as_ref() != Some(&address) {
         return;
     }
     let closed = panel.closed;

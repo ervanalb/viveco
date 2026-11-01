@@ -16,3 +16,4 @@ pub mod sidebar;
 pub mod style_panel;
 pub mod theme;
 pub mod toolbar;
+pub mod tree;

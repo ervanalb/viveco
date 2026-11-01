@@ -5,11 +5,7 @@
 
 use bevy::prelude::*;
 
-use crate::editor::{
-    EditorMode, EditorState, MENU_BAR_HEIGHT, TAB_BAR_HEIGHT, Tool, ToolState, commit_rename,
-    finish_pen,
-};
-use crate::rig::{RigState, commit_bone_rename};
+use crate::editor::{EditorMode, EditorState, MENU_BAR_HEIGHT, TAB_BAR_HEIGHT, Tool, ToolState};
 use crate::theme;
 
 pub struct ModeTabsPlugin;
@@ -77,36 +73,25 @@ fn handle_tab_buttons(
     tabs: Query<(&Interaction, &ModeTab), Changed<Interaction>>,
     mut mode: ResMut<EditorMode>,
     mut editor: ResMut<EditorState>,
-    mut rig: ResMut<RigState>,
     mut tool: ResMut<ToolState>,
 ) {
     for (interaction, tab) in &tabs {
         if *interaction != Interaction::Pressed || *mode == tab.0 {
             continue;
         }
-        switch_mode(&mut mode, &mut editor, &mut rig, &mut tool, tab.0);
+        switch_mode(&mut mode, &mut editor, &mut tool, tab.0);
     }
 }
 
 fn switch_mode(
     mode: &mut EditorMode,
     editor: &mut EditorState,
-    rig: &mut RigState,
     tool: &mut ToolState,
     next: EditorMode,
 ) {
     // Finish transient gestures before leaving a mode so nothing is silently
     // abandoned or carried across.
-    match *mode {
-        EditorMode::Draw => {
-            commit_rename(editor);
-            finish_pen(editor, true);
-        }
-        EditorMode::Rig => {
-            commit_bone_rename(editor);
-        }
-    }
-    rig.cancel_editing();
+    mode.leave(editor);
     // Every mode starts on the select tool.
     tool.0 = Tool::Select;
     *mode = next;

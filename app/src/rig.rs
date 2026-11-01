@@ -9,8 +9,6 @@
 //! dragging either endpoint. The pen tool places connected bone chains, each
 //! new bone parented to the previous one. Weight painting is a later stage.
 
-use bevy::input::ButtonState;
-use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_vello::prelude::vello;
@@ -129,18 +127,22 @@ struct PenChain {
     parent: Option<BoneAddress>,
 }
 
-/// Transient rig-editing state that does not belong in the document.
-#[derive(Resource, Default)]
-pub struct RigState {
+/// Transient rig-editing state.
+///
+/// This lives inside [`EditorState`] alongside the draw tool's transient state
+/// so that every mode's in-progress gesture is cleared by the same document
+/// and selection operations.
+#[derive(Default)]
+pub struct RigEditing {
     /// The bone drag in progress, if any.
     drag: Option<BoneDrag>,
     /// The pen chain being built, if any.
     chain: Option<PenChain>,
     /// The line previewing the next pen bone, from the last joint to the cursor.
-    pub preview: Option<(Point, Point)>,
+    preview: Option<(Point, Point)>,
 }
 
-impl RigState {
+impl RigEditing {
     /// Drops any in-progress drag or pen chain, for example when switching
     /// tools or modes.
     pub fn cancel_editing(&mut self) {
@@ -148,15 +150,24 @@ impl RigState {
         self.chain = None;
         self.preview = None;
     }
+
+    /// The line previewing the next pen bone, if a chain is in progress.
+    pub fn preview(&self) -> Option<(Point, Point)> {
+        self.preview
+    }
 }
 
 pub struct RigPlugin;
 
 impl Plugin for RigPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RigState>().add_systems(
+        app.add_systems(
             Update,
-            (handle_bone_input, handle_bone_rename_input)
+            (
+                handle_bone_input,
+                // Inline renames use the shared tree widget's keyboard handler.
+                crate::tree::handle_rename_input::<BoneAddress>,
+            )
                 .chain()
                 .after(CanvasInput),
         );
@@ -950,51 +961,6 @@ pub fn delete_selected_bone(editor: &mut EditorState) -> bool {
     }
 }
 
-fn handle_bone_rename_input(
-    mut events: MessageReader<KeyboardInput>,
-    mut editor: ResMut<EditorState>,
-) {
-    if editor.bone_renaming.is_none() {
-        for _ in events.read() {}
-        return;
-    }
-
-    let mut commit = false;
-    let mut cancel = false;
-    {
-        let Some(renaming) = editor.bone_renaming.as_mut() else {
-            return;
-        };
-        for event in events.read() {
-            if event.state != ButtonState::Pressed {
-                continue;
-            }
-            match event.key_code {
-                KeyCode::Enter => commit = true,
-                KeyCode::Escape => cancel = true,
-                KeyCode::Backspace => {
-                    renaming.buffer.pop();
-                }
-                _ => {
-                    if let Some(text) = &event.text {
-                        for ch in text.chars() {
-                            if !ch.is_control() {
-                                renaming.buffer.push(ch);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if cancel {
-        cancel_bone_rename(&mut editor);
-    } else if commit {
-        commit_bone_rename(&mut editor);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
@@ -1010,7 +976,6 @@ fn handle_bone_input(
     viewport: Res<Viewport>,
     menu: Option<Res<MenuState>>,
     mut editor: ResMut<EditorState>,
-    mut rig: ResMut<RigState>,
 ) {
     if *mode != EditorMode::Rig {
         return;
@@ -1019,7 +984,7 @@ fn handle_bone_input(
     // A dropdown owns the pointer while it is open.
     if menu.is_some_and(|menu| menu.is_open()) {
         if mouse.just_released(MouseButton::Left) {
-            rig.drag = None;
+            editor.rig.drag = None;
         }
         return;
     }
@@ -1036,7 +1001,7 @@ fn handle_bone_input(
     if keys.just_pressed(KeyCode::Escape) {
         // Escape leaves the pen tool and abandons its chain, matching how the
         // drawing pen behaves.
-        rig.cancel_editing();
+        editor.rig.cancel_editing();
         if tool.0 == Tool::Pen {
             tool.0 = Tool::Select;
         } else {
@@ -1046,7 +1011,7 @@ fn handle_bone_input(
     }
 
     if keys.just_pressed(KeyCode::Delete) && tool.0 == Tool::Select {
-        rig.cancel_editing();
+        editor.rig.cancel_editing();
         delete_selected_bone(&mut editor);
         return;
     }
@@ -1064,8 +1029,8 @@ fn handle_bone_input(
     let over = over_ui(cursor, window);
 
     match tool.0 {
-        Tool::Select => handle_bone_select(&mouse, &mut editor, &mut rig, point, pixel, over),
-        Tool::Pen => handle_bone_pen(&mouse, &mut editor, &mut rig, point, pixel, over),
+        Tool::Select => handle_bone_select(&mouse, &mut editor, point, pixel, over),
+        Tool::Pen => handle_bone_pen(&mouse, &mut editor, point, pixel, over),
     }
 }
 
@@ -1074,7 +1039,6 @@ fn handle_bone_input(
 fn handle_bone_select(
     mouse: &ButtonInput<MouseButton>,
     editor: &mut EditorState,
-    rig: &mut RigState,
     point: Point,
     pixel: f32,
     over: bool,
@@ -1083,7 +1047,7 @@ fn handle_bone_select(
         // The UI handles clicks here. Still finish a drag released over a
         // panel.
         if mouse.just_released(MouseButton::Left) {
-            rig.drag = None;
+            editor.rig.drag = None;
         }
         return;
     }
@@ -1106,9 +1070,10 @@ fn handle_bone_select(
         };
 
         if grab_joint && let Some((address, end, _)) = joint {
+            // Selecting clears any previous gesture, so the new drag is set
+            // after it.
             editor.select_bone(Some(address.clone()));
-            editor.bone_renaming = None;
-            rig.drag = Some(BoneDrag::Endpoint {
+            editor.rig.drag = Some(BoneDrag::Endpoint {
                 address,
                 end,
                 origin: point,
@@ -1118,26 +1083,24 @@ fn handle_bone_select(
 
         // Clicking a bone's body selects it and starts moving it.
         if let Some(address) = body {
-            editor.selected_bone = Some(address.clone());
-            editor.bone_renaming = None;
-            rig.drag = Some(BoneDrag::Bulk {
+            editor.select_bone(Some(address.clone()));
+            editor.rig.drag = Some(BoneDrag::Bulk {
                 address,
                 last: point,
             });
             return;
         }
 
-        editor.selected_bone = None;
-        editor.bone_renaming = None;
-        rig.drag = None;
+        editor.select_bone(None);
+        editor.rig.drag = None;
     }
 
     if mouse.pressed(MouseButton::Left) {
-        match rig.drag.clone() {
+        match editor.rig.drag.clone() {
             Some(BoneDrag::Bulk { address, last }) => {
                 let delta = [point[0] - last[0], point[1] - last[1]];
                 translate_bone(&mut editor.document, &address, delta);
-                rig.drag = Some(BoneDrag::Bulk {
+                editor.rig.drag = Some(BoneDrag::Bulk {
                     address,
                     last: point,
                 });
@@ -1156,13 +1119,13 @@ fn handle_bone_select(
             address,
             end,
             origin,
-        }) = rig.drag.take()
+        }) = editor.rig.drag.take()
             && distance(origin, point) > pixel * BONE_ENDPOINT_CLICK_SLOP
             && finish_endpoint_drag(editor, &address, end, point, pixel * BONE_CONNECT_SNAP)
         {
             editor.structure_revision += 1;
         }
-        rig.drag = None;
+        editor.rig.drag = None;
     }
 }
 
@@ -1171,23 +1134,22 @@ fn handle_bone_select(
 fn handle_bone_pen(
     mouse: &ButtonInput<MouseButton>,
     editor: &mut EditorState,
-    rig: &mut RigState,
     point: Point,
     pixel: f32,
     over: bool,
 ) {
     if over {
-        rig.preview = None;
+        editor.rig.preview = None;
         return;
     }
 
     if mouse.just_pressed(MouseButton::Left) {
-        match rig.chain.take() {
+        match editor.rig.chain.take() {
             None => {
                 // First joint of a new chain.
                 editor.selected_bone = None;
                 editor.bone_renaming = None;
-                rig.chain = Some(PenChain {
+                editor.rig.chain = Some(PenChain {
                     last: point,
                     parent: None,
                 });
@@ -1203,22 +1165,22 @@ fn handle_bone_pen(
                     if let Some(address) = address {
                         editor.selected_bone = Some(address.clone());
                         editor.structure_revision += 1;
-                        rig.chain = Some(PenChain {
+                        editor.rig.chain = Some(PenChain {
                             last: point,
                             parent: Some(address),
                         });
                     } else {
-                        rig.chain = Some(chain);
+                        editor.rig.chain = Some(chain);
                     }
                 } else {
                     // A click on the same joint keeps the chain alive.
-                    rig.chain = Some(chain);
+                    editor.rig.chain = Some(chain);
                 }
             }
         }
     }
 
-    rig.preview = rig.chain.as_ref().map(|chain| (chain.last, point));
+    editor.rig.preview = editor.rig.chain.as_ref().map(|chain| (chain.last, point));
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,5 +1769,33 @@ mod tests {
         let json = serde_json::to_string(&document).unwrap();
         let loaded: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded, document);
+    }
+
+    #[test]
+    fn replacing_the_document_clears_rig_editing() {
+        let mut editor = EditorState::new(Document::new());
+        editor.rig.chain = Some(PenChain {
+            last: [0.0, 0.0],
+            parent: None,
+        });
+        editor.rig.preview = Some(([0.0, 0.0], [10.0, 10.0]));
+
+        editor.replace_document(Document::new());
+
+        assert!(editor.rig.chain.is_none());
+        assert!(editor.rig.preview().is_none());
+    }
+
+    #[test]
+    fn selecting_a_bone_clears_any_in_progress_gesture() {
+        let mut editor = EditorState::new(document_with_bones());
+        editor.rig.drag = Some(BoneDrag::Bulk {
+            address: address(&[0]),
+            last: [0.0, 0.0],
+        });
+
+        editor.select_bone(Some(address(&[0])));
+
+        assert!(editor.rig.drag.is_none());
     }
 }

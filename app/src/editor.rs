@@ -23,7 +23,7 @@ use crate::model::{
 use crate::render::{
     build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
 };
-use crate::rig::{BoneAddress, BoneRename, RigState};
+use crate::rig::{BoneAddress, BoneRename, RigEditing};
 
 /// Width of the layer sidebar on the right, in screen pixels.
 ///
@@ -60,6 +60,40 @@ pub enum EditorMode {
     #[default]
     Draw,
     Rig,
+}
+
+/// Lifecycle hooks each mode provides.
+///
+/// Callers (the mode tabs, the tool palette, the clipboard) go through these
+/// instead of matching on [`EditorMode`], so each mode decides what finishing
+/// or abandoning its own gesture means.
+impl EditorMode {
+    /// Leaves this mode, committing renames and finishing gestures so no edit
+    /// is silently lost, then dropping any transient residue.
+    pub fn leave(self, editor: &mut EditorState) {
+        match self {
+            Self::Draw => {
+                commit_node_rename(editor);
+                finish_pen(editor, true);
+            }
+            Self::Rig => crate::rig::commit_bone_rename(editor),
+        }
+        editor.rig.cancel_editing();
+    }
+
+    /// Finishes or abandons the active gesture when the tool changes, without
+    /// touching renames.
+    pub fn change_tool(self, editor: &mut EditorState) {
+        match self {
+            Self::Draw => finish_pen(editor, true),
+            Self::Rig => editor.rig.cancel_editing(),
+        }
+    }
+
+    /// Whether this mode copies and pastes document nodes.
+    pub fn uses_clipboard(self) -> bool {
+        matches!(self, Self::Draw)
+    }
 }
 
 /// The active editing tool.
@@ -293,7 +327,7 @@ impl PenDraft {
 pub struct EditorState {
     pub document: Document,
     /// The selected node, either a whole shape or one of its paths.
-    pub selected: Option<TreeAddress>,
+    pub selected_node: Option<TreeAddress>,
     /// The selected control point of [`Self::selected`], if any.
     pub selected_handle: Option<SelectedNode>,
     /// Incremented whenever the object tree changes shape (an item is removed
@@ -305,6 +339,11 @@ pub struct EditorState {
     pub selected_bone: Option<BoneAddress>,
     /// The bone whose name is being edited inline, if any.
     pub bone_renaming: Option<BoneRename>,
+    /// Transient rig-mode editing state (bone drag, pen chain, preview).
+    ///
+    /// Stored here rather than in its own resource so a document replacement or
+    /// selection change clears every mode's gesture through the same path.
+    pub(crate) rig: RigEditing,
     drag: Option<Drag>,
     /// The in-progress pen path, if any.
     pen: Option<PenDraft>,
@@ -317,12 +356,13 @@ impl EditorState {
     pub fn new(document: Document) -> Self {
         Self {
             document,
-            selected: None,
+            selected_node: None,
             selected_handle: None,
             structure_revision: 0,
             renaming: None,
             selected_bone: None,
             bone_renaming: None,
+            rig: RigEditing::default(),
             drag: None,
             pen: None,
             last_click: None,
@@ -333,17 +373,21 @@ impl EditorState {
     ///
     /// Any in-progress drag, control-point selection, and rename are dropped,
     /// so the selection always starts from a clean state.
-    pub fn select(&mut self, address: Option<TreeAddress>) {
-        self.selected = address;
+    pub fn select_node(&mut self, address: Option<TreeAddress>) {
+        self.selected_node = address;
         self.selected_handle = None;
         self.renaming = None;
         self.drag = None;
     }
 
     /// Selects a bone (or clears the bone selection).
+    ///
+    /// Like [`Self::select_node`], this drops any in-progress rig gesture and
+    /// rename so the selection always starts clean.
     pub fn select_bone(&mut self, address: Option<BoneAddress>) {
         self.selected_bone = address;
         self.bone_renaming = None;
+        self.rig.cancel_editing();
     }
 
     /// Whether any inline rename (shape or bone) is in progress.
@@ -353,11 +397,11 @@ impl EditorState {
 
     /// Starts renaming the node at `address`, seeding the text field with its
     /// current name.
-    pub fn begin_rename(&mut self, address: TreeAddress) {
-        let buffer = name_at(&self.document, &address)
+    pub fn begin_node_rename(&mut self, address: TreeAddress) {
+        let buffer = node_name_at(&self.document, &address)
             .unwrap_or_default()
             .to_owned();
-        self.selected = Some(address.clone());
+        self.selected_node = Some(address.clone());
         self.selected_handle = None;
         self.drag = None;
         self.renaming = Some(RenameState { address, buffer });
@@ -370,11 +414,12 @@ impl EditorState {
     /// not change.
     pub fn replace_document(&mut self, document: Document) {
         self.document = document;
-        self.selected = None;
+        self.selected_node = None;
         self.selected_handle = None;
         self.renaming = None;
         self.selected_bone = None;
         self.bone_renaming = None;
+        self.rig.cancel_editing();
         self.drag = None;
         self.pen = None;
         self.last_click = None;
@@ -601,7 +646,7 @@ fn handle_input(
         if !mouse.just_pressed(MouseButton::Left) {
             return;
         }
-        commit_rename(&mut editor);
+        commit_node_rename(&mut editor);
     }
 
     // Escape leaves the pen tool, abandoning a half-drawn path rather than
@@ -651,14 +696,14 @@ fn handle_select_input(
     editor: &mut EditorState,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
-        editor.selected = None;
+        editor.selected_node = None;
         editor.selected_handle = None;
         editor.drag = None;
         return;
     }
 
     if keys.just_pressed(KeyCode::Delete) {
-        delete_selection(editor);
+        delete_selected_node(editor);
         return;
     }
 
@@ -702,7 +747,7 @@ fn handle_select_input(
         // would re-select that shape.
         let shift = shift_held(keys);
         let mut started_drag = false;
-        if let Some(address) = editor.selected.clone()
+        if let Some(address) = editor.selected_node.clone()
             && let Some((node, node_address, path)) = node_under(
                 &editor.document,
                 &address,
@@ -735,7 +780,7 @@ fn handle_select_input(
             // pressing empty space clears the selection.
             let picked = pick_shape(
                 &editor.document,
-                editor.selected.as_ref(),
+                editor.selected_node.as_ref(),
                 point,
                 view.document_per_pixel() * PATH_HIT_SLACK,
             );
@@ -744,7 +789,7 @@ fn handle_select_input(
                 address,
                 last: point,
             });
-            editor.selected = picked;
+            editor.selected_node = picked;
         }
     }
 
@@ -829,7 +874,7 @@ fn handle_pen_input(
     if keys.just_pressed(KeyCode::Delete) {
         // Drawing does not disable editing: Delete still removes the selected
         // point or object (for example, the shape the pen just finished).
-        delete_selection(editor);
+        delete_selected_node(editor);
         return;
     }
 
@@ -865,7 +910,7 @@ fn handle_pen_input(
                 pending_out: None,
                 dragging: false,
             });
-            editor.selected = None;
+            editor.selected_node = None;
             editor.selected_handle = None;
         } else if pen_should_close(editor, point, slack) {
             if let Some(draft) = &mut editor.pen {
@@ -906,7 +951,6 @@ fn refresh_scene(
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
     mode: Res<EditorMode>,
-    rig: Res<RigState>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut scenes: Query<&mut VelloScene2d, With<DocumentScene>>,
 ) {
@@ -918,7 +962,7 @@ fn refresh_scene(
     let mut scene = build_scene(&editor.document);
 
     if *mode == EditorMode::Draw {
-        if let Some(address) = &editor.selected {
+        if let Some(address) = &editor.selected_node {
             // A whole-shape selection shows the points of every path it owns.
             // Only the path holding the selected point highlights it.
             for (index, path) in selection_paths(&editor.document, address) {
@@ -954,7 +998,7 @@ fn refresh_scene(
             &mut scene,
             &editor.document,
             editor.selected_bone.as_ref(),
-            rig.preview,
+            editor.rig.preview(),
             scale,
         );
     }
@@ -1348,7 +1392,7 @@ pub fn move_path_into_shape(
 }
 
 /// The editable name of the node at `address`.
-pub fn name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a str> {
+pub fn node_name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a str> {
     match address {
         TreeAddress::Shape { .. } => Some(shape_at(document, address)?.name.as_str()),
         TreeAddress::Path { .. } => Some(path_at(document, address)?.name.as_str()),
@@ -1356,7 +1400,7 @@ pub fn name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a 
 }
 
 /// Renames the node at `address`. Returns `false` when it does not exist.
-pub fn rename_at(document: &mut Document, address: &TreeAddress, name: String) -> bool {
+pub fn rename_node_at(document: &mut Document, address: &TreeAddress, name: String) -> bool {
     match address {
         TreeAddress::Shape { .. } => match shape_at_mut(document, address) {
             Some(shape) => {
@@ -1376,18 +1420,18 @@ pub fn rename_at(document: &mut Document, address: &TreeAddress, name: String) -
 }
 
 /// Commits the in-progress rename, if any.
-pub fn commit_rename(editor: &mut EditorState) {
+pub fn commit_node_rename(editor: &mut EditorState) {
     let Some(renaming) = editor.renaming.take() else {
         return;
     };
     let name = renaming.buffer.trim().to_owned();
-    if rename_at(&mut editor.document, &renaming.address, name) {
+    if rename_node_at(&mut editor.document, &renaming.address, name) {
         editor.structure_revision += 1;
     }
 }
 
 /// Abandons the in-progress rename, if any.
-pub fn cancel_rename(editor: &mut EditorState) {
+pub fn cancel_node_rename(editor: &mut EditorState) {
     editor.renaming = None;
 }
 
@@ -1595,7 +1639,12 @@ fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
 /// Only the outline is eligible: clicking the interior of a filled shape far
 /// from its edge does nothing. Returns `true` when a point was inserted.
 fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
-    let Some(address) = pick_shape(&editor.document, editor.selected.as_ref(), point, slack) else {
+    let Some(address) = pick_shape(
+        &editor.document,
+        editor.selected_node.as_ref(),
+        point,
+        slack,
+    ) else {
         return false;
     };
     let Some(shape) = shape_at(&editor.document, &address) else {
@@ -1627,7 +1676,7 @@ fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
         return false;
     };
 
-    editor.selected = Some(address);
+    editor.selected_node = Some(address);
     editor.selected_handle = Some(SelectedNode {
         path: path_index,
         handle: Handle::Anchor(new_index),
@@ -2046,7 +2095,7 @@ pub fn finish_pen(editor: &mut EditorState, finalize: bool) {
         children: Vec::new(),
     });
 
-    editor.selected = Some(TreeAddress::Shape {
+    editor.selected_node = Some(TreeAddress::Shape {
         shapes: vec![index],
     });
     editor.selected_handle = None;
@@ -2080,12 +2129,12 @@ fn path_end(path: &Path) -> [f32; 2] {
 
 /// Deletes the selected control point, or the selected object when no control
 /// point is selected.
-fn delete_selection(editor: &mut EditorState) {
+fn delete_selected_node(editor: &mut EditorState) {
     if let Some(node) = editor.selected_handle.take() {
         // A control point is selected: only it is deleted, even when the
         // handle happens to sit on top of another object.
         let node_address = editor
-            .selected
+            .selected_node
             .as_ref()
             .map(|address| node_path_address(address, node.path));
         if let Some(node_address) = node_address
@@ -2098,7 +2147,7 @@ fn delete_selection(editor: &mut EditorState) {
         return;
     }
 
-    let Some(address) = editor.selected.take() else {
+    let Some(address) = editor.selected_node.take() else {
         return;
     };
     if remove_object(&mut editor.document, &address) {
@@ -2848,7 +2897,7 @@ mod tests {
 
         assert!(editor.pen.is_none());
         assert_eq!(editor.document.shapes.len(), 1);
-        assert_eq!(editor.selected, Some(shape_address(&[0])));
+        assert_eq!(editor.selected_node, Some(shape_address(&[0])));
         assert_eq!(editor.document.shapes[0].paths.len(), 1);
         assert_eq!(editor.document.shapes[0].z, 0.0);
         assert_eq!(editor.structure_revision, 1);
@@ -2869,7 +2918,7 @@ mod tests {
         finish_pen(&mut editor, true);
 
         assert_eq!(editor.document.shapes[1].z, 5.0);
-        assert_eq!(editor.selected, Some(shape_address(&[1])));
+        assert_eq!(editor.selected_node, Some(shape_address(&[1])));
     }
 
     #[test]
@@ -3124,7 +3173,7 @@ mod tests {
         let mut editor = EditorState::new(document);
 
         assert!(insert_point(&mut editor, [50.0, 0.0], 1.0));
-        assert_eq!(editor.selected, Some(shape_address(&[0])));
+        assert_eq!(editor.selected_node, Some(shape_address(&[0])));
         assert_eq!(
             editor.selected_handle,
             Some(SelectedNode {
@@ -3150,7 +3199,7 @@ mod tests {
 
         // Far from any edge: the fill is hit but no point is inserted.
         assert!(!insert_point(&mut editor, [50.0, 50.0], 1.0));
-        assert!(editor.selected.is_none());
+        assert!(editor.selected_node.is_none());
     }
 
     #[test]
@@ -3456,25 +3505,25 @@ mod tests {
         let path = path_address(&[0], 0);
         let shape = shape_address(&[1]);
 
-        assert_eq!(name_at(&document, &path), Some("Original"));
-        assert!(rename_at(&mut document, &path, "Curve".into()));
-        assert_eq!(name_at(&document, &path), Some("Curve"));
+        assert_eq!(node_name_at(&document, &path), Some("Original"));
+        assert!(rename_node_at(&mut document, &path, "Curve".into()));
+        assert_eq!(node_name_at(&document, &path), Some("Curve"));
 
-        assert_eq!(name_at(&document, &shape), Some(""));
-        assert!(rename_at(&mut document, &shape, "Group".into()));
-        assert_eq!(name_at(&document, &shape), Some("Group"));
+        assert_eq!(node_name_at(&document, &shape), Some(""));
+        assert!(rename_node_at(&mut document, &shape, "Group".into()));
+        assert_eq!(node_name_at(&document, &shape), Some("Group"));
 
         let missing = shape_address(&[9]);
-        assert!(!rename_at(&mut document, &missing, "Nope".into()));
-        assert_eq!(name_at(&document, &missing), None);
+        assert!(!rename_node_at(&mut document, &missing, "Nope".into()));
+        assert_eq!(node_name_at(&document, &missing), None);
 
         // Committing from the editor trims the buffer and bumps the revision.
         let mut editor = EditorState::new(document);
-        editor.begin_rename(path.clone());
+        editor.begin_node_rename(path.clone());
         editor.renaming.as_mut().unwrap().buffer = "  Renamed  ".into();
-        commit_rename(&mut editor);
+        commit_node_rename(&mut editor);
         assert!(editor.renaming.is_none());
-        assert_eq!(name_at(&editor.document, &path), Some("Renamed"));
+        assert_eq!(node_name_at(&editor.document, &path), Some("Renamed"));
         assert_eq!(editor.structure_revision, 1);
     }
 }

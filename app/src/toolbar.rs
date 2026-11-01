@@ -7,10 +7,7 @@
 
 use bevy::prelude::*;
 
-use crate::editor::{
-    CONTENT_TOP, EditorMode, EditorState, TOOLBAR_WIDTH, Tool, ToolState, finish_pen,
-};
-use crate::rig::RigState;
+use crate::editor::{CONTENT_TOP, EditorMode, EditorState, TOOLBAR_WIDTH, Tool, ToolState};
 use crate::theme;
 
 pub struct ToolbarPlugin;
@@ -145,7 +142,6 @@ fn handle_tool_buttons(
     keys: Res<ButtonInput<KeyCode>>,
     mut tool: ResMut<ToolState>,
     mut editor: ResMut<EditorState>,
-    mut rig: ResMut<RigState>,
 ) {
     let mut requested = None;
     for (interaction, button) in &buttons {
@@ -174,10 +170,7 @@ fn handle_tool_buttons(
     }
     // Finish the transient gesture belonging to the active mode so switching
     // tools never leaves a half-built path or bone chain behind.
-    match *mode {
-        EditorMode::Draw => finish_pen(&mut editor, true),
-        EditorMode::Rig => rig.cancel_editing(),
-    }
+    mode.change_tool(&mut editor);
     tool.0 = next;
 }
 
