@@ -20,8 +20,9 @@ use crate::rig::{
     commit_bone_rename, move_bone_into, move_bone_near,
 };
 use crate::tree::{
-    DropKind, TreeDrag, TreeModel, TreeNode, finish_drag, handle_row_press, label, paint_rows,
-    rebuild_tree, spawn_panel, sync_row_labels, sync_visibility, update_drag_hover,
+    DropKind, TreeDrag, TreeModel, TreeNode, deselect_on_empty_press, finish_drag,
+    handle_row_press, label, paint_rows, rebuild_tree, spawn_panel, sync_row_labels,
+    sync_visibility, update_drag_hover,
 };
 
 pub struct RigSidebarPlugin;
@@ -36,6 +37,7 @@ impl Plugin for RigSidebarPlugin {
                 Update,
                 (
                     handle_row_press::<BoneAddress>,
+                    deselect_on_empty_press::<BoneAddress>,
                     update_drag_hover::<BoneAddress>,
                     finish_drag::<BoneAddress>,
                     rebuild_tree::<BoneAddress>,
@@ -73,6 +75,10 @@ impl TreeModel for BoneAddress {
 
     fn select(editor: &mut EditorState, address: Self) {
         editor.select_bone(Some(address));
+    }
+
+    fn deselect(editor: &mut EditorState) {
+        editor.select_bone(None);
     }
 
     fn begin_rename(editor: &mut EditorState, address: Self) {

@@ -17,12 +17,13 @@ use vello::kurbo::{Affine, BezPath, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
 use crate::editor::{
-    CanvasInput, DocumentBounds, EditorMode, EditorState, Tool, ToolState, ViewMapping, Viewport,
-    over_ui,
+    CONTENT_TOP, CanvasInput, DocumentBounds, EditorMode, EditorState, SIDEBAR_WIDTH, Tool,
+    ToolState, ViewMapping, Viewport, over_ui,
 };
 use crate::menu_bar::MenuState;
 use crate::model::{Bone, Document, Point};
 use crate::render::to_kurbo_point;
+use crate::weight_paint::{WeightPaintBrush, paint_document};
 
 /// Extra distance, in screen pixels, within which a click counts as hitting a
 /// bone's body.
@@ -161,7 +162,7 @@ pub struct RigPlugin;
 
 impl Plugin for RigPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<WeightPaintBrush>().add_systems(
             Update,
             (
                 handle_bone_input,
@@ -373,6 +374,33 @@ pub fn translate_bone(document: &mut Document, address: &BoneAddress, delta: Poi
 // Creation and reparenting
 // ---------------------------------------------------------------------------
 
+/// A bone name not used anywhere in the rig, such as `Bone` or `Bone 2`.
+///
+/// Weight lists refer to bones by name, so names must stay unique across the
+/// whole skeleton, not just among siblings.
+pub fn unique_bone_name(document: &Document) -> String {
+    fn collect(bones: &[Bone], used: &mut std::collections::HashSet<String>) {
+        for bone in bones {
+            used.insert(bone.name.clone());
+            collect(&bone.children, used);
+        }
+    }
+
+    let mut used = std::collections::HashSet::new();
+    collect(&document.bones, &mut used);
+    if !used.contains("Bone") {
+        return "Bone".to_owned();
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("Bone {suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 /// Adds a new top-level bone and returns its address.
 pub fn add_bone(
     document: &mut Document,
@@ -411,8 +439,26 @@ pub fn add_child_bone(
 }
 
 /// Removes the bone named by `address`, together with its children.
+///
+/// Every removed bone is also dropped from the point weight lists, which are
+/// rescaled so each still totals what it did before.
 pub fn remove_bone(document: &mut Document, address: &BoneAddress) -> bool {
-    take_bone(document, address).is_some()
+    let Some(bone) = take_bone(document, address) else {
+        return false;
+    };
+    let mut names = Vec::new();
+    collect_bone_names(&bone, &mut names);
+    document.remove_bones_from_weights(&names);
+    true
+}
+
+fn collect_bone_names(bone: &Bone, names: &mut Vec<String>) {
+    if !bone.name.is_empty() {
+        names.push(bone.name.clone());
+    }
+    for child in &bone.children {
+        collect_bone_names(child, names);
+    }
 }
 
 /// Moves `source` next to `target` in the target's sibling list.
@@ -504,15 +550,20 @@ pub fn bone_name_at<'a>(document: &'a Document, address: &BoneAddress) -> Option
     Some(bone_at(document, address)?.name.as_str())
 }
 
-/// Renames a bone. Returns `false` when it does not exist.
+/// Renames a bone, updating any weights bound to it.
+///
+/// Returns `false` when the bone does not exist.
 pub fn rename_bone_at(document: &mut Document, address: &BoneAddress, name: String) -> bool {
-    match bone_at_mut(document, address) {
-        Some(bone) => {
-            bone.name = name;
-            true
-        }
-        None => false,
+    let old = {
+        let Some(bone) = bone_at_mut(document, address) else {
+            return false;
+        };
+        std::mem::replace(&mut bone.name, name.clone())
+    };
+    if old != name {
+        document.rename_bone_in_weights(&old, &name);
     }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -975,7 +1026,9 @@ fn handle_bone_input(
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
     menu: Option<Res<MenuState>>,
+    brush: Res<WeightPaintBrush>,
     mut editor: ResMut<EditorState>,
+    mut paint_last: Local<Option<Point>>,
 ) {
     if *mode != EditorMode::Rig {
         return;
@@ -990,19 +1043,31 @@ fn handle_bone_input(
     }
 
     // While a bone row is being renamed, the keyboard belongs to the text
-    // field. A click elsewhere commits the edit and then behaves normally.
+    // field. A click elsewhere commits the edit and then behaves normally, but
+    // presses inside the skeleton tree belong to the tree: the second press of
+    // a double-click starts a new rename, and it must not be committed by this
+    // system on the same frame.
     if editor.is_renaming() {
         if !mouse.just_pressed(MouseButton::Left) {
+            return;
+        }
+        let over_sidebar = windows.single().is_ok_and(|window| {
+            window.cursor_position().is_some_and(|cursor| {
+                cursor.x >= window.width() - SIDEBAR_WIDTH && cursor.y >= CONTENT_TOP
+            })
+        });
+        if over_sidebar {
             return;
         }
         commit_bone_rename(&mut editor);
     }
 
     if keys.just_pressed(KeyCode::Escape) {
-        // Escape leaves the pen tool and abandons its chain, matching how the
-        // drawing pen behaves.
+        // Escape leaves the pen and weight-paint tools, abandoning any chain,
+        // matching how the drawing pen behaves.
         editor.rig.cancel_editing();
-        if tool.0 == Tool::Pen {
+        *paint_last = None;
+        if matches!(tool.0, Tool::Pen | Tool::WeightPaint) {
             tool.0 = Tool::Select;
         } else {
             editor.selected_bone = None;
@@ -1031,7 +1096,57 @@ fn handle_bone_input(
     match tool.0 {
         Tool::Select => handle_bone_select(&mouse, &mut editor, point, pixel, over),
         Tool::Pen => handle_bone_pen(&mouse, &mut editor, point, pixel, over),
+        Tool::WeightPaint => handle_weight_paint(
+            &mouse,
+            &mut editor,
+            point,
+            pixel,
+            over,
+            &brush,
+            &mut paint_last,
+        ),
     }
+}
+
+/// Weight-paint tool: drag over curve points to repaint their bone weights.
+///
+/// The brush paints at the cursor's starting position and again whenever the
+/// cursor moves, so a fast drag leaves a continuous stroke rather than gaps.
+/// Geometry is never moved; only weight lists change.
+fn handle_weight_paint(
+    mouse: &ButtonInput<MouseButton>,
+    editor: &mut EditorState,
+    point: Point,
+    pixel: f32,
+    over: bool,
+    brush: &WeightPaintBrush,
+    paint_last: &mut Option<Point>,
+) {
+    if over || !mouse.pressed(MouseButton::Left) {
+        *paint_last = None;
+        return;
+    }
+    // Paint on the initial press and on every frame the cursor actually moves.
+    let moved = *paint_last != Some(point);
+    if !mouse.just_pressed(MouseButton::Left) && !moved {
+        return;
+    }
+    *paint_last = Some(point);
+
+    // Borrow the name so the document can be edited afterwards.
+    let selected = editor
+        .selected_bone
+        .as_ref()
+        .and_then(|address| bone_name_at(&editor.document, address))
+        .map(str::to_owned);
+    let radius = brush.size * pixel;
+    paint_document(
+        &mut editor.document,
+        point,
+        radius,
+        selected.as_deref(),
+        brush,
+    );
 }
 
 /// Select tool: click to select, drag the body to move, drag an endpoint to
@@ -1156,11 +1271,14 @@ fn handle_bone_pen(
             }
             Some(chain) => {
                 if distance(chain.last, point) > pixel * MIN_BONE_SCREEN_LENGTH {
+                    // Bone names double as weight ids, so each new bone gets a
+                    // name no other bone in the rig uses.
+                    let name = unique_bone_name(&editor.document);
                     let address = match &chain.parent {
                         Some(parent) => {
-                            add_child_bone(&mut editor.document, parent, chain.last, point, "Bone")
+                            add_child_bone(&mut editor.document, parent, chain.last, point, name)
                         }
-                        None => Some(add_bone(&mut editor.document, chain.last, point, "Bone")),
+                        None => Some(add_bone(&mut editor.document, chain.last, point, name)),
                     };
                     if let Some(address) = address {
                         editor.selected_bone = Some(address.clone());
@@ -1374,7 +1492,22 @@ fn px(value: f32, scale: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FORMAT_VERSION;
+    use crate::model::{FORMAT_VERSION, Path, Shape};
+
+    /// A shape whose only path carries the given start/anchor weights.
+    fn shape_with_weights(start: &[(&str, f32)], anchor: &[(&str, f32)]) -> Shape {
+        let mut path = Path::new([0.0, 0.0]).line_to([10.0, 0.0]);
+        for &(bone, weight) in start {
+            path.start_weights.set(bone, weight);
+        }
+        for &(bone, weight) in anchor {
+            path.segments[0].to_weights.set(bone, weight);
+        }
+        Shape {
+            paths: vec![path],
+            ..Default::default()
+        }
+    }
 
     fn document_with_bones() -> Document {
         Document {
@@ -1797,5 +1930,63 @@ mod tests {
         editor.select_bone(Some(address(&[0])));
 
         assert!(editor.rig.drag.is_none());
+    }
+
+    #[test]
+    fn new_bones_get_unique_names() {
+        let mut document = Document::new();
+        assert_eq!(unique_bone_name(&document), "Bone");
+
+        let name = unique_bone_name(&document);
+        add_bone(&mut document, [0.0, 0.0], [1.0, 0.0], name);
+        assert_eq!(unique_bone_name(&document), "Bone 2");
+
+        let name = unique_bone_name(&document);
+        add_bone(&mut document, [0.0, 0.0], [1.0, 0.0], name);
+        assert_eq!(unique_bone_name(&document), "Bone 3");
+    }
+
+    #[test]
+    fn deleting_a_bone_drops_it_from_weights_and_keeps_the_total() {
+        let mut editor = EditorState::new(Document::new());
+        let bone = add_bone(&mut editor.document, [0.0, 0.0], [1.0, 0.0], "Arm");
+        editor.document.shapes.push(shape_with_weights(
+            &[("Arm", 0.6), ("Leg", 0.4)],
+            &[("Arm", 1.0)],
+        ));
+        editor.select_bone(Some(bone));
+
+        assert!(delete_selected_bone(&mut editor));
+
+        let path = &editor.document.shapes[0].paths[0];
+        let start = &path.start_weights;
+        assert_eq!(start.get("Arm"), None);
+        assert!((start.sum() - 1.0).abs() < 1e-6);
+        assert!((start.get("Leg").unwrap() - 1.0).abs() < 1e-6);
+
+        // A point weighted entirely by the removed bone has nothing left to
+        // preserve, so it simply empties.
+        assert!(path.segments[0].to_weights.is_empty());
+    }
+
+    #[test]
+    fn renaming_a_bone_renames_it_in_weights() {
+        let mut editor = EditorState::new(Document::new());
+        let bone = add_bone(&mut editor.document, [0.0, 0.0], [1.0, 0.0], "Arm");
+        editor
+            .document
+            .shapes
+            .push(shape_with_weights(&[("Arm", 0.5)], &[("Arm", 1.0)]));
+
+        assert!(rename_bone_at(
+            &mut editor.document,
+            &bone,
+            "Limb".to_owned()
+        ));
+
+        let path = &editor.document.shapes[0].paths[0];
+        assert_eq!(path.start_weights.get("Arm"), None);
+        assert_eq!(path.start_weights.get("Limb"), Some(0.5));
+        assert_eq!(path.segments[0].to_weights.get("Limb"), Some(1.0));
     }
 }

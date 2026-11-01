@@ -18,7 +18,7 @@ use vello::peniko::{Color, Fill};
 use crate::menu_bar::MenuState;
 use crate::model::{
     Bounds, DEFAULT_STROKE_WIDTH, Document, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle,
-    Style,
+    Style, Weights,
 };
 use crate::render::{
     build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
@@ -104,6 +104,8 @@ pub enum Tool {
     Select,
     /// Draw new paths by clicking, optionally dragging to round the corners.
     Pen,
+    /// Paint bone weights onto existing curve points.
+    WeightPaint,
 }
 
 /// Which tool is currently active.
@@ -317,6 +319,10 @@ impl PenDraft {
         // The incoming control mirrors the outgoing one, which is carried into
         // the next segment. The start-side control is left as it is (omitted
         // controls already lie on the previous anchor).
+        if self.path.segments[index].ctrl2.is_none() {
+            // A new control inherits the weights of the anchor it shapes.
+            self.path.segments[index].ctrl2_weights = self.path.segments[index].to_weights.clone();
+        }
         self.path.segments[index].ctrl2 = Some(translate(anchor, [-delta[0], -delta[1]]));
         self.pending_out = Some(translate(anchor, delta));
     }
@@ -669,6 +675,8 @@ fn handle_input(
             &mut editor,
         ),
         Tool::Pen => handle_pen_input(&mouse, &keys, &windows, &bounds, &viewport, &mut editor),
+        // Weight painting only exists in rig mode, which has its own input.
+        Tool::WeightPaint => {}
     }
 }
 
@@ -921,10 +929,21 @@ fn handle_pen_input(
         } else if let Some(draft) = &mut editor.pen {
             // The next segment starts from the last anchor and uses the
             // outgoing control left by a previous drag, if any.
+            let ctrl1 = draft.pending_out.take();
+            // A new outgoing control belongs to the segment's start anchor,
+            // which is the previous segment's end point.
+            let ctrl1_weights = draft
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.to_weights.clone())
+                .unwrap_or_else(|| draft.path.start_weights.clone());
             draft.path.segments.push(Segment {
-                ctrl1: draft.pending_out.take(),
+                ctrl1,
                 ctrl2: None,
                 to: point,
+                ctrl1_weights: ctrl1.map_or_else(Weights::new, |_| ctrl1_weights),
+                ..Default::default()
             });
             draft.dragging = true;
         }
@@ -951,6 +970,8 @@ fn refresh_scene(
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
     mode: Res<EditorMode>,
+    tool: Res<ToolState>,
+    brush: Res<crate::weight_paint::WeightPaintBrush>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut scenes: Query<&mut VelloScene2d, With<DocumentScene>>,
 ) {
@@ -1001,6 +1022,28 @@ fn refresh_scene(
             editor.rig.preview(),
             scale,
         );
+
+        // The weight brush overlays every point and shows the brush ring where
+        // the cursor is over the canvas.
+        if tool.0 == Tool::WeightPaint {
+            let selected = editor
+                .selected_bone
+                .as_ref()
+                .and_then(|address| crate::rig::bone_name_at(&editor.document, address));
+            let cursor = view
+                .zip(window)
+                .and_then(|(view, window)| window.cursor_position().map(|at| (view, window, at)))
+                .filter(|(_, window, at)| !over_ui(*at, *window))
+                .map(|(view, _, at)| view.screen_to_document(at));
+            crate::weight_paint::draw_overlay(
+                &mut scene,
+                &editor.document,
+                selected,
+                &brush,
+                scale,
+                cursor,
+            );
+        }
     }
 
     if let Ok(mut scene_component) = scenes.single_mut() {
@@ -1542,7 +1585,7 @@ fn shape_distance(shape: &Shape, point: [f32; 2]) -> f32 {
 
 /// The curve of one model segment, starting at the previous anchor.
 fn segment_curve(path: &Path, index: usize) -> Option<PathSeg> {
-    let segment = *path.segments.get(index)?;
+    let segment = path.segments.get(index)?;
     let start = segment_start(path, index);
     let curve = if segment.is_line() {
         PathSeg::Line(KurboLine::new(
@@ -1591,7 +1634,7 @@ fn from_kurbo_point(point: KurboPoint) -> [f32; 2] {
 /// appear. For a curve, the split controls are stored and controls that were
 /// omitted stay omitted, so only genuinely curved sides gain handles.
 fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
-    let segment = *path.segments.get(index)?;
+    let segment = path.segments.get(index)?.clone();
     if !(0.0..=1.0).contains(&t) {
         return None;
     }
@@ -1599,10 +1642,22 @@ fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
     let p0 = to_kurbo_point(start);
     let p3 = to_kurbo_point(segment.to);
 
+    // The new anchor sits at `t` along the segment, so its weights blend the
+    // two anchors it falls between.
+    let split_weights = Weights::blend(
+        &segment_start_weights(path, index),
+        &segment.to_weights,
+        t as f32,
+    );
+
     if segment.is_line() {
         let split = from_kurbo_point(lerp_point(p0, p3, t));
-        path.segments[index].to = split;
-        path.segments.insert(index + 1, Segment::line(segment.to));
+        let mut left = Segment::line(split);
+        left.to_weights = split_weights;
+        path.segments[index] = left;
+        let mut right = Segment::line(segment.to);
+        right.to_weights = segment.to_weights.clone();
+        path.segments.insert(index + 1, right);
         return Some(index);
     }
 
@@ -1616,10 +1671,17 @@ fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
     let r1 = lerp_point(q1, q2, t);
     let split = lerp_point(r0, r1, t);
 
+    // The controls created at the new anchor inherit its blended weights; the
+    // controls that were already there keep the weights of their own anchors.
     path.segments[index] = Segment {
         ctrl1: segment.ctrl1.map(|_| from_kurbo_point(q0)),
         ctrl2: Some(from_kurbo_point(r0)),
         to: from_kurbo_point(split),
+        ctrl1_weights: segment
+            .ctrl1
+            .map_or_else(Weights::new, |_| segment.ctrl1_weights.clone()),
+        ctrl2_weights: split_weights.clone(),
+        to_weights: split_weights.clone(),
     };
     path.segments.insert(
         index + 1,
@@ -1627,6 +1689,11 @@ fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
             ctrl1: Some(from_kurbo_point(r1)),
             ctrl2: segment.ctrl2.map(|_| from_kurbo_point(q2)),
             to: segment.to,
+            ctrl1_weights: split_weights,
+            ctrl2_weights: segment
+                .ctrl2
+                .map_or_else(Weights::new, |_| segment.ctrl2_weights.clone()),
+            to_weights: segment.to_weights.clone(),
         },
     );
 
@@ -1841,6 +1908,29 @@ fn segment_start(path: &Path, index: usize) -> [f32; 2] {
     }
 }
 
+/// The weights of the anchor a segment starts at.
+///
+/// A closed loop's first segment starts at the last segment's end point, so it
+/// inherits that point's weights; an open path's first segment starts at the
+/// separately stored start point.
+fn segment_start_weights(path: &Path, index: usize) -> Weights {
+    if index > 0 {
+        return path
+            .segments
+            .get(index - 1)
+            .map(|segment| segment.to_weights.clone())
+            .unwrap_or_default();
+    }
+    if path.is_closed() {
+        path.segments
+            .last()
+            .map(|segment| segment.to_weights.clone())
+            .unwrap_or_default()
+    } else {
+        path.start_weights.clone()
+    }
+}
+
 /// The position of an anchor handle.
 fn endpoint_anchor(path: &Path, handle: Handle) -> Option<[f32; 2]> {
     match handle {
@@ -1920,12 +2010,31 @@ fn apply_bend(path: &mut Path, target: BendTarget, point: [f32; 2]) -> bool {
         BendTarget::Outgoing(index) => (index, CtrlSlot::First),
         BendTarget::Incoming(index) => (index, CtrlSlot::Second),
     };
+    // A newly created control takes the weights of the anchor it shapes.
+    let anchor_weights = match slot {
+        CtrlSlot::First => segment_start_weights(path, index),
+        CtrlSlot::Second => path
+            .segments
+            .get(index)
+            .map(|segment| segment.to_weights.clone())
+            .unwrap_or_default(),
+    };
     let Some(segment) = path.segments.get_mut(index) else {
         return false;
     };
     match slot {
-        CtrlSlot::First => segment.ctrl1 = Some(point),
-        CtrlSlot::Second => segment.ctrl2 = Some(point),
+        CtrlSlot::First => {
+            if segment.ctrl1.is_none() {
+                segment.ctrl1_weights = anchor_weights;
+            }
+            segment.ctrl1 = Some(point);
+        }
+        CtrlSlot::Second => {
+            if segment.ctrl2.is_none() {
+                segment.ctrl2_weights = anchor_weights;
+            }
+            segment.ctrl2 = Some(point);
+        }
     }
     true
 }
@@ -2180,9 +2289,11 @@ fn delete_handle(path: &mut Path, handle: Handle) -> bool {
             if path.is_closed() || path.segments.is_empty() {
                 return false;
             }
-            // The first segment's endpoint becomes the new start.
+            // The first segment's endpoint becomes the new start, taking its
+            // weights with it.
             let first = path.segments.remove(0);
             path.ends = PathEnds::Open(first.to);
+            path.start_weights = first.to_weights;
             true
         }
         Handle::Anchor(index) => {
@@ -2199,13 +2310,23 @@ fn delete_handle(path: &mut Path, handle: Handle) -> bool {
             let Some(segment) = path.segments.get_mut(index) else {
                 return false;
             };
-            segment.ctrl1.take().is_some()
+            if segment.ctrl1.take().is_some() {
+                segment.ctrl1_weights = Weights::new();
+                true
+            } else {
+                false
+            }
         }
         Handle::Ctrl2(index) => {
             let Some(segment) = path.segments.get_mut(index) else {
                 return false;
             };
-            segment.ctrl2.take().is_some()
+            if segment.ctrl2.take().is_some() {
+                segment.ctrl2_weights = Weights::new();
+                true
+            } else {
+                false
+            }
         }
     }
 }
@@ -2234,6 +2355,42 @@ fn draw_control_overlay(
     scale: f32,
     selected_handle: Option<Handle>,
 ) {
+    let scale = scale.max(f32::EPSILON);
+    let pixels = |amount: f32| f64::from(amount / scale);
+
+    draw_path_guides(scene, path, scale);
+
+    for (handle, position) in handles(path) {
+        // The selected control point is the one the Delete key will remove, so
+        // make it stand out.
+        let selected = selected_handle == Some(handle);
+        let radius = pixels(if selected {
+            OVERLAY_SELECTED_HANDLE_RADIUS
+        } else {
+            OVERLAY_HANDLE_RADIUS
+        });
+        let fill = if selected {
+            &OVERLAY_ACCENT
+        } else {
+            &OVERLAY_HANDLE_FILL
+        };
+        let circle = Circle::new(to_kurbo_point(position), radius);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, fill, None, &circle);
+        scene.stroke(
+            &KurboStroke::new(pixels(OVERLAY_HANDLE_OUTLINE_WIDTH)),
+            Affine::IDENTITY,
+            &OVERLAY_HANDLE_OUTLINE,
+            None,
+            &circle,
+        );
+    }
+}
+
+/// Draws a path's outline and its bezier arms, without any handles.
+///
+/// Shared by the draw tool's control overlay and the weight-paint overlay, so
+/// the curve stays readable in both modes.
+pub(crate) fn draw_path_guides(scene: &mut Scene, path: &Path, scale: f32) {
     let scale = scale.max(f32::EPSILON);
     let pixels = |amount: f32| f64::from(amount / scale);
 
@@ -2269,31 +2426,6 @@ fn draw_control_overlay(
             );
         }
         previous = segment.to;
-    }
-
-    for (handle, position) in handles(path) {
-        // The selected control point is the one the Delete key will remove, so
-        // make it stand out.
-        let selected = selected_handle == Some(handle);
-        let radius = pixels(if selected {
-            OVERLAY_SELECTED_HANDLE_RADIUS
-        } else {
-            OVERLAY_HANDLE_RADIUS
-        });
-        let fill = if selected {
-            &OVERLAY_ACCENT
-        } else {
-            &OVERLAY_HANDLE_FILL
-        };
-        let circle = Circle::new(to_kurbo_point(position), radius);
-        scene.fill(Fill::NonZero, Affine::IDENTITY, fill, None, &circle);
-        scene.stroke(
-            &KurboStroke::new(pixels(OVERLAY_HANDLE_OUTLINE_WIDTH)),
-            Affine::IDENTITY,
-            &OVERLAY_HANDLE_OUTLINE,
-            None,
-            &circle,
-        );
     }
 }
 
@@ -2684,7 +2816,8 @@ mod tests {
             Segment {
                 ctrl1: Some([10.0, 0.0]),
                 ctrl2: Some([12.0, 34.0]),
-                to: [30.0, 0.0]
+                to: [30.0, 0.0],
+                ..Default::default()
             }
         );
     }
@@ -2741,7 +2874,8 @@ mod tests {
             Segment {
                 ctrl1: Some([10.0, 0.0]),
                 ctrl2: Some([30.0, 10.0]),
-                to: [40.0, 0.0]
+                to: [40.0, 0.0],
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -2749,7 +2883,8 @@ mod tests {
             Segment {
                 ctrl1: Some([50.0, 10.0]),
                 ctrl2: Some([50.0, 0.0]),
-                to: [60.0, 0.0]
+                to: [60.0, 0.0],
+                ..Default::default()
             }
         );
     }
@@ -2770,7 +2905,8 @@ mod tests {
             Segment {
                 ctrl1: Some([15.0, 5.0]),
                 ctrl2: Some([20.0, 0.0]),
-                to: [30.0, 0.0]
+                to: [30.0, 0.0],
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -2778,7 +2914,8 @@ mod tests {
             Segment {
                 ctrl1: Some([20.0, 30.0]),
                 ctrl2: Some([15.0, 35.0]),
-                to: [5.0, 5.0]
+                to: [5.0, 5.0],
+                ..Default::default()
             }
         );
     }
@@ -2804,7 +2941,8 @@ mod tests {
             vec![Segment {
                 ctrl1: None,
                 ctrl2: Some([20.0, 0.0]),
-                to: [30.0, 0.0]
+                to: [30.0, 0.0],
+                ..Default::default()
             }]
         );
 
@@ -2878,6 +3016,7 @@ mod tests {
                 ctrl1: Some([15.0, -3.0]),
                 ctrl2: Some([25.0, 7.0]),
                 to: [35.0, 7.0],
+                ..Default::default()
             }
         );
         assert_eq!(path.segments[1], Segment::line([45.0, 17.0]));
@@ -2940,6 +3079,7 @@ mod tests {
                 ctrl1: None,
                 ctrl2: Some([10.0, -5.0]),
                 to: [10.0, 0.0],
+                ..Default::default()
             }
         );
         // The outgoing control is carried into the next segment.
@@ -2995,7 +3135,8 @@ mod tests {
             Segment {
                 ctrl1: Some([14.0, 2.0]),
                 ctrl2: None,
-                to: [10.0, 10.0]
+                to: [10.0, 10.0],
+                ..Default::default()
             }
         );
 
@@ -3011,7 +3152,8 @@ mod tests {
             Segment {
                 ctrl1: None,
                 ctrl2: Some([8.0, -4.0]),
-                to: [10.0, 0.0]
+                to: [10.0, 0.0],
+                ..Default::default()
             }
         );
     }
@@ -3065,6 +3207,7 @@ mod tests {
                 ctrl1: Some([0.0, 50.0]),
                 ctrl2: Some([25.0, 75.0]),
                 to: [50.0, 75.0],
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -3073,8 +3216,68 @@ mod tests {
                 ctrl1: Some([75.0, 75.0]),
                 ctrl2: Some([100.0, 50.0]),
                 to: [100.0, 0.0],
+                ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn splitting_a_segment_blends_the_anchor_weights() {
+        let mut path = Path::new([0.0, 0.0]).line_to([100.0, 0.0]);
+        path.start_weights.set("Root", 1.0);
+        path.segments[0].to_weights.set("Tip", 1.0);
+
+        assert_eq!(split_segment(&mut path, 0, 0.25), Some(0));
+
+        // The new anchor sits a quarter of the way along, so it takes a
+        // quarter of the far anchor's influence.
+        let new_weights = &path.segments[0].to_weights;
+        assert!((new_weights.get("Root").unwrap() - 0.75).abs() < 1e-6);
+        assert!((new_weights.get("Tip").unwrap() - 0.25).abs() < 1e-6);
+        // The original endpoints keep their own weights.
+        assert_eq!(path.start_weights.get("Root"), Some(1.0));
+        assert_eq!(path.segments[1].to_weights.get("Tip"), Some(1.0));
+    }
+
+    #[test]
+    fn splitting_a_curve_gives_the_new_controls_the_blended_weights() {
+        let mut path = Path::new([0.0, 0.0]).cubic_to([0.0, 100.0], [100.0, 100.0], [100.0, 0.0]);
+        path.start_weights.set("A", 1.0);
+        path.segments[0].ctrl1_weights.set("A", 1.0);
+        path.segments[0].ctrl2_weights.set("B", 1.0);
+        path.segments[0].to_weights.set("B", 1.0);
+
+        assert_eq!(split_segment(&mut path, 0, 0.5), Some(0));
+
+        // The controls created at the new anchor share its half-and-half
+        // weights; the pre-existing controls keep their original anchors'.
+        let left = &path.segments[0];
+        assert_eq!(left.ctrl1_weights.get("A"), Some(1.0));
+        assert!((left.ctrl2_weights.get("A").unwrap() - 0.5).abs() < 1e-6);
+        assert!((left.ctrl2_weights.get("B").unwrap() - 0.5).abs() < 1e-6);
+        assert!((left.to_weights.get("A").unwrap() - 0.5).abs() < 1e-6);
+
+        let right = &path.segments[1];
+        assert!((right.ctrl1_weights.get("B").unwrap() - 0.5).abs() < 1e-6);
+        assert_eq!(right.ctrl2_weights.get("B"), Some(1.0));
+        assert_eq!(right.to_weights.get("B"), Some(1.0));
+    }
+
+    #[test]
+    fn a_new_control_point_inherits_its_anchors_weights() {
+        let mut path = Path::new([0.0, 0.0])
+            .line_to([10.0, 0.0])
+            .line_to([10.0, 10.0]);
+        path.start_weights.set("Root", 1.0);
+        path.segments[0].to_weights.set("Joint", 1.0);
+
+        // The second segment starts at the first joint.
+        assert!(apply_bend(&mut path, BendTarget::Outgoing(1), [14.0, 2.0]));
+        assert_eq!(path.segments[1].ctrl1_weights.get("Joint"), Some(1.0));
+
+        // The first segment starts at the open start anchor.
+        assert!(apply_bend(&mut path, BendTarget::Outgoing(0), [2.0, -2.0]));
+        assert_eq!(path.segments[0].ctrl1_weights.get("Root"), Some(1.0));
     }
 
     #[test]

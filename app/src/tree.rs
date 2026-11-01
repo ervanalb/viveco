@@ -135,6 +135,9 @@ pub trait TreeModel: Clone + PartialEq + Send + Sync + 'static {
     /// Selects `address`.
     fn select(editor: &mut EditorState, address: Self);
 
+    /// Clears the selection.
+    fn deselect(editor: &mut EditorState);
+
     /// Starts an inline rename of `address`.
     fn begin_rename(editor: &mut EditorState, address: Self);
 
@@ -539,6 +542,41 @@ pub fn handle_rename_input<M: TreeModel>(
 // ---------------------------------------------------------------------------
 // Selection and dragging
 // ---------------------------------------------------------------------------
+
+/// Clears the selection when the panel is pressed away from its rows.
+///
+/// Presses on a row are left to [`handle_row_press`]. A press anywhere else in
+/// the sidebar strip commits any in-progress rename and deselects, so clicking
+/// the empty part of the tree clears everything.
+pub fn deselect_on_empty_press<M: TreeModel>(
+    mode: Res<EditorMode>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    rows: Query<&RelativeCursorPosition, With<TreeRow<M>>>,
+    mut editor: ResMut<EditorState>,
+) {
+    if !M::visible_in(*mode) || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+
+    // Only the sidebar strip: toolbar, tab bar, and bottom panel are elsewhere.
+    if cursor.x < window.width() - SIDEBAR_WIDTH || cursor.y < CONTENT_TOP {
+        return;
+    }
+    // A row under the cursor handles its own press.
+    if rows.iter().any(|row| row.cursor_over()) {
+        return;
+    }
+
+    M::commit_rename(&mut editor);
+    M::deselect(&mut editor);
+}
 
 /// Selects a row on press and starts dragging, or begins a rename on the
 /// second press of a double-click.

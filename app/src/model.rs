@@ -35,6 +35,183 @@ pub const FORMAT_VERSION: u32 = 2;
 pub type Point = [f32; 2];
 
 // ---------------------------------------------------------------------------
+// Weights
+// ---------------------------------------------------------------------------
+
+/// One bone's influence on a single path point.
+///
+/// `bone` names the bone it binds to. Bone names are unique within a rig, so a
+/// name identifies a bone across the whole skeleton.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Weight {
+    /// Name of the bone this weight binds to.
+    pub bone: String,
+    /// How strongly the bone moves the point.
+    pub weight: f32,
+}
+
+/// The bones influencing one path point: zero or more `(bone, weight)` pairs.
+///
+/// Anchors and control points carry their own list. Every operation that
+/// removes or renames a bone keeps these lists consistent, and splitting a
+/// segment blends the two neighbouring anchors' lists.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Weights(Vec<Weight>);
+
+impl Weights {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Weight> {
+        self.0.iter()
+    }
+
+    /// The weight bound to `bone`, or `None` when the point is not influenced
+    /// by it.
+    pub fn get(&self, bone: &str) -> Option<f32> {
+        self.0
+            .iter()
+            .find(|weight| weight.bone == bone)
+            .map(|weight| weight.weight)
+    }
+
+    /// The total influence of all bones on the point.
+    pub fn sum(&self) -> f32 {
+        self.0.iter().map(|weight| weight.weight).sum()
+    }
+
+    /// Adds or replaces the weight for `bone`.
+    pub fn set(&mut self, bone: impl Into<String>, weight: f32) {
+        let bone = bone.into();
+        if let Some(existing) = self.0.iter_mut().find(|entry| entry.bone == bone) {
+            existing.weight = weight;
+        } else {
+            self.0.push(Weight { bone, weight });
+        }
+    }
+
+    /// Blends two points' weights by `t`, where `t == 0` gives `from` and
+    /// `t == 1` gives `to`.
+    ///
+    /// Bones missing from one side count as zero there, so a bone that only
+    /// influences one endpoint fades in or out across the segment. Entries
+    /// that cancel to exactly zero are dropped.
+    pub fn blend(from: &Self, to: &Self, t: f32) -> Self {
+        let mut blended = Self::new();
+        for weight in &from.0 {
+            let other = to.get(&weight.bone).unwrap_or(0.0);
+            blended.set(weight.bone.clone(), weight.weight * (1.0 - t) + other * t);
+        }
+        for weight in &to.0 {
+            if from.get(&weight.bone).is_none() {
+                blended.set(weight.bone.clone(), weight.weight * t);
+            }
+        }
+        blended.0.retain(|weight| weight.weight != 0.0);
+        blended
+    }
+
+    /// Removes every listed bone, then rescales the remaining weights so the
+    /// list totals what it did before.
+    ///
+    /// If nothing remains there is no total to preserve, so the list simply
+    /// becomes empty.
+    pub fn remove_bones(&mut self, bones: &[String]) {
+        let before = self.sum();
+        self.0.retain(|weight| !bones.contains(&weight.bone));
+        let after = self.sum();
+        if after > f32::EPSILON {
+            let scale = before / after;
+            for weight in &mut self.0 {
+                weight.weight *= scale;
+            }
+        }
+    }
+
+    /// Renames `from` to `to` wherever it appears.
+    pub fn rename_bone(&mut self, from: &str, to: &str) {
+        for weight in &mut self.0 {
+            if weight.bone == from {
+                weight.bone = to.to_owned();
+            }
+        }
+    }
+
+    /// Composites a brush's `value` onto `bone`'s weight with opacity `alpha`,
+    /// then scales the other bones back so the list never totals more than
+    /// one.
+    ///
+    /// This is the "over" operation of a weight-paint brush: the painted bone
+    /// moves toward `value` by `alpha`, and whatever influence it gains is
+    /// taken from the others. Weights that fade to zero are dropped.
+    pub fn paint_bone(&mut self, bone: &str, value: f32, alpha: f32) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha <= f32::EPSILON {
+            return;
+        }
+        let old = self.get(bone).unwrap_or(0.0);
+        let new = (value.clamp(0.0, 1.0) * alpha + old * (1.0 - alpha)).clamp(0.0, 1.0);
+        self.set(bone, new);
+
+        // Only the part of the unit budget the painted bone leaves unused may
+        // be shared by the others.
+        let others: f32 = self
+            .0
+            .iter()
+            .filter(|weight| weight.bone != bone)
+            .map(|weight| weight.weight)
+            .sum();
+        let budget = (1.0 - new).max(0.0);
+        if others > budget && others > f32::EPSILON {
+            let scale = budget / others;
+            for weight in &mut self.0 {
+                if weight.bone != bone {
+                    weight.weight *= scale;
+                }
+            }
+        }
+        self.remove_zero();
+    }
+
+    /// Composites a brush's `value` onto the list's unused share `1 - sum`,
+    /// scaling every weight to match.
+    ///
+    /// This is the inverse of [`Self::paint_bone`], used when no bone is
+    /// selected: raising the brush value reduces each bone's influence, while
+    /// lowering it restores influence. A list with no weights has nothing to
+    /// scale and is left untouched.
+    pub fn paint_total(&mut self, value: f32, alpha: f32) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha <= f32::EPSILON || self.0.is_empty() {
+            return;
+        }
+        let sum = self.sum();
+        let display = 1.0 - sum;
+        let new_display = (value.clamp(0.0, 1.0) * alpha + display * (1.0 - alpha)).clamp(0.0, 1.0);
+        let new_sum = 1.0 - new_display;
+        if sum > f32::EPSILON {
+            let scale = new_sum / sum;
+            for weight in &mut self.0 {
+                weight.weight *= scale;
+            }
+        }
+        self.remove_zero();
+    }
+
+    /// Drops weights that have faded to zero.
+    fn remove_zero(&mut self) {
+        const EPSILON: f32 = 1e-6;
+        self.0.retain(|weight| weight.weight > EPSILON);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Color
 // ---------------------------------------------------------------------------
 
@@ -206,6 +383,25 @@ impl Document {
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         std::fs::write(path, text)
     }
+
+    /// Applies `f` to the weight list of every path point in every shape,
+    /// including nested children.
+    fn for_each_weights_mut(&mut self, f: &mut impl FnMut(&mut Weights)) {
+        for shape in &mut self.shapes {
+            shape.for_each_weights_mut(&mut *f);
+        }
+    }
+
+    /// Drops the named bones from every point's weight list, rescaling each
+    /// list so it still totals what it did before.
+    pub fn remove_bones_from_weights(&mut self, bones: &[String]) {
+        self.for_each_weights_mut(&mut |weights| weights.remove_bones(bones));
+    }
+
+    /// Renames a bone throughout every point's weight list.
+    pub fn rename_bone_in_weights(&mut self, from: &str, to: &str) {
+        self.for_each_weights_mut(&mut |weights| weights.rename_bone(from, to));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +516,16 @@ impl Shape {
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.children.is_empty()
     }
+
+    /// Applies `f` to every point weight in this shape and its descendants.
+    fn for_each_weights_mut(&mut self, f: &mut impl FnMut(&mut Weights)) {
+        for path in &mut self.paths {
+            path.for_each_weights_mut(&mut *f);
+        }
+        for child in &mut self.children {
+            child.for_each_weights_mut(&mut *f);
+        }
+    }
 }
 
 /// Indices of `shapes` in painting order (ascending Z, stable for equal Z).
@@ -354,6 +560,14 @@ pub struct Path {
     pub ends: PathEnds,
     #[serde(default)]
     pub segments: Vec<Segment>,
+    /// Bone weights of the open start anchor.
+    ///
+    /// A closed loop has no separate start: its first anchor is the last
+    /// segment's end point, whose weights live in that segment's
+    /// [`to_weights`](Segment::to_weights). This list is therefore only used
+    /// while the path is open.
+    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    pub start_weights: Weights,
 }
 
 /// How a path begins, and whether it loops back to that point.
@@ -372,6 +586,7 @@ impl Path {
             name: String::new(),
             ends: PathEnds::Open(start),
             segments: Vec::new(),
+            start_weights: Weights::new(),
         }
     }
 
@@ -393,6 +608,7 @@ impl Path {
             ctrl1: Some(ctrl1),
             ctrl2: Some(ctrl2),
             to,
+            ..Default::default()
         });
         self
     }
@@ -422,13 +638,26 @@ impl Path {
         if self.segments.is_empty() {
             return false;
         }
-        if let Some(start) = self.start()
-            && !self
+        // The closed loop's start is the last segment's end point, so the
+        // closing segment carries the start anchor's weights.
+        let start_weights = std::mem::take(&mut self.start_weights);
+        if let Some(start) = self.start() {
+            if !self
                 .segments
                 .last()
                 .is_some_and(|segment| segment.to == start)
-        {
-            self.segments.push(Segment::line(start));
+            {
+                let mut closing = Segment::line(start);
+                closing.to_weights = start_weights;
+                self.segments.push(closing);
+            } else if self
+                .segments
+                .last()
+                .is_some_and(|segment| segment.to_weights.is_empty())
+                && let Some(last) = self.segments.last_mut()
+            {
+                last.to_weights = start_weights;
+            }
         }
         self.ends = PathEnds::Closed;
         true
@@ -444,8 +673,20 @@ impl Path {
                     return false;
                 };
                 self.ends = PathEnds::Open(last.to);
+                self.start_weights = last.to_weights;
                 true
             }
+        }
+    }
+
+    /// Applies `f` to every point's weight list: the open start and each
+    /// segment's two controls and end point.
+    fn for_each_weights_mut(&mut self, f: &mut impl FnMut(&mut Weights)) {
+        f(&mut self.start_weights);
+        for segment in &mut self.segments {
+            f(&mut segment.ctrl1_weights);
+            f(&mut segment.ctrl2_weights);
+            f(&mut segment.to_weights);
         }
     }
 }
@@ -456,22 +697,47 @@ impl Path {
 /// the one near `to`. An omitted control is treated as lying exactly on its
 /// endpoint, so it has no visible effect and the editor draws no handle for
 /// it. A segment with no controls is a straight line.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Each of the three points carries its own bone weights. A control's weights
+/// mirror the anchor it belongs to when it is created, and the end point's
+/// weights are those of the anchor at `to`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctrl1: Option<Point>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctrl2: Option<Point>,
     pub to: Point,
+    /// Bone weights of the control near the segment's start.
+    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    pub ctrl1_weights: Weights,
+    /// Bone weights of the control near the segment's end.
+    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    pub ctrl2_weights: Weights,
+    /// Bone weights of the anchor at the segment's end.
+    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    pub to_weights: Weights,
+}
+
+impl Default for Segment {
+    fn default() -> Self {
+        Self {
+            ctrl1: None,
+            ctrl2: None,
+            to: [0.0, 0.0],
+            ctrl1_weights: Weights::new(),
+            ctrl2_weights: Weights::new(),
+            to_weights: Weights::new(),
+        }
+    }
 }
 
 impl Segment {
     /// A straight segment: both control points are omitted.
     pub fn line(to: Point) -> Self {
         Self {
-            ctrl1: None,
-            ctrl2: None,
             to,
+            ..Default::default()
         }
     }
 
@@ -737,5 +1003,129 @@ mod tests {
         let bounds = doc.bounds().unwrap();
         assert_eq!(bounds.min, [-5.0, -5.0]);
         assert_eq!(bounds.max, [150.0, 150.0]);
+    }
+
+    #[test]
+    fn weights_blend_by_parameter() {
+        let mut from = Weights::new();
+        from.set("A", 1.0);
+        from.set("B", 0.5);
+        let mut to = Weights::new();
+        to.set("B", 1.0);
+        to.set("C", 1.0);
+
+        let blended = Weights::blend(&from, &to, 0.25);
+        assert_eq!(blended.get("A"), Some(0.75));
+        assert!((blended.get("B").unwrap() - 0.625).abs() < 1e-6);
+        assert_eq!(blended.get("C"), Some(0.25));
+
+        // The endpoints reproduce the inputs exactly.
+        assert_eq!(Weights::blend(&from, &to, 0.0).iter().count(), 2);
+        assert_eq!(Weights::blend(&from, &to, 1.0).iter().count(), 2);
+    }
+
+    #[test]
+    fn removing_a_bone_keeps_the_weight_total() {
+        let mut weights = Weights::new();
+        weights.set("A", 0.5);
+        weights.set("B", 0.5);
+
+        weights.remove_bones(&["B".to_owned()]);
+
+        assert_eq!(weights.get("B"), None);
+        assert!((weights.sum() - 1.0).abs() < 1e-6);
+        assert!((weights.get("A").unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn renaming_a_bone_updates_weights() {
+        let mut weights = Weights::new();
+        weights.set("Old", 1.0);
+
+        weights.rename_bone("Old", "New");
+
+        assert_eq!(weights.get("Old"), None);
+        assert_eq!(weights.get("New"), Some(1.0));
+    }
+
+    #[test]
+    fn weights_round_trip_through_json() {
+        let mut path = Path::new([0.0, 0.0]).cubic_to([1.0, 2.0], [3.0, 4.0], [5.0, 6.0]);
+        path.start_weights.set("Root", 0.25);
+        path.segments[0].ctrl1_weights.set("Root", 0.5);
+        path.segments[0].ctrl2_weights.set("Root", 0.75);
+        path.segments[0].to_weights.set("Root", 1.0);
+        let doc = Document {
+            version: FORMAT_VERSION,
+            bones: Vec::new(),
+            shapes: vec![Shape {
+                paths: vec![path],
+                ..Default::default()
+            }],
+        };
+
+        let json = doc.to_json_string().unwrap();
+        let decoded = Document::from_json_str(&json).unwrap();
+        assert_eq!(doc, decoded);
+    }
+
+    #[test]
+    fn painting_a_bone_scales_the_others_back() {
+        let mut weights = Weights::new();
+        weights.set("Arm", 0.2);
+        weights.set("Leg", 0.8);
+
+        // A full-strength dab sets Arm to 0.7 and shrinks the rest to fit.
+        weights.paint_bone("Arm", 0.7, 1.0);
+
+        assert!((weights.get("Arm").unwrap() - 0.7).abs() < 1e-6);
+        assert!((weights.get("Leg").unwrap() - 0.3).abs() < 1e-6);
+        assert!((weights.sum() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn painting_a_bone_partially_blends_towards_the_value() {
+        let mut weights = Weights::new();
+        weights.set("Arm", 0.0);
+
+        weights.paint_bone("Arm", 1.0, 0.25);
+
+        assert!((weights.get("Arm").unwrap() - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn painting_a_bone_to_zero_drops_it() {
+        let mut weights = Weights::new();
+        weights.set("Arm", 0.5);
+        weights.set("Leg", 0.5);
+
+        weights.paint_bone("Arm", 0.0, 1.0);
+
+        assert_eq!(weights.get("Arm"), None);
+        // Erasing one bone does not inflate the others.
+        assert!((weights.get("Leg").unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn painting_without_a_bone_reduces_the_total() {
+        let mut weights = Weights::new();
+        weights.set("Arm", 0.5);
+        weights.set("Leg", 0.5);
+
+        // The displayed value is `1 - sum`, so a value of one removes all
+        // influence.
+        weights.paint_total(1.0, 1.0);
+
+        assert!(weights.is_empty());
+    }
+
+    #[test]
+    fn painting_a_total_onto_an_unweighted_point_does_nothing() {
+        let mut weights = Weights::new();
+
+        weights.paint_total(0.0, 1.0);
+
+        // There is no bone to scale, so the point stays unweighted.
+        assert!(weights.is_empty());
     }
 }

@@ -83,6 +83,7 @@ fn spawn_toolbar(mut commands: Commands) {
                     spawn_heading(group, "Rig");
                     spawn_tool_button(group, Tool::Select, "Select");
                     spawn_tool_button(group, Tool::Pen, "Pen");
+                    spawn_tool_button(group, Tool::WeightPaint, "Paint");
                 });
         });
 }

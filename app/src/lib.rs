@@ -17,3 +17,4 @@ pub mod style_panel;
 pub mod theme;
 pub mod toolbar;
 pub mod tree;
+pub mod weight_paint;
