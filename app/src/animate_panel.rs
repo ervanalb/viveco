@@ -5,8 +5,8 @@
 //! commit or Escape to cancel. A new duration may delete keyframes that fall
 //! outside it.
 //!
-//! The rest of the panel is reserved for the animation timeline, which is not
-//! implemented yet.
+//! The rest of the panel is the animation timeline, drawn by
+//! [`crate::timeline`].
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use crate::animate::{commit_animation_rename, selected_animation, set_cyclic, set_duration};
 use crate::editor::{BOTTOM_BAR_HEIGHT, EditorMode, EditorState, SIDEBAR_WIDTH, TOOLBAR_WIDTH};
 use crate::theme;
+use crate::timeline::spawn_timeline;
 
 pub struct AnimatePanelPlugin;
 
@@ -108,54 +109,55 @@ fn spawn_panel(mut commands: Commands) {
                 bottom: Val::Px(0.0),
                 height: Val::Px(BOTTOM_BAR_HEIGHT),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(10.0),
-                padding: UiRect::all(Val::Px(12.0)),
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(theme::PANEL_BG),
             AnimatePanelRoot,
         ))
         .with_children(|panel| {
-            panel
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(28.0),
-                        display: Display::None,
-                        ..default()
-                    },
-                    PanelContents::Controls,
-                ))
-                .with_children(spawn_duration_and_cyclic);
-
-            panel.spawn((
-                Text::new("Select an animation to edit its properties."),
-                TextFont::from_font_size(12.0),
-                TextColor(theme::MUTED),
-                PanelContents::EmptyHint,
-            ));
-
+            // The controls band paints the panel background itself. The
+            // timeline node below must stay free of Bevy UI backgrounds: Vello
+            // UI scenes are composited beneath Bevy UI, so an opaque
+            // background would hide the timeline.
             panel
                 .spawn((
                     Node {
                         width: Val::Percent(100.0),
-                        flex_grow: 1.0,
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(10.0),
+                        padding: UiRect {
+                            left: Val::Px(12.0),
+                            right: Val::Px(12.0),
+                            top: Val::Px(12.0),
+                            bottom: Val::Px(10.0),
+                        },
+                        flex_shrink: 0.0,
                         ..default()
                     },
-                    BackgroundColor(theme::TRACK_BG),
+                    BackgroundColor(theme::PANEL_BG),
                 ))
-                .with_children(|timeline| {
-                    timeline.spawn((
-                        Text::new("Timeline"),
+                .with_children(|band| {
+                    band.spawn((
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(28.0),
+                            display: Display::None,
+                            ..default()
+                        },
+                        PanelContents::Controls,
+                    ))
+                    .with_children(spawn_duration_and_cyclic);
+
+                    band.spawn((
+                        Text::new("Select an animation to edit its properties."),
                         TextFont::from_font_size(12.0),
                         TextColor(theme::MUTED),
+                        PanelContents::EmptyHint,
                     ));
                 });
+
+            spawn_timeline(panel);
         });
 }
 

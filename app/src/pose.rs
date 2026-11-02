@@ -252,6 +252,28 @@ pub fn worlds_by_name(document: &Document, pose: &Pose) -> HashMap<String, Simil
     worlds
 }
 
+/// The rest head of every named bone, keyed by bone name.
+///
+/// A connected bone has no stored head, so its head is its parent's tail. The
+/// animation sampler needs this to pivot a posed bone about the same joint the
+/// rig page uses. Unnamed bones are skipped because animations address bones by
+/// name.
+pub fn rest_heads(document: &Document) -> HashMap<String, Point> {
+    fn walk(bones: &[Bone], parent_tail: Option<Point>, heads: &mut HashMap<String, Point>) {
+        for bone in bones {
+            let head = bone.head_with_parent(parent_tail);
+            if !bone.name.is_empty() {
+                heads.insert(bone.name.clone(), head);
+            }
+            walk(&bone.children, Some(bone.tail), heads);
+        }
+    }
+
+    let mut heads = HashMap::new();
+    walk(&document.bones, None, &mut heads);
+    heads
+}
+
 /// Returns a copy of `document` with every curve point skinned by `pose`.
 ///
 /// This is what the rig page paints. The document itself is never modified, so
@@ -379,6 +401,16 @@ mod tests {
         let document = rigged_document(&[("Parent", 1.0)], &[("Child", 1.0)]);
         let deformed = deform_document(&document, &Pose::default());
         assert_eq!(deformed.shapes, document.shapes);
+    }
+
+    #[test]
+    fn rest_heads_resolve_connected_bones() {
+        let document = rigged_document(&[], &[]);
+        let heads = rest_heads(&document);
+
+        assert_eq!(heads.get("Parent"), Some(&[0.0, 0.0]));
+        // The child omits its head, so it sits at the parent's tail.
+        assert_eq!(heads.get("Child"), Some(&[10.0, 0.0]));
     }
 
     #[test]

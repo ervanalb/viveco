@@ -19,6 +19,7 @@ pub mod rig_sidebar;
 pub mod sidebar;
 pub mod style_panel;
 pub mod theme;
+pub mod timeline;
 pub mod toolbar;
 pub mod tree;
 pub mod weight_paint;

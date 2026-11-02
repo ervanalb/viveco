@@ -30,6 +30,7 @@ use vector_anim_app::rig_sidebar::RigSidebarPlugin;
 use vector_anim_app::sidebar::SidebarPlugin;
 use vector_anim_app::style_panel::StylePanelPlugin;
 use vector_anim_app::theme;
+use vector_anim_app::timeline::TimelinePlugin;
 use vector_anim_app::toolbar::ToolbarPlugin;
 
 /// Initial window size, in logical pixels.
@@ -58,6 +59,7 @@ fn main() {
         .add_plugins(RigPanelPlugin)
         .add_plugins(AnimateSidebarPlugin)
         .add_plugins(AnimatePanelPlugin)
+        .add_plugins(TimelinePlugin)
         .add_plugins(MenuBarPlugin)
         .add_plugins(FilePlugin)
         .add_plugins(DialogPlugin)

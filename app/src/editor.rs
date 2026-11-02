@@ -360,6 +360,12 @@ pub struct EditorState {
     pub selected_bone: Option<BoneAddress>,
     /// Index of the selected animation in animate mode, if any.
     pub selected_animation: Option<usize>,
+    /// Time shown by the animate timeline, in seconds.
+    ///
+    /// The animate page samples the selected animation at this time to pose the
+    /// artwork. Like [`Self::pose`], this is transient editor state and is
+    /// never saved.
+    pub playhead: f32,
     /// The animation whose name is being edited inline, if any.
     pub animation_renaming: Option<AnimationRename>,
     /// The bone whose name is being edited inline, if any.
@@ -392,6 +398,7 @@ impl EditorState {
             renaming: None,
             selected_bone: None,
             selected_animation: None,
+            playhead: 0.0,
             animation_renaming: None,
             bone_renaming: None,
             pose: crate::pose::Pose::default(),
@@ -452,6 +459,7 @@ impl EditorState {
         self.renaming = None;
         self.selected_bone = None;
         self.selected_animation = None;
+        self.playhead = 0.0;
         self.animation_renaming = None;
         self.bone_renaming = None;
         self.pose.clear();
@@ -548,6 +556,7 @@ fn fit_document(
 /// Plain scrolling pans vertically, shift-scrolling horizontally, and
 /// control-scrolling zooms around the cursor.
 fn handle_viewport_input(
+    mode: Res<EditorMode>,
     mut wheel: MessageReader<MouseWheel>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -562,8 +571,17 @@ fn handle_viewport_input(
 
     let width = window.width();
     let height = window.height();
+    // In animate mode the bottom panel owns the wheel while the cursor is over
+    // it, so the timeline can scroll and zoom without also moving the canvas.
+    let over_timeline = *mode == EditorMode::Animate
+        && window
+            .cursor_position()
+            .is_some_and(|cursor| cursor.y >= height - BOTTOM_BAR_HEIGHT);
 
     for event in wheel.read() {
+        if over_timeline {
+            continue;
+        }
         let conversion = MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR;
         let (dx, dy) = match event.unit {
             MouseScrollUnit::Line => (event.x * conversion, event.y * conversion),
@@ -1011,11 +1029,21 @@ fn refresh_scene(
         window.map(|window| ViewMapping::new(bounds.0, window.width(), window.height(), &viewport));
     let scale = view.map(|view| view.scale).unwrap_or(1.0);
 
-    // The rig page shows the posed artwork; the draw and animate pages always
-    // show the rest pose that the document actually stores. Poses are
-    // transient, so the deformed copy is built only for display.
-    let posed = (*mode == EditorMode::Rig && !editor.pose.is_identity())
-        .then(|| crate::pose::deform_document(&editor.document, &editor.pose));
+    // The rig page shows the hand-posed artwork; the animate page samples the
+    // selected animation at the playhead. Both build a deformed copy for
+    // display, leaving the document's rest geometry untouched.
+    let animation_pose = (*mode == EditorMode::Animate)
+        .then(|| crate::animate::selected_animation(&editor))
+        .flatten()
+        .map(|animation| crate::animate::sample_pose(&editor.document, animation, editor.playhead));
+    let shown_pose = match *mode {
+        EditorMode::Rig => Some(&editor.pose),
+        EditorMode::Animate => animation_pose.as_ref(),
+        EditorMode::Draw => None,
+    };
+    let posed = shown_pose
+        .filter(|pose| !pose.is_identity())
+        .map(|pose| crate::pose::deform_document(&editor.document, pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
     let mut scene = build_scene(displayed);
 
@@ -1079,6 +1107,12 @@ fn refresh_scene(
                 &mut scene, displayed, selected, &brush, scale, cursor,
             );
         }
+    } else if *mode == EditorMode::Animate {
+        // The animate page shows the same skeleton as the rig page, posed by
+        // the animation at the playhead. With no animation selected it rests.
+        let rest = crate::pose::Pose::default();
+        let pose = animation_pose.as_ref().unwrap_or(&rest);
+        crate::rig::draw_bone_overlay(&mut scene, &editor.document, pose, None, None, scale);
     }
 
     if let Ok(mut scene_component) = scenes.single_mut() {
