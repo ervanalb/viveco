@@ -136,6 +136,7 @@ mod tests {
     fn document_with_path() -> Document {
         Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
                 style: filled(Rgba8::rgb(255, 0, 0)),
@@ -192,6 +193,7 @@ mod tests {
     fn pasting_a_shape_with_children_keeps_the_subtree() {
         let source = Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 10.0])],
@@ -226,6 +228,7 @@ mod tests {
     fn copying_a_path_pastes_it_as_its_own_shape() {
         let mut document = Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![

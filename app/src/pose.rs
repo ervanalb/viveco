@@ -365,6 +365,7 @@ mod tests {
         }
         Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![path],
                 ..Default::default()

@@ -1,5 +1,8 @@
 //! Vector-art document model and Vello rendering for the editor app.
 
+pub mod animate;
+pub mod animate_panel;
+pub mod animate_sidebar;
 pub mod clipboard;
 pub mod dialogs;
 pub mod editor;

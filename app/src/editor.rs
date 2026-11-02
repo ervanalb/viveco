@@ -54,12 +54,14 @@ pub const CONTENT_TOP: f32 = MENU_BAR_HEIGHT + TAB_BAR_HEIGHT;
 /// Which editor mode is active.
 ///
 /// Draw mode edits the graphic's rest pose; Rig mode locks the graphic and
-/// edits the skeleton over it.
+/// edits the skeleton over it; Animate mode locks both and edits the document's
+/// animations.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EditorMode {
     #[default]
     Draw,
     Rig,
+    Animate,
 }
 
 /// Lifecycle hooks each mode provides.
@@ -77,6 +79,7 @@ impl EditorMode {
                 finish_pen(editor, true);
             }
             Self::Rig => crate::rig::commit_bone_rename(editor),
+            Self::Animate => crate::animate::commit_animation_rename(editor),
         }
         editor.rig.cancel_editing();
     }
@@ -87,6 +90,7 @@ impl EditorMode {
         match self {
             Self::Draw => finish_pen(editor, true),
             Self::Rig => editor.rig.cancel_editing(),
+            Self::Animate => {}
         }
     }
 
@@ -237,6 +241,15 @@ pub struct RenameState {
     pub buffer: String,
 }
 
+/// An in-progress inline rename of an animation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnimationRename {
+    /// Index of the animation whose name is being edited.
+    pub index: usize,
+    /// The text typed so far.
+    pub buffer: String,
+}
+
 /// A draggable point of a [`Path`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
@@ -345,6 +358,10 @@ pub struct EditorState {
     pub renaming: Option<RenameState>,
     /// The selected bone in rig mode, if any.
     pub selected_bone: Option<BoneAddress>,
+    /// Index of the selected animation in animate mode, if any.
+    pub selected_animation: Option<usize>,
+    /// The animation whose name is being edited inline, if any.
+    pub animation_renaming: Option<AnimationRename>,
     /// The bone whose name is being edited inline, if any.
     pub bone_renaming: Option<BoneRename>,
     /// The transient bone pose applied on the rig page.
@@ -374,6 +391,8 @@ impl EditorState {
             structure_revision: 0,
             renaming: None,
             selected_bone: None,
+            selected_animation: None,
+            animation_renaming: None,
             bone_renaming: None,
             pose: crate::pose::Pose::default(),
             rig: RigEditing::default(),
@@ -404,9 +423,9 @@ impl EditorState {
         self.rig.cancel_editing();
     }
 
-    /// Whether any inline rename (shape or bone) is in progress.
+    /// Whether any inline rename (shape, bone, or animation) is in progress.
     pub fn is_renaming(&self) -> bool {
-        self.renaming.is_some() || self.bone_renaming.is_some()
+        self.renaming.is_some() || self.bone_renaming.is_some() || self.animation_renaming.is_some()
     }
 
     /// Starts renaming the node at `address`, seeding the text field with its
@@ -432,6 +451,8 @@ impl EditorState {
         self.selected_handle = None;
         self.renaming = None;
         self.selected_bone = None;
+        self.selected_animation = None;
+        self.animation_renaming = None;
         self.bone_renaming = None;
         self.pose.clear();
         self.rig.cancel_editing();
@@ -990,9 +1011,9 @@ fn refresh_scene(
         window.map(|window| ViewMapping::new(bounds.0, window.width(), window.height(), &viewport));
     let scale = view.map(|view| view.scale).unwrap_or(1.0);
 
-    // The rig page shows the posed artwork; the draw page always shows the
-    // rest pose that the document actually stores. Poses are transient, so the
-    // deformed copy is built only for display.
+    // The rig page shows the posed artwork; the draw and animate pages always
+    // show the rest pose that the document actually stores. Poses are
+    // transient, so the deformed copy is built only for display.
     let posed = (*mode == EditorMode::Rig && !editor.pose.is_identity())
         .then(|| crate::pose::deform_document(&editor.document, &editor.pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
@@ -1030,7 +1051,7 @@ fn refresh_scene(
                 );
             }
         }
-    } else {
+    } else if *mode == EditorMode::Rig {
         crate::rig::draw_bone_overlay(
             &mut scene,
             &editor.document,
@@ -1459,13 +1480,16 @@ pub fn node_name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option
 /// Renames the node at `address`. Returns `false` when it does not exist.
 pub fn rename_node_at(document: &mut Document, address: &TreeAddress, name: String) -> bool {
     match address {
-        TreeAddress::Shape { .. } => match shape_at_mut(document, address) {
-            Some(shape) => {
-                shape.name = name;
-                true
+        TreeAddress::Shape { .. } => {
+            let old = match shape_at_mut(document, address) {
+                Some(shape) => std::mem::replace(&mut shape.name, name.clone()),
+                None => return false,
+            };
+            if old != name {
+                document.rename_shape_in_animations(&old, &name);
             }
-            None => false,
-        },
+            true
+        }
         TreeAddress::Path { .. } => match path_at_mut(document, address) {
             Some(path) => {
                 path.name = name;
@@ -2494,6 +2518,7 @@ mod tests {
     fn document_of(shapes: Vec<Shape>) -> Document {
         Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes,
         }

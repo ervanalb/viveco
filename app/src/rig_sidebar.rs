@@ -164,6 +164,7 @@ mod tests {
     fn state(mut bones: Vec<Bone>) -> EditorState {
         let document = Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             shapes: Vec::new(),
             bones: std::mem::take(&mut bones),
         };

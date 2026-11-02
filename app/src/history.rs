@@ -145,6 +145,7 @@ mod tests {
     fn document_with_path(name: &str) -> Document {
         Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
                 name: name.into(),

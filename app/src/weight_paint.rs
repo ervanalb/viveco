@@ -344,6 +344,7 @@ mod tests {
         }
         Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![path],

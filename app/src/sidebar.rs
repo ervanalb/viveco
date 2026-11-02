@@ -257,6 +257,7 @@ mod tests {
     fn state(shapes: Vec<Shape>) -> EditorState {
         EditorState::new(Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes,
         })

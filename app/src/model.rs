@@ -29,7 +29,7 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Version written to and expected by this build of the format.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// A 2D point/vector in document space.
 pub type Point = [f32; 2];
@@ -317,6 +317,10 @@ pub struct Document {
     /// document.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bones: Vec<Bone>,
+
+    /// Animation clips stored in the document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animations: Vec<Animation>,
 }
 
 fn default_version() -> u32 {
@@ -335,6 +339,7 @@ impl Document {
             version: FORMAT_VERSION,
             shapes: Vec::new(),
             bones: Vec::new(),
+            animations: Vec::new(),
         }
     }
 
@@ -402,6 +407,32 @@ impl Document {
     pub fn rename_bone_in_weights(&mut self, from: &str, to: &str) {
         self.for_each_weights_mut(&mut |weights| weights.rename_bone(from, to));
     }
+
+    /// Renames a bone in every animation keyframe that targets it.
+    pub fn rename_bone_in_animations(&mut self, from: &str, to: &str) {
+        for animation in &mut self.animations {
+            for keyframe in &mut animation.keyframes {
+                if let KeyframeTarget::Bone { bone, .. } = &mut keyframe.target
+                    && bone == from
+                {
+                    *bone = to.to_owned();
+                }
+            }
+        }
+    }
+
+    /// Renames a shape in every animation keyframe that targets it.
+    pub fn rename_shape_in_animations(&mut self, from: &str, to: &str) {
+        for animation in &mut self.animations {
+            for keyframe in &mut animation.keyframes {
+                if let KeyframeTarget::Shape { shape, .. } = &mut keyframe.target
+                    && shape == from
+                {
+                    *shape = to.to_owned();
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +492,200 @@ impl Bone {
     /// parent's tail. Falls back to the tail for a root bone with no head.
     pub fn head_with_parent(&self, parent_tail: Option<Point>) -> Point {
         self.head.or(parent_tail).unwrap_or(self.tail)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Animations
+// ---------------------------------------------------------------------------
+
+/// A property of a bone that an animation curve can drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoneProperty {
+    /// Horizontal translation of the bone's local transform.
+    X,
+    /// Vertical translation of the bone's local transform.
+    Y,
+    /// Local rotation of the bone, in radians.
+    Angle,
+    /// Uniform scale of the bone's local transform.
+    Scale,
+}
+
+/// A property of a shape that an animation curve can drive.
+///
+/// Shape properties are not implemented yet, so this enum intentionally has no
+/// variants: no shape keyframe can be constructed, and any attempt to
+/// deserialize one fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeProperty {}
+
+/// What a [`Keyframe`] drives.
+///
+/// Bone and shape targets store the target's name, which is how the rest of the
+/// document identifies both. Renaming a bone or shape therefore also renames
+/// the target of every keyframe that refers to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeyframeTarget {
+    /// Drives one property of a bone.
+    Bone {
+        /// Name of the bone.
+        bone: String,
+        property: BoneProperty,
+    },
+    /// Drives one property of a shape.
+    Shape {
+        /// Name of the shape.
+        shape: String,
+        property: ShapeProperty,
+    },
+}
+
+/// One value of an animation curve at a point in time.
+///
+/// The two optional handles are the control points of the one-dimensional
+/// Bézier curve between this keyframe and its neighbours.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    /// Position along the animation, in the range `0..=duration`.
+    pub timestamp: f32,
+    /// The animated value at [`Self::timestamp`].
+    pub value: f32,
+    /// Bézier handle toward the previous keyframe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_in: Option<f32>,
+    /// Bézier handle toward the next keyframe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_out: Option<f32>,
+    /// What this keyframe animates.
+    pub target: KeyframeTarget,
+}
+
+impl Keyframe {
+    /// Builds a keyframe with no curve handles.
+    pub fn new(timestamp: f32, value: f32, target: KeyframeTarget) -> Self {
+        Self {
+            timestamp,
+            value,
+            handle_in: None,
+            handle_out: None,
+            target,
+        }
+    }
+}
+
+/// A single animation curve driving one target over time.
+///
+/// Keyframes are kept sorted by timestamp and constrained to `0..=duration`.
+/// Both invariants are enforced whenever the list is built through
+/// [`Self::insert_keyframe`], [`Self::set_duration`], or by deserialization.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "AnimationData")]
+pub struct Animation {
+    /// User-visible name. Empty names are shown by position.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Length of the animation. Keyframes may not fall outside it.
+    pub duration: f32,
+    /// Whether the animation loops back to the start.
+    pub cyclic: bool,
+    /// The curve's keyframes, ordered by timestamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<Keyframe>,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            duration: 0.0,
+            cyclic: false,
+            keyframes: Vec::new(),
+        }
+    }
+}
+
+impl Animation {
+    /// Builds an empty animation of the given duration.
+    pub fn new(duration: f32) -> Self {
+        Self {
+            duration,
+            ..Default::default()
+        }
+    }
+
+    /// Inserts a keyframe, keeping the list ordered by timestamp.
+    ///
+    /// Keyframes outside `0..=duration` are ignored, and equal timestamps
+    /// place the new keyframe after the existing ones.
+    pub fn insert_keyframe(&mut self, keyframe: Keyframe) {
+        if !self.contains_time(keyframe.timestamp) {
+            return;
+        }
+        let index = self
+            .keyframes
+            .partition_point(|existing| existing.timestamp <= keyframe.timestamp);
+        self.keyframes.insert(index, keyframe);
+    }
+
+    /// Changes the duration, dropping keyframes that now fall outside
+    /// `0..=duration`.
+    pub fn set_duration(&mut self, duration: f32) {
+        self.keyframes
+            .retain(|keyframe| timestamp_within(keyframe.timestamp, duration));
+        self.duration = duration;
+    }
+
+    /// Restores the invariants: sorts keyframes by timestamp and drops those
+    /// outside `0..=duration`.
+    pub fn normalize(&mut self) {
+        let duration = self.duration;
+        self.keyframes
+            .retain(|keyframe| timestamp_within(keyframe.timestamp, duration));
+        self.keyframes.sort_by(|a, b| {
+            a.timestamp
+                .partial_cmp(&b.timestamp)
+                .unwrap_or(Ordering::Equal)
+        });
+    }
+
+    fn contains_time(&self, timestamp: f32) -> bool {
+        timestamp_within(timestamp, self.duration)
+    }
+}
+
+/// Whether `timestamp` falls in the valid animation range `0..=duration`.
+fn timestamp_within(timestamp: f32, duration: f32) -> bool {
+    timestamp >= 0.0 && timestamp <= duration
+}
+
+/// Deserialization form of [`Animation`], normalized on conversion so a loaded
+/// document always satisfies the keyframe invariants.
+#[derive(Deserialize)]
+struct AnimationData {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    duration: f32,
+    #[serde(default)]
+    cyclic: bool,
+    #[serde(default)]
+    keyframes: Vec<Keyframe>,
+}
+
+impl From<AnimationData> for Animation {
+    fn from(data: AnimationData) -> Self {
+        let mut animation = Self {
+            name: data.name,
+            duration: data.duration,
+            cyclic: data.cyclic,
+            keyframes: data.keyframes,
+        };
+        animation.normalize();
+        animation
     }
 }
 
@@ -866,6 +1091,7 @@ mod tests {
         Document {
             version: FORMAT_VERSION,
             bones: Vec::new(),
+            animations: Vec::new(),
             shapes: vec![Shape {
                 name: "Outer".to_string(),
                 z: 5.0,
@@ -934,6 +1160,7 @@ mod tests {
         let doc = Document {
             version: FORMAT_VERSION,
             bones: Vec::new(),
+            animations: Vec::new(),
             shapes: vec![
                 Shape {
                     z: 10.0,
@@ -980,6 +1207,7 @@ mod tests {
         let doc = Document {
             version: FORMAT_VERSION,
             bones: Vec::new(),
+            animations: Vec::new(),
             shapes: vec![
                 Shape {
                     paths: vec![Path::new([0.0, 0.0]).line_to([10.0, 10.0])],
@@ -1058,6 +1286,7 @@ mod tests {
         let doc = Document {
             version: FORMAT_VERSION,
             bones: Vec::new(),
+            animations: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![path],
                 ..Default::default()
@@ -1127,5 +1356,174 @@ mod tests {
 
         // There is no bone to scale, so the point stays unweighted.
         assert!(weights.is_empty());
+    }
+
+    fn bone_keyframe(timestamp: f32, value: f32, bone: &str, property: BoneProperty) -> Keyframe {
+        Keyframe::new(
+            timestamp,
+            value,
+            KeyframeTarget::Bone {
+                bone: bone.to_owned(),
+                property,
+            },
+        )
+    }
+
+    fn keyframe_times(animation: &Animation) -> Vec<f32> {
+        animation
+            .keyframes
+            .iter()
+            .map(|keyframe| keyframe.timestamp)
+            .collect()
+    }
+
+    #[test]
+    fn animations_round_trip_through_json() {
+        let mut animation = Animation::new(5.0);
+        animation.cyclic = true;
+        let mut keyframe = bone_keyframe(1.5, 10.0, "Arm", BoneProperty::Angle);
+        keyframe.handle_in = Some(0.25);
+        keyframe.handle_out = Some(0.75);
+        animation.insert_keyframe(keyframe);
+
+        let document = Document {
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        let json = document.to_json_string().unwrap();
+        assert_eq!(Document::from_json_str(&json).unwrap(), document);
+
+        // Omitted handles and empty animation lists stay out of the file.
+        let empty = Document {
+            animations: vec![Animation::new(1.0)],
+            ..Default::default()
+        };
+        let json = empty.to_json_string().unwrap();
+        assert!(!json.contains("keyframes"));
+        assert!(!json.contains("handle"));
+    }
+
+    #[test]
+    fn animation_names_round_trip_and_are_omitted_when_empty() {
+        let named = Document {
+            animations: vec![Animation {
+                name: "Walk".into(),
+                ..Animation::new(2.0)
+            }],
+            ..Default::default()
+        };
+        let json = named.to_json_string().unwrap();
+        assert!(json.contains("\"Walk\""));
+        assert_eq!(Document::from_json_str(&json).unwrap(), named);
+
+        let unnamed = Document {
+            animations: vec![Animation::new(2.0)],
+            ..Default::default()
+        };
+        let json = unnamed.to_json_string().unwrap();
+        assert!(!json.contains("\"name\""));
+    }
+
+    #[test]
+    fn inserting_keyframes_keeps_them_ordered_and_in_range() {
+        let mut animation = Animation::new(10.0);
+        animation.insert_keyframe(bone_keyframe(5.0, 0.0, "B", BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(1.0, 0.0, "A", BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(5.0, 0.0, "C", BoneProperty::Y));
+        animation.insert_keyframe(bone_keyframe(-1.0, 0.0, "D", BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(11.0, 0.0, "E", BoneProperty::X));
+
+        assert_eq!(keyframe_times(&animation), vec![1.0, 5.0, 5.0]);
+
+        // Equal timestamps keep insertion order.
+        let bones: Vec<&str> = animation
+            .keyframes
+            .iter()
+            .map(|keyframe| match &keyframe.target {
+                KeyframeTarget::Bone { bone, .. } => bone.as_str(),
+                KeyframeTarget::Shape { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(bones, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn changing_duration_drops_outlying_keyframes() {
+        let mut animation = Animation::new(10.0);
+        for timestamp in [0.0, 2.0, 8.0, 10.0] {
+            animation.insert_keyframe(bone_keyframe(timestamp, timestamp, "Bone", BoneProperty::X));
+        }
+
+        animation.set_duration(5.0);
+
+        assert_eq!(animation.duration, 5.0);
+        assert_eq!(keyframe_times(&animation), vec![0.0, 2.0]);
+    }
+
+    #[test]
+    fn loading_animations_normalizes_their_keyframes() {
+        let json = r#"{
+            "version": 3,
+            "animations": [{
+                "duration": 4.0,
+                "cyclic": true,
+                "keyframes": [
+                    {"timestamp": 3.0, "value": 3.0,
+                     "target": {"kind": "bone", "bone": "A", "property": "x"}},
+                    {"timestamp": -1.0, "value": 0.0,
+                     "target": {"kind": "bone", "bone": "B", "property": "y"}},
+                    {"timestamp": 1.0, "value": 1.0,
+                     "target": {"kind": "bone", "bone": "C", "property": "angle"}},
+                    {"timestamp": 9.0, "value": 9.0,
+                     "target": {"kind": "bone", "bone": "D", "property": "scale"}}
+                ]
+            }]
+        }"#;
+
+        let document = Document::from_json_str(json).unwrap();
+        let animation = &document.animations[0];
+        assert!(animation.cyclic);
+        assert_eq!(keyframe_times(animation), vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn renaming_a_bone_updates_animation_targets() {
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(bone_keyframe(0.0, 0.0, "Old", BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(1.0, 0.0, "Other", BoneProperty::X));
+        let mut document = Document {
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        document.rename_bone_in_animations("Old", "New");
+
+        let bones: Vec<&str> = document.animations[0]
+            .keyframes
+            .iter()
+            .map(|keyframe| match &keyframe.target {
+                KeyframeTarget::Bone { bone, .. } => bone.as_str(),
+                KeyframeTarget::Shape { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(bones, vec!["New", "Other"]);
+    }
+
+    #[test]
+    fn shape_keyframes_have_no_properties_yet() {
+        // `ShapeProperty` is uninhabited, so a shape-targeted keyframe cannot
+        // be constructed or deserialized.
+        let json = r#"{
+            "version": 3,
+            "animations": [{
+                "duration": 1.0,
+                "keyframes": [
+                    {"timestamp": 0.0, "value": 0.0,
+                     "target": {"kind": "shape", "shape": "Star", "property": "x"}}
+                ]
+            }]
+        }"#;
+        assert!(Document::from_json_str(json).is_err());
     }
 }

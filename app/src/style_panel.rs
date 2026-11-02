@@ -854,6 +854,7 @@ mod tests {
     fn style_accessors_reach_a_shape_and_its_paths() {
         let mut document = Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
                 name: String::new(),

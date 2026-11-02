@@ -42,6 +42,7 @@ fn spawn_tabs(mut commands: Commands) {
         .with_children(|bar| {
             spawn_tab(bar, EditorMode::Draw, "Draw");
             spawn_tab(bar, EditorMode::Rig, "Rig");
+            spawn_tab(bar, EditorMode::Animate, "Animate");
         });
 }
 

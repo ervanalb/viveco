@@ -11,6 +11,8 @@ use bevy::window::PrimaryWindow;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
 
+use vector_anim_app::animate_panel::AnimatePanelPlugin;
+use vector_anim_app::animate_sidebar::AnimateSidebarPlugin;
 use vector_anim_app::clipboard::ClipboardPlugin;
 use vector_anim_app::dialogs::DialogPlugin;
 use vector_anim_app::editor::{
@@ -54,6 +56,8 @@ fn main() {
         .add_plugins(RigPlugin)
         .add_plugins(RigSidebarPlugin)
         .add_plugins(RigPanelPlugin)
+        .add_plugins(AnimateSidebarPlugin)
+        .add_plugins(AnimatePanelPlugin)
         .add_plugins(MenuBarPlugin)
         .add_plugins(FilePlugin)
         .add_plugins(DialogPlugin)

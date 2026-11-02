@@ -692,6 +692,7 @@ pub fn rename_bone_at(document: &mut Document, address: &BoneAddress, name: Stri
     };
     if old != name {
         document.rename_bone_in_weights(&old, &name);
+        document.rename_bone_in_animations(&old, &name);
     }
     true
 }
@@ -2174,7 +2175,9 @@ fn px(value: f32, scale: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FORMAT_VERSION, Path, Shape};
+    use crate::model::{
+        Animation, BoneProperty, FORMAT_VERSION, Keyframe, KeyframeTarget, Path, Shape,
+    };
 
     /// A shape whose only path carries the given start/anchor weights.
     fn shape_with_weights(start: &[(&str, f32)], anchor: &[(&str, f32)]) -> Shape {
@@ -2194,6 +2197,7 @@ mod tests {
     fn document_with_bones() -> Document {
         Document {
             version: FORMAT_VERSION,
+            animations: Vec::new(),
             shapes: Vec::new(),
             bones: vec![Bone::from_endpoints([0.0, 0.0], [10.0, 0.0])],
         }
@@ -3476,6 +3480,16 @@ mod tests {
             .document
             .shapes
             .push(shape_with_weights(&[("Arm", 0.5)], &[("Arm", 1.0)]));
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(Keyframe::new(
+            0.0,
+            0.0,
+            KeyframeTarget::Bone {
+                bone: "Arm".into(),
+                property: BoneProperty::X,
+            },
+        ));
+        editor.document.animations.push(animation);
 
         assert!(rename_bone_at(
             &mut editor.document,
@@ -3487,5 +3501,11 @@ mod tests {
         assert_eq!(path.start_weights.get("Arm"), None);
         assert_eq!(path.start_weights.get("Limb"), Some(0.5));
         assert_eq!(path.segments[0].to_weights.get("Limb"), Some(1.0));
+
+        let target = &editor.document.animations[0].keyframes[0].target;
+        match target {
+            KeyframeTarget::Bone { bone, .. } => assert_eq!(bone, "Limb"),
+            KeyframeTarget::Shape { .. } => unreachable!(),
+        }
     }
 }
