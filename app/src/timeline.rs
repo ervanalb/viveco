@@ -1,4 +1,4 @@
-//! Read-only timeline view for animate mode.
+//! Editable timeline view for animate mode.
 //!
 //! The bottom animate panel hosts a [`TimelineArea`] rendered with a
 //! [`UiVelloScene`]. The view spans time horizontally and animated value
@@ -6,13 +6,28 @@
 //!
 //! * wheel scrolls the value axis, shift-wheel scrolls time, ctrl-wheel zooms
 //!   around the cursor;
-//! * left-drag pans, right-drag zooms around the cursor.
+//! * middle-drag pans (space + left-drag does the same), right-drag zooms
+//!   around the cursor.
 //!
 //! Keyframes are drawn as points, their handles as smaller points a third of
 //! the way toward the neighbouring keyframe, and the cubic curve they describe
 //! is stroked between them. Cyclic animations repeat the whole pattern with a
 //! period equal to the duration, and only the repetitions intersecting the
 //! visible window are emitted.
+//!
+//! Pressing a keyframe snaps the playhead to it. Keyframes drag in time or in
+//! value depending on which axis the pointer favours; a value drag carries the
+//! keyframe's handles along with it. Explicit handles drag vertically, since
+//! their time is fixed a third of the way to the neighbour. Dragging empty
+//! space draws a marquee over keyframes, and a multiple selection drags
+//! together. Double-clicking a keyframe in a multiple selection aligns the
+//! whole selection to its time, merging each curve down to one keyframe there.
+//!
+//! Clicking an explicit handle selects it. `Delete` removes selected keyframes
+//! or handles. Shift-dragging a keyframe creates a handle on the side the
+//! pointer moves toward, and shift-dragging an existing handle places the
+//! opposite handle on the same tangent, scaling for the different time spans
+//! of the two neighbouring segments, so the curve stays smooth through it.
 
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::Color as BevyColor;
@@ -26,6 +41,7 @@ use bevy_vello::vello::{
 };
 
 use crate::animate::{curve_groups, effective_handle_in, effective_handle_out, selected_animation};
+use crate::animate_panel::DurationEdit;
 use crate::editor::{EditorMode, EditorState};
 use crate::model::{Animation, Keyframe};
 use crate::theme;
@@ -70,6 +86,11 @@ const HANDLE_FILL: Color = Color::from_rgba8(0xdd, 0xe1, 0xe8, 0xff);
 /// Dark scrim over the parts of the track outside the animation's time range.
 const DISABLED_SCRIM: Color = Color::from_rgba8(0x0d, 0x10, 0x16, 0xa0);
 
+/// Ring drawn around selected keyframes.
+const SELECTED_RING: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xcc);
+const MARQUEE_FILL: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x24);
+const MARQUEE_STROKE: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xb0);
+
 const PLAYHEAD_COLOR: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xff);
 const PLAYHEAD_OUTLINE: Color = Color::from_rgba8(0x0b, 0x2a, 0x40, 0xff);
 const PLAYHEAD_WIDTH: f64 = 1.5;
@@ -79,6 +100,21 @@ const PLAYHEAD_HANDLE_HEIGHT: f64 = 14.0;
 /// How close to the playhead handle a press must be to grab it, in pixels.
 const PLAYHEAD_GRAB_HALF_WIDTH: f32 = 10.0;
 const PLAYHEAD_GRAB_HEIGHT: f32 = 18.0;
+
+/// How close to a keyframe or handle a press must be to grab it, in pixels.
+const KEYFRAME_HIT_RADIUS: f32 = 7.0;
+const HANDLE_HIT_RADIUS: f32 = 6.0;
+
+/// How far the pointer must travel before a keyframe drag commits to an axis.
+const DRAG_AXIS_THRESHOLD: f32 = 3.0;
+
+/// How quickly a second press on the same keyframe must follow the first, in
+/// seconds, to count as a double-click that aligns the selection.
+const DOUBLE_CLICK_SECONDS: f64 = 0.35;
+
+/// How far the pointer may move between the two presses of a double-click, in
+/// pixels.
+const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
 
 /// Number of label nodes pre-spawned over the timeline.
 ///
@@ -120,18 +156,27 @@ pub struct TimelinePlugin;
 
 impl Plugin for TimelinePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TimelineView>().add_systems(
-            Update,
-            (
-                fit_timeline,
-                handle_timeline_input,
-                draw_timeline,
-                sync_grid_labels,
-            )
-                .chain(),
-        );
+        app.init_resource::<TimelineView>()
+            .init_resource::<TimelineEdit>()
+            .add_systems(
+                Update,
+                (
+                    fit_timeline,
+                    handle_timeline_input.in_set(TimelineInput),
+                    draw_timeline,
+                    sync_grid_labels,
+                )
+                    .chain(),
+            );
     }
 }
+
+/// System set for the timeline's input handling.
+///
+/// The animation list also reacts to `Delete`; it runs before this set so a
+/// timeline selection claims the key before the list can delete an animation.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TimelineInput;
 
 /// Marks the UI node the timeline draws into.
 #[derive(Component)]
@@ -140,6 +185,116 @@ pub struct TimelineArea;
 /// Marks one of the pooled time-label nodes.
 #[derive(Component)]
 struct GridLabel;
+
+/// Which axis a keyframe drag has committed to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragAxis {
+    /// Horizontal: keyframes move in time.
+    Time,
+    /// Vertical: keyframes move in value.
+    Value,
+}
+
+/// One side of a keyframe's Bézier control points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandleSide {
+    In,
+    Out,
+}
+
+/// A keyframe drag, including the selection it moves and the movement limits
+/// that keep keyframes from crossing their unselected same-curve neighbours.
+struct KeyframeDrag {
+    /// Indices into the animation's keyframe list, in document order.
+    indices: Vec<usize>,
+    /// Pointer position, in track-local pixels, when the drag began.
+    start: Vec2,
+    /// The axis chosen after the pointer first moved far enough.
+    axis: Option<DragAxis>,
+    /// Each selected keyframe's timestamp, value, and handles when the drag
+    /// began, so a value drag can carry the handles along.
+    origins: Vec<(f32, f32, Option<f32>, Option<f32>)>,
+    /// Allowed time translation, so keyframes stay in range and ordered.
+    min_dt: f32,
+    max_dt: f32,
+}
+
+/// A control-point drag. Handles store only a value, so they move vertically.
+struct HandleDrag {
+    index: usize,
+    side: HandleSide,
+    /// Pointer y, in track-local pixels, when the drag began.
+    start_y: f32,
+    /// Handle value when the drag began.
+    origin_value: f32,
+    /// Whether the opposite handle mirrors this one, keeping the curve smooth.
+    symmetric: bool,
+}
+
+/// A shift-drag that begins on a keyframe and creates or moves a handle on the
+/// side the pointer moves toward.
+struct KeyframeHandleDrag {
+    index: usize,
+    /// Pointer position, in track-local pixels, when the drag began.
+    start: Vec2,
+    /// The side chosen after the pointer first moved far enough, if any.
+    side: Option<HandleSide>,
+    /// The keyframe's value, used when creating a handle and when mirroring.
+    keyframe_value: f32,
+    /// Explicit handle values at the start of the drag, so moving an existing
+    /// handle does not jump.
+    origin_in: Option<f32>,
+    origin_out: Option<f32>,
+}
+
+/// A box selection over the timeline.
+struct MarqueeDrag {
+    start: Vec2,
+    current: Vec2,
+    /// Selection that existed before the marquee, kept while Shift is held.
+    baseline: Vec<usize>,
+}
+
+/// The gesture currently in progress.
+enum Drag {
+    Playhead,
+    /// The last pointer position and the button that started the pan.
+    Pan {
+        last: Vec2,
+        button: MouseButton,
+    },
+    Keyframes(KeyframeDrag),
+    Handle(HandleDrag),
+    KeyframeHandle(KeyframeHandleDrag),
+    Marquee(MarqueeDrag),
+}
+
+/// Persistent selection and in-progress gesture for the timeline.
+#[derive(Resource, Default)]
+pub(crate) struct TimelineEdit {
+    /// The animation the selection belongs to.
+    animation: Option<usize>,
+    /// Selected keyframe indices into the animation's keyframe list.
+    selected: Vec<usize>,
+    /// Selected explicit handles, as `(keyframe index, side)`.
+    selected_handles: Vec<(usize, HandleSide)>,
+    /// The gesture being applied, if any.
+    drag: Option<Drag>,
+    /// Right-button drag anchor for zooming, which is a view gesture rather
+    /// than a document edit.
+    right_drag: Option<Vec2>,
+    /// The time, keyframe, and pointer position of the last press on a
+    /// keyframe, used to recognise a double-click that aligns the selection.
+    last_keyframe_press: Option<(f64, usize, Vec2)>,
+}
+
+impl TimelineEdit {
+    /// Whether any keyframe or handle is selected, so `Delete` belongs to the
+    /// timeline rather than to the animation list.
+    pub(crate) fn has_selection(&self) -> bool {
+        !self.selected.is_empty() || !self.selected_handles.is_empty()
+    }
+}
 
 /// Spawns the timeline node inside the animate panel.
 pub fn spawn_timeline(parent: &mut ChildSpawnerCommands) {
@@ -361,50 +516,464 @@ fn fit_timeline(
     view.fitted = Some(key);
 }
 
-/// Applies wheel, left-drag, playhead-drag, and right-drag gestures over the
-/// timeline.
+/// Discards queued wheel events.
+fn drain_wheel(wheel: &mut MessageReader<MouseWheel>) {
+    for _ in wheel.read() {}
+}
+
+/// Picks the cardinal axis a drag has moved furthest along, or `None` until
+/// the pointer has travelled far enough to commit.
+fn dominant_axis(delta: Vec2, threshold: f32) -> Option<DragAxis> {
+    if delta.length() < threshold {
+        return None;
+    }
+    if delta.x.abs() >= delta.y.abs() {
+        Some(DragAxis::Time)
+    } else {
+        Some(DragAxis::Value)
+    }
+}
+
+/// The selected animation's keyframes, mutably.
+fn selected_animation_mut(editor: &mut EditorState) -> Option<&mut Animation> {
+    let index = editor.selected_animation?;
+    editor.document.animations.get_mut(index)
+}
+
+/// Removes the selected handles and keyframes from the selected animation.
+///
+/// Selected handles are cleared first, then selected keyframes are removed in
+/// descending index order so earlier removals do not shift later ones.
+fn delete_selection(editor: &mut EditorState, edit: &mut TimelineEdit) {
+    let handles = std::mem::take(&mut edit.selected_handles);
+    let mut indices = std::mem::take(&mut edit.selected);
+    edit.drag = None;
+    edit.last_keyframe_press = None;
+
+    let Some(animation) = selected_animation_mut(editor) else {
+        return;
+    };
+
+    for (index, side) in handles {
+        if let Some(keyframe) = animation.keyframes.get_mut(index) {
+            match side {
+                HandleSide::In => keyframe.handle_in = None,
+                HandleSide::Out => keyframe.handle_out = None,
+            }
+        }
+    }
+
+    indices.sort_unstable();
+    indices.dedup();
+    for index in indices.into_iter().rev() {
+        if index < animation.keyframes.len() {
+            animation.keyframes.remove(index);
+        }
+    }
+}
+
+/// Moves a keyframe and its handles by `dv`, keeping the handles attached to
+/// the curve at the same relative offset.
+fn move_keyframe_value(
+    keyframe: &mut Keyframe,
+    value: f32,
+    handle_in: Option<f32>,
+    handle_out: Option<f32>,
+    dv: f32,
+) {
+    keyframe.value = value + dv;
+    keyframe.handle_in = handle_in.map(|handle| handle + dv);
+    keyframe.handle_out = handle_out.map(|handle| handle + dv);
+}
+
+/// Moves every selected keyframe to `target` time, merging keyframes that land
+/// on the same curve so each curve keeps only one keyframe there.
+///
+/// The anchor keyframe survives on its own curve. On every other curve, the
+/// selected keyframe closest to its original time to the target survives, with
+/// ties going to the lower index. Returns the surviving keyframes' indices in
+/// their new document order.
+fn align_selection(
+    animation: &mut Animation,
+    selected: &[usize],
+    target: f32,
+    anchor: usize,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = selected.to_vec();
+    order.sort_unstable();
+    order.dedup();
+    order.retain(|&index| index < animation.keyframes.len());
+
+    // Choose one survivor per curve among the selection.
+    let mut survivors: Vec<usize> = Vec::new();
+    for &index in &order {
+        let curve = animation.keyframes[index].target.clone();
+        if survivors
+            .iter()
+            .any(|&survivor| animation.keyframes[survivor].target == curve)
+        {
+            continue;
+        }
+        let group = order
+            .iter()
+            .copied()
+            .filter(|&other| animation.keyframes[other].target == curve);
+        let survivor = if group.clone().any(|other| other == anchor) {
+            anchor
+        } else {
+            group
+                .min_by(|&a, &b| {
+                    let da = (animation.keyframes[a].timestamp - target).abs();
+                    let db = (animation.keyframes[b].timestamp - target).abs();
+                    da.partial_cmp(&db)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.cmp(&b))
+                })
+                .unwrap_or(index)
+        };
+        survivors.push(survivor);
+    }
+
+    // Remove the merged-away keyframes, then re-time the survivors.
+    let removed: Vec<usize> = order
+        .iter()
+        .copied()
+        .filter(|index| !survivors.contains(index))
+        .collect();
+    let mut survivor_indices: Vec<usize> = survivors
+        .iter()
+        .map(|&original| original - removed.iter().filter(|&&gone| gone < original).count())
+        .collect();
+    for &index in removed.iter().rev() {
+        animation.keyframes.remove(index);
+    }
+    for &index in &survivor_indices {
+        if let Some(keyframe) = animation.keyframes.get_mut(index) {
+            keyframe.timestamp = target;
+        }
+    }
+
+    // Re-sort by timestamp, tracking where each survivor ends up. Sorting is
+    // stable, so keyframes sharing the target time keep their relative order.
+    let mut tagged: Vec<(usize, Keyframe)> = animation.keyframes.drain(..).enumerate().collect();
+    tagged.sort_by(|a, b| {
+        a.1.timestamp
+            .partial_cmp(&b.1.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    survivor_indices = tagged
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (original, _))| {
+            survivor_indices.contains(original).then_some(position)
+        })
+        .collect();
+    animation.keyframes = tagged.into_iter().map(|(_, keyframe)| keyframe).collect();
+    survivor_indices
+}
+
+/// The time spans of the same-curve segments on either side of a keyframe.
+///
+/// Returns `None` when the keyframe lacks a neighbour on either side, such as
+/// a non-cyclic endpoint, since there is no opposing segment to match.
+fn adjacent_spans(animation: &Animation, index: usize) -> Option<(f32, f32)> {
+    let time = f64::from(animation.keyframes.get(index)?.timestamp);
+    let previous = previous_same_target(animation, index, 0.0)?;
+    let next = next_same_target(animation, index, 0.0)?;
+    let incoming = (time - previous) as f32;
+    let outgoing = (next - time) as f32;
+    (incoming > 0.0 && outgoing > 0.0).then_some((incoming, outgoing))
+}
+
+/// The value of the handle opposite `value` that keeps the curve's slope
+/// continuous through the keyframe.
+///
+/// A handle sits a third of the way toward its neighbour, so the slope at the
+/// keyframe is the handle's value offset divided by the segment's span in
+/// time. With equally spaced neighbours this is a plain reflection; unequal
+/// spans scale the offset by their ratio. `span` is the dragged handle's
+/// segment length and `opposite_span` the segment on the other side.
+fn mirror_handle(keyframe_value: f32, value: f32, span: f32, opposite_span: f32) -> f32 {
+    keyframe_value + (keyframe_value - value) * (opposite_span / span)
+}
+
+/// The handle side a horizontal drag from a keyframe creates, once the pointer
+/// has moved far enough to commit.
+fn handle_side_toward(dx: f32) -> Option<HandleSide> {
+    if dx.abs() < DRAG_AXIS_THRESHOLD {
+        None
+    } else if dx > 0.0 {
+        Some(HandleSide::Out)
+    } else {
+        Some(HandleSide::In)
+    }
+}
+
+/// Whether a press on `index` at `local` repeats a recent keyframe press
+/// closely enough in time and place to count as a double-click.
+fn repeats_press(last: Option<(f64, usize, Vec2)>, now: f64, index: usize, local: Vec2) -> bool {
+    last.is_some_and(|(last_time, last_index, last_position)| {
+        last_index == index
+            && now - last_time <= DOUBLE_CLICK_SECONDS
+            && last_position.distance(local) <= DOUBLE_CLICK_DISTANCE
+    })
+}
+
+/// How far a group of selected keyframes may slide in time without leaving the
+/// animation or crossing an unselected keyframe on the same curve.
+fn keyframe_drag_bounds(animation: &Animation, selected: &[usize]) -> (f32, f32) {
+    let duration = animation.duration.max(0.0);
+    let mut min_dt = f32::NEG_INFINITY;
+    let mut max_dt = f32::INFINITY;
+
+    for &index in selected {
+        let Some(keyframe) = animation.keyframes.get(index) else {
+            continue;
+        };
+        let time = keyframe.timestamp;
+        min_dt = min_dt.max(-time);
+        max_dt = max_dt.min(duration - time);
+
+        let previous = (0..index).rev().find(|&other| {
+            animation.keyframes[other].target == keyframe.target && !selected.contains(&other)
+        });
+        if let Some(other) = previous {
+            min_dt = min_dt.max(animation.keyframes[other].timestamp - time);
+        }
+
+        let next = (index + 1..animation.keyframes.len()).find(|&other| {
+            animation.keyframes[other].target == keyframe.target && !selected.contains(&other)
+        });
+        if let Some(other) = next {
+            max_dt = max_dt.min(animation.keyframes[other].timestamp - time);
+        }
+    }
+
+    if !min_dt.is_finite() || !max_dt.is_finite() || min_dt > max_dt {
+        (0.0, 0.0)
+    } else {
+        (min_dt, max_dt)
+    }
+}
+
+/// A keyframe's position in track-local pixels.
+fn keyframe_position(view: &TimelineView, keyframe: &Keyframe) -> Vec2 {
+    Vec2::new(
+        view.screen_x(f64::from(keyframe.timestamp)) as f32,
+        view.screen_y(f64::from(keyframe.value)) as f32,
+    )
+}
+
+/// The time offsets of the repeated cycles intersect the visible window.
+fn cycle_offsets(animation: &Animation, view: &TimelineView, size: Vec2) -> Vec<f64> {
+    if animation.cyclic && animation.duration > 0.0 {
+        let duration = f64::from(animation.duration);
+        visible_cycles(view, size, animation.duration)
+            .map(|cycle| cycle as f64 * duration)
+            .collect()
+    } else {
+        vec![0.0]
+    }
+}
+
+/// The keyframe under `local`, if any. Repeated cycles resolve to the base
+/// keyframe.
+fn keyframe_under(
+    animation: &Animation,
+    view: &TimelineView,
+    size: Vec2,
+    local: Vec2,
+) -> Option<usize> {
+    let mut best: Option<(f32, usize)> = None;
+    for offset in cycle_offsets(animation, view, size) {
+        for (index, keyframe) in animation.keyframes.iter().enumerate() {
+            let position = Vec2::new(
+                view.screen_x(f64::from(keyframe.timestamp) + offset) as f32,
+                view.screen_y(f64::from(keyframe.value)) as f32,
+            );
+            let distance = position.distance(local);
+            if distance <= KEYFRAME_HIT_RADIUS && best.is_none_or(|(best, _)| distance < best) {
+                best = Some((distance, index));
+            }
+        }
+    }
+    best.map(|(_, index)| index)
+}
+
+/// The first keyframe of the same curve after `index`, in the given cycle.
+///
+/// Wraps to the same curve's first keyframe one period later for cyclic
+/// animations, including a single-keyframe curve wrapping onto itself.
+fn next_same_target(animation: &Animation, index: usize, offset: f64) -> Option<f64> {
+    let target = &animation.keyframes.get(index)?.target;
+    let later = animation.keyframes[index + 1..]
+        .iter()
+        .find(|keyframe| &keyframe.target == target);
+    if let Some(next) = later {
+        return Some(f64::from(next.timestamp) + offset);
+    }
+    if animation.cyclic && animation.duration > 0.0 {
+        let first = animation.keyframes[..=index]
+            .iter()
+            .find(|keyframe| &keyframe.target == target)?;
+        return Some(f64::from(first.timestamp) + f64::from(animation.duration) + offset);
+    }
+    None
+}
+
+/// The last keyframe of the same curve before `index`, in the given cycle.
+///
+/// Wraps to the same curve's last keyframe one period earlier for cyclic
+/// animations, including a single-keyframe curve wrapping onto itself.
+fn previous_same_target(animation: &Animation, index: usize, offset: f64) -> Option<f64> {
+    let target = &animation.keyframes.get(index)?.target;
+    let earlier = animation.keyframes[..index]
+        .iter()
+        .rev()
+        .find(|keyframe| &keyframe.target == target);
+    if let Some(previous) = earlier {
+        return Some(f64::from(previous.timestamp) + offset);
+    }
+    if animation.cyclic && animation.duration > 0.0 {
+        let last = animation.keyframes[index..]
+            .iter()
+            .rev()
+            .find(|keyframe| &keyframe.target == target)?;
+        return Some(f64::from(last.timestamp) - f64::from(animation.duration) + offset);
+    }
+    None
+}
+
+/// Where an explicit handle is drawn, in track-local pixels.
+fn handle_position(
+    animation: &Animation,
+    view: &TimelineView,
+    index: usize,
+    side: HandleSide,
+    offset: f64,
+) -> Option<Vec2> {
+    let keyframe = animation.keyframes.get(index)?;
+    let value = match side {
+        HandleSide::In => keyframe.handle_in?,
+        HandleSide::Out => keyframe.handle_out?,
+    };
+    let neighbour = match side {
+        HandleSide::In => previous_same_target(animation, index, offset)?,
+        HandleSide::Out => next_same_target(animation, index, offset)?,
+    };
+    let time = f64::from(keyframe.timestamp) + offset;
+    let span = (neighbour - time).abs();
+    let handle_time = match side {
+        HandleSide::In => time - span / 3.0,
+        HandleSide::Out => time + span / 3.0,
+    };
+    Some(Vec2::new(
+        view.screen_x(handle_time) as f32,
+        view.screen_y(f64::from(value)) as f32,
+    ))
+}
+
+/// The explicit handle under `local`, if any. Repetitions resolve to the base
+/// handle.
+fn handle_under(
+    animation: &Animation,
+    view: &TimelineView,
+    size: Vec2,
+    local: Vec2,
+) -> Option<(usize, HandleSide)> {
+    let mut best: Option<(f32, usize, HandleSide)> = None;
+    for offset in cycle_offsets(animation, view, size) {
+        for index in 0..animation.keyframes.len() {
+            for side in [HandleSide::In, HandleSide::Out] {
+                let Some(position) = handle_position(animation, view, index, side, offset) else {
+                    continue;
+                };
+                let distance = position.distance(local);
+                if distance <= HANDLE_HIT_RADIUS && best.is_none_or(|(best, _, _)| distance < best)
+                {
+                    best = Some((distance, index, side));
+                }
+            }
+        }
+    }
+    best.map(|(_, index, side)| (index, side))
+}
+
+/// Applies wheel, pan, zoom, playhead, keyframe, handle, and marquee gestures
+/// over the timeline.
 #[allow(clippy::too_many_arguments)]
 fn handle_timeline_input(
     mode: Res<EditorMode>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    duration_edit: Res<DurationEdit>,
+    time: Res<Time>,
     mut wheel: MessageReader<MouseWheel>,
     area: Query<(&RelativeCursorPosition, &ComputedNode), With<TimelineArea>>,
     mut editor: ResMut<EditorState>,
     mut view: ResMut<TimelineView>,
-    mut left_drag: Local<Option<Vec2>>,
-    mut right_drag: Local<Option<Vec2>>,
-    mut playhead_drag: Local<bool>,
+    mut edit: ResMut<TimelineEdit>,
 ) {
     if *mode != EditorMode::Animate {
-        for _ in wheel.read() {}
-        *left_drag = None;
-        *right_drag = None;
-        *playhead_drag = false;
+        drain_wheel(&mut wheel);
+        edit.selected.clear();
+        edit.selected_handles.clear();
+        edit.drag = None;
+        edit.right_drag = None;
+        edit.last_keyframe_press = None;
         return;
     }
+
+    // The selection belongs to one animation; changing animations drops it.
+    // This runs before the cursor checks so a stale selection cannot linger
+    // once its animation is gone.
+    if edit.animation != editor.selected_animation {
+        edit.animation = editor.selected_animation;
+        edit.selected.clear();
+        edit.selected_handles.clear();
+        edit.drag = None;
+        edit.last_keyframe_press = None;
+    }
+    if let Some(animation) = selected_animation(&editor) {
+        let len = animation.keyframes.len();
+        edit.selected.retain(|&index| index < len);
+        edit.selected_handles.retain(|(index, _)| *index < len);
+    } else {
+        edit.selected.clear();
+        edit.selected_handles.clear();
+    }
+
+    // `Delete` removes the timeline selection even when the pointer is no
+    // longer over the track. The animation list checks `has_selection` and
+    // runs first, so it does not delete the whole animation at the same time.
+    if keys.just_pressed(KeyCode::Delete) && !duration_edit.is_editing() && !editor.is_renaming() {
+        delete_selection(&mut editor, &mut edit);
+    }
+
     let Some(duration) = selected_animation(&editor).map(|animation| animation.duration) else {
-        for _ in wheel.read() {}
-        *left_drag = None;
-        *right_drag = None;
-        *playhead_drag = false;
+        drain_wheel(&mut wheel);
+        edit.drag = None;
+        edit.right_drag = None;
         return;
     };
     let duration = duration.max(0.0);
     let Ok((relative, node)) = area.single() else {
-        for _ in wheel.read() {}
+        drain_wheel(&mut wheel);
+        edit.drag = None;
+        edit.right_drag = None;
         return;
     };
     let size = logical_size(node);
     if size.x <= 0.0 || size.y <= 0.0 {
-        for _ in wheel.read() {}
+        drain_wheel(&mut wheel);
+        edit.drag = None;
+        edit.right_drag = None;
         return;
     }
     let Some(normalized) = relative.normalized else {
-        for _ in wheel.read() {}
-        *left_drag = None;
-        *right_drag = None;
-        *playhead_drag = false;
+        drain_wheel(&mut wheel);
+        edit.drag = None;
+        edit.right_drag = None;
         return;
     };
     // `normalized` runs from (-0.5, -0.5) at the top-left to (0.5, 0.5) at the
@@ -414,6 +983,7 @@ fn handle_timeline_input(
 
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let space = keys.pressed(KeyCode::Space);
 
     for event in wheel.read() {
         if !over {
@@ -435,39 +1005,379 @@ fn handle_timeline_input(
         }
     }
 
-    let playhead = clamp_playhead(editor.playhead, duration);
-    let playhead_x = view.screen_x(f64::from(playhead)) as f32;
-    let on_playhead = over
-        && local.y <= PLAYHEAD_GRAB_HEIGHT
-        && (local.x - playhead_x).abs() <= PLAYHEAD_GRAB_HALF_WIDTH;
+    let left_press = mouse.just_pressed(MouseButton::Left) && over;
+    let middle_press = mouse.just_pressed(MouseButton::Middle) && over;
 
-    if mouse.just_pressed(MouseButton::Left) && over {
-        if on_playhead {
-            *playhead_drag = true;
-            editor.playhead = clamp_playhead(view.time_at(local.x), duration);
-        } else {
-            *left_drag = Some(local);
+    if middle_press {
+        edit.drag = Some(Drag::Pan {
+            last: local,
+            button: MouseButton::Middle,
+        });
+    } else if left_press && space {
+        edit.drag = Some(Drag::Pan {
+            last: local,
+            button: MouseButton::Left,
+        });
+    } else if left_press {
+        // Work out what the press grabbed before mutating the document.
+        enum Press {
+            Playhead,
+            Keyframe(usize),
+            Handle(usize, HandleSide),
+            Marquee,
+        }
+        let press = {
+            let Some(animation) = selected_animation(&editor) else {
+                return;
+            };
+            let playhead = clamp_playhead(editor.playhead, duration);
+            let playhead_x = view.screen_x(f64::from(playhead)) as f32;
+            let on_playhead = local.y <= PLAYHEAD_GRAB_HEIGHT
+                && (local.x - playhead_x).abs() <= PLAYHEAD_GRAB_HALF_WIDTH;
+            if on_playhead {
+                Press::Playhead
+            } else if let Some(index) = keyframe_under(animation, &view, content_size(size), local)
+            {
+                Press::Keyframe(index)
+            } else if let Some((index, side)) =
+                handle_under(animation, &view, content_size(size), local)
+            {
+                Press::Handle(index, side)
+            } else {
+                Press::Marquee
+            }
+        };
+
+        match press {
+            Press::Playhead => {
+                edit.last_keyframe_press = None;
+                edit.drag = Some(Drag::Playhead);
+                editor.playhead = clamp_playhead(view.time_at(local.x), duration);
+            }
+            Press::Keyframe(index) => {
+                let timestamp = selected_animation(&editor)
+                    .and_then(|animation| animation.keyframes.get(index))
+                    .map_or(0.0, |keyframe| keyframe.timestamp);
+                editor.playhead = clamp_playhead(timestamp, duration);
+
+                let now = time.elapsed_secs_f64();
+                let double_click = !shift
+                    && edit.selected.len() > 1
+                    && edit.selected.contains(&index)
+                    && repeats_press(edit.last_keyframe_press, now, index, local);
+
+                if double_click {
+                    // Align the selection to this keyframe, merging each curve
+                    // down to a single keyframe at that time.
+                    edit.last_keyframe_press = None;
+                    edit.selected_handles.clear();
+                    edit.drag = None;
+                    if let Some(animation) = selected_animation_mut(&mut editor) {
+                        let selected = edit.selected.clone();
+                        edit.selected = align_selection(animation, &selected, timestamp, index);
+                    }
+                } else if shift {
+                    // Shift-dragging creates a handle; a shift-click that
+                    // never moves instead toggles the selection on release.
+                    edit.last_keyframe_press = None;
+                    if let Some(animation) = selected_animation(&editor)
+                        && let Some(keyframe) = animation.keyframes.get(index)
+                    {
+                        edit.drag = Some(Drag::KeyframeHandle(KeyframeHandleDrag {
+                            index,
+                            start: local,
+                            side: None,
+                            keyframe_value: keyframe.value,
+                            origin_in: keyframe.handle_in,
+                            origin_out: keyframe.handle_out,
+                        }));
+                    }
+                } else {
+                    edit.last_keyframe_press = Some((now, index, local));
+                    if !edit.selected.contains(&index) {
+                        edit.selected.clear();
+                        edit.selected.push(index);
+                    }
+                    edit.selected_handles.clear();
+
+                    let indices = edit.selected.clone();
+                    if let Some(animation) = selected_animation(&editor) {
+                        let origins = indices
+                            .iter()
+                            .filter_map(|&index| animation.keyframes.get(index))
+                            .map(|keyframe| {
+                                (
+                                    keyframe.timestamp,
+                                    keyframe.value,
+                                    keyframe.handle_in,
+                                    keyframe.handle_out,
+                                )
+                            })
+                            .collect();
+                        let (min_dt, max_dt) = keyframe_drag_bounds(animation, &indices);
+                        edit.drag = Some(Drag::Keyframes(KeyframeDrag {
+                            indices,
+                            start: local,
+                            axis: None,
+                            origins,
+                            min_dt,
+                            max_dt,
+                        }));
+                    }
+                }
+            }
+            Press::Handle(index, side) => {
+                // Selecting a handle replaces any keyframe selection, so the
+                // two kinds of selection do not compete for `Delete`.
+                edit.last_keyframe_press = None;
+                edit.selected.clear();
+                edit.selected_handles.clear();
+                edit.selected_handles.push((index, side));
+
+                if let Some(animation) = selected_animation(&editor)
+                    && let Some(keyframe) = animation.keyframes.get(index)
+                {
+                    let origin_value = match side {
+                        HandleSide::In => keyframe.handle_in,
+                        HandleSide::Out => keyframe.handle_out,
+                    }
+                    .unwrap_or(keyframe.value);
+                    edit.drag = Some(Drag::Handle(HandleDrag {
+                        index,
+                        side,
+                        start_y: local.y,
+                        origin_value,
+                        symmetric: shift,
+                    }));
+                }
+            }
+            Press::Marquee => {
+                edit.last_keyframe_press = None;
+                edit.selected_handles.clear();
+                let baseline = if shift {
+                    edit.selected.clone()
+                } else {
+                    edit.selected.clear();
+                    Vec::new()
+                };
+                edit.drag = Some(Drag::Marquee(MarqueeDrag {
+                    start: local,
+                    current: local,
+                    baseline,
+                }));
+            }
         }
     }
-    if *playhead_drag {
-        if mouse.pressed(MouseButton::Left) {
-            editor.playhead = clamp_playhead(view.time_at(local.x), duration);
-        } else {
-            *playhead_drag = false;
+
+    // Advance the gesture that is now active.
+    {
+        let TimelineEdit {
+            selected,
+            selected_handles,
+            drag,
+            last_keyframe_press,
+            ..
+        } = &mut *edit;
+        let left_held = mouse.pressed(MouseButton::Left);
+        let mut clear_drag = false;
+        // A drag that actually moves keyframes is not a double-click.
+        let mut moved_keyframes = false;
+
+        match drag {
+            Some(Drag::Playhead) => {
+                if left_held {
+                    editor.playhead = clamp_playhead(view.time_at(local.x), duration);
+                } else {
+                    clear_drag = true;
+                }
+            }
+            Some(Drag::Pan { last, button }) => {
+                let held = match *button {
+                    MouseButton::Middle => mouse.pressed(MouseButton::Middle),
+                    _ => left_held,
+                };
+                if held {
+                    view.pan(local - *last);
+                    *last = local;
+                } else {
+                    clear_drag = true;
+                }
+            }
+            Some(Drag::Keyframes(state)) => {
+                if !left_held {
+                    clear_drag = true;
+                } else {
+                    if state.axis.is_none() {
+                        state.axis = dominant_axis(local - state.start, DRAG_AXIS_THRESHOLD);
+                    }
+                    if let Some(axis) = state.axis
+                        && let Some(animation) = selected_animation_mut(&mut editor)
+                    {
+                        moved_keyframes = true;
+                        match axis {
+                            DragAxis::Time => {
+                                let dt = ((local.x - state.start.x) * view.time_per_pixel)
+                                    .clamp(state.min_dt, state.max_dt);
+                                for (&index, &(timestamp, _, _, _)) in
+                                    state.indices.iter().zip(state.origins.iter())
+                                {
+                                    if let Some(keyframe) = animation.keyframes.get_mut(index) {
+                                        keyframe.timestamp = timestamp + dt;
+                                    }
+                                }
+                            }
+                            DragAxis::Value => {
+                                let dv = (state.start.y - local.y) * view.value_per_pixel;
+                                for (&index, &(_, value, handle_in, handle_out)) in
+                                    state.indices.iter().zip(state.origins.iter())
+                                {
+                                    if let Some(keyframe) = animation.keyframes.get_mut(index) {
+                                        move_keyframe_value(
+                                            keyframe, value, handle_in, handle_out, dv,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some(Drag::KeyframeHandle(state)) => {
+                if !left_held {
+                    // A shift-click that never moved toggles the selection.
+                    if state.side.is_none() {
+                        selected_handles.clear();
+                        if let Some(position) =
+                            selected.iter().position(|&other| other == state.index)
+                        {
+                            selected.remove(position);
+                        } else {
+                            selected.push(state.index);
+                            selected.sort_unstable();
+                        }
+                    }
+                    clear_drag = true;
+                } else if state.side.is_none() {
+                    // Commit to a side once the pointer has moved far enough,
+                    // but only if that side has a neighbouring keyframe the
+                    // handle could point at.
+                    if let Some(side) = handle_side_toward(local.x - state.start.x) {
+                        let available =
+                            selected_animation(&editor).is_some_and(|animation| match side {
+                                HandleSide::Out => {
+                                    next_same_target(animation, state.index, 0.0).is_some()
+                                }
+                                HandleSide::In => {
+                                    previous_same_target(animation, state.index, 0.0).is_some()
+                                }
+                            });
+                        if available {
+                            state.side = Some(side);
+                        } else {
+                            clear_drag = true;
+                        }
+                    }
+                }
+                if let Some(side) = state.side
+                    && left_held
+                {
+                    let origin = match side {
+                        HandleSide::In => state.origin_in.unwrap_or(state.keyframe_value),
+                        HandleSide::Out => state.origin_out.unwrap_or(state.keyframe_value),
+                    };
+                    let value = origin + (state.start.y - local.y) * view.value_per_pixel;
+                    if let Some(animation) = selected_animation_mut(&mut editor)
+                        && let Some(keyframe) = animation.keyframes.get_mut(state.index)
+                    {
+                        match side {
+                            HandleSide::In => keyframe.handle_in = Some(value),
+                            HandleSide::Out => keyframe.handle_out = Some(value),
+                        }
+                    }
+                }
+            }
+            Some(Drag::Handle(state)) => {
+                if left_held {
+                    let value =
+                        state.origin_value + (state.start_y - local.y) * view.value_per_pixel;
+                    // Read the neighbouring spans before borrowing the
+                    // animation mutably. Without a segment on both sides there
+                    // is no opposing slope, so fall back to a plain reflection.
+                    let spans = if state.symmetric {
+                        selected_animation(&editor)
+                            .and_then(|animation| adjacent_spans(animation, state.index))
+                    } else {
+                        None
+                    };
+                    if let Some(animation) = selected_animation_mut(&mut editor)
+                        && let Some(keyframe) = animation.keyframes.get_mut(state.index)
+                    {
+                        match state.side {
+                            HandleSide::In => keyframe.handle_in = Some(value),
+                            HandleSide::Out => keyframe.handle_out = Some(value),
+                        }
+                        if state.symmetric {
+                            let mirrored = match spans {
+                                Some((incoming, outgoing)) => match state.side {
+                                    HandleSide::In => {
+                                        mirror_handle(keyframe.value, value, incoming, outgoing)
+                                    }
+                                    HandleSide::Out => {
+                                        mirror_handle(keyframe.value, value, outgoing, incoming)
+                                    }
+                                },
+                                None => mirror_handle(keyframe.value, value, 1.0, 1.0),
+                            };
+                            match state.side {
+                                HandleSide::In => keyframe.handle_out = Some(mirrored),
+                                HandleSide::Out => keyframe.handle_in = Some(mirrored),
+                            }
+                        }
+                    }
+                } else {
+                    clear_drag = true;
+                }
+            }
+            Some(Drag::Marquee(state)) => {
+                if left_held {
+                    state.current = local;
+                    let min = state.start.min(state.current);
+                    let max = state.start.max(state.current);
+                    let mut hits = state.baseline.clone();
+                    if let Some(animation) = selected_animation(&editor) {
+                        for (index, keyframe) in animation.keyframes.iter().enumerate() {
+                            let position = keyframe_position(&view, keyframe);
+                            if position.x >= min.x
+                                && position.x <= max.x
+                                && position.y >= min.y
+                                && position.y <= max.y
+                                && !hits.contains(&index)
+                            {
+                                hits.push(index);
+                            }
+                        }
+                    }
+                    hits.sort_unstable();
+                    *selected = hits;
+                } else {
+                    clear_drag = true;
+                }
+            }
+            None => {}
         }
-    } else if let Some(last) = *left_drag {
-        if mouse.pressed(MouseButton::Left) {
-            view.pan(local - last);
-            *left_drag = Some(local);
-        } else {
-            *left_drag = None;
+
+        if moved_keyframes {
+            *last_keyframe_press = None;
+        }
+        if clear_drag {
+            *drag = None;
         }
     }
 
     if mouse.just_pressed(MouseButton::Right) && over {
-        *right_drag = Some(local);
+        edit.right_drag = Some(local);
     }
-    if let Some(last) = *right_drag {
+    if let Some(last) = edit.right_drag {
         if mouse.pressed(MouseButton::Right) {
             // Horizontal dragging zooms the time axis and vertical dragging
             // the value axis: right or up zooms in, left or down zooms out.
@@ -475,9 +1385,9 @@ fn handle_timeline_input(
             let time_factor = (delta.x * 0.005).exp();
             let value_factor = (-delta.y * 0.005).exp();
             view.zoom_axes_at(local, time_factor, value_factor);
-            *right_drag = Some(local);
+            edit.right_drag = Some(local);
         } else {
-            *right_drag = None;
+            edit.right_drag = None;
         }
     }
 }
@@ -486,6 +1396,7 @@ fn draw_timeline(
     mode: Res<EditorMode>,
     editor: Res<EditorState>,
     view: Res<TimelineView>,
+    edit: Res<TimelineEdit>,
     mut area: Query<(&ComputedNode, &mut UiVelloScene), With<TimelineArea>>,
 ) {
     let Ok((node, mut component)) = area.single_mut() else {
@@ -500,6 +1411,7 @@ fn draw_timeline(
             &view,
             size,
             editor.playhead,
+            &edit,
         );
     }
     *component = UiVelloScene::from(scene);
@@ -511,6 +1423,7 @@ fn draw_frame(
     view: &TimelineView,
     size: Vec2,
     playhead: f32,
+    edit: &TimelineEdit,
 ) {
     // The panel and track backgrounds live in the scene because Bevy UI is
     // composited over Vello UI scenes.
@@ -534,6 +1447,16 @@ fn draw_frame(
     if let Some(animation) = animation {
         let area = content_size(size);
         let duration = animation.duration.max(0.0);
+        let selected: Vec<&Keyframe> = edit
+            .selected
+            .iter()
+            .filter_map(|&index| animation.keyframes.get(index))
+            .collect();
+        let selected_handles: Vec<(&Keyframe, HandleSide)> = edit
+            .selected_handles
+            .iter()
+            .filter_map(|&(index, side)| animation.keyframes.get(index).map(|key| (key, side)))
+            .collect();
         draw_grid(scene, view, area);
 
         let groups = curve_groups(animation);
@@ -541,16 +1464,37 @@ fn draw_frame(
             let color = CHANNEL_COLORS[index % CHANNEL_COLORS.len()];
             if animation.cyclic && duration > 0.0 {
                 for cycle in visible_cycles(view, area, duration) {
-                    draw_group(scene, group, Some(duration), cycle, color, view);
+                    draw_group(
+                        scene,
+                        group,
+                        Some(duration),
+                        cycle,
+                        color,
+                        view,
+                        &selected,
+                        &selected_handles,
+                    );
                 }
             } else {
-                draw_group(scene, group, None, 0, color, view);
+                draw_group(
+                    scene,
+                    group,
+                    None,
+                    0,
+                    color,
+                    view,
+                    &selected,
+                    &selected_handles,
+                );
             }
         }
 
         // Mute the time outside the animation, then mark the playhead on top.
         draw_disabled_spans(scene, view, size, duration);
         draw_playhead(scene, view, size, clamp_playhead(playhead, duration));
+        if let Some(Drag::Marquee(marquee)) = &edit.drag {
+            draw_marquee(scene, marquee);
+        }
     }
 
     scene.pop_layer();
@@ -734,6 +1678,27 @@ fn draw_playhead(scene: &mut Scene, view: &TimelineView, size: Vec2, playhead: f
     );
 }
 
+/// Draws the box-selection rectangle. The stored corners are track-local, so
+/// the track inset is added when they reach the scene.
+fn draw_marquee(scene: &mut Scene, marquee: &MarqueeDrag) {
+    let min = marquee.start.min(marquee.current);
+    let max = marquee.start.max(marquee.current);
+    let rect = Rect::new(
+        TRACK_INSET + f64::from(min.x),
+        f64::from(min.y),
+        TRACK_INSET + f64::from(max.x),
+        f64::from(max.y),
+    );
+    scene.fill(Fill::NonZero, Affine::IDENTITY, MARQUEE_FILL, None, &rect);
+    scene.stroke(
+        &Stroke::new(1.0),
+        Affine::IDENTITY,
+        MARQUEE_STROKE,
+        None,
+        &rect,
+    );
+}
+
 /// Clamps a playhead time to the animation's `0..=duration` range.
 fn clamp_playhead(time: f32, duration: f32) -> f32 {
     let time = if time.is_finite() { time } else { 0.0 };
@@ -783,6 +1748,7 @@ fn visible_cycles(view: &TimelineView, size: Vec2, duration: f32) -> std::ops::R
 }
 
 /// Draws one period (or the single non-cyclic curve) of a target's keyframes.
+#[allow(clippy::too_many_arguments)]
 fn draw_group(
     scene: &mut Scene,
     group: &[&Keyframe],
@@ -790,6 +1756,8 @@ fn draw_group(
     cycle: i64,
     color: Color,
     view: &TimelineView,
+    selected: &[&Keyframe],
+    selected_handles: &[(&Keyframe, HandleSide)],
 ) {
     let Some(first) = group.first() else {
         return;
@@ -841,8 +1809,23 @@ fn draw_group(
         } else {
             period.map(|period| f64::from(first.timestamp) + f64::from(period) + base)
         };
+        let handle_selected = |side: HandleSide| {
+            selected_handles.iter().any(|(candidate, candidate_side)| {
+                *candidate_side == side && std::ptr::eq(*candidate, *keyframe)
+            })
+        };
+
         if let (Some(handle), Some(next)) = (keyframe.handle_out, next_time) {
-            draw_handle(scene, view, time, value, next, f64::from(handle), true);
+            draw_handle(
+                scene,
+                view,
+                time,
+                value,
+                next,
+                f64::from(handle),
+                true,
+                handle_selected(HandleSide::Out),
+            );
         }
 
         let previous_time = if index > 0 {
@@ -851,10 +1834,31 @@ fn draw_group(
             period.map(|period| f64::from(group[count - 1].timestamp) - f64::from(period) + base)
         };
         if let (Some(handle), Some(previous)) = (keyframe.handle_in, previous_time) {
-            draw_handle(scene, view, time, value, previous, f64::from(handle), false);
+            draw_handle(
+                scene,
+                view,
+                time,
+                value,
+                previous,
+                f64::from(handle),
+                false,
+                handle_selected(HandleSide::In),
+            );
         }
 
         let center = view.point(time, value);
+        if selected
+            .iter()
+            .any(|candidate| std::ptr::eq(*candidate, *keyframe))
+        {
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                SELECTED_RING,
+                None,
+                &Circle::new(center, KEYFRAME_RADIUS + 3.0),
+            );
+        }
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
@@ -911,6 +1915,7 @@ fn draw_segment(
 
 /// Draws a handle point a third of the way from `time` toward `neighbour`, and
 /// a faint arm joining it to the keyframe.
+#[allow(clippy::too_many_arguments)]
 fn draw_handle(
     scene: &mut Scene,
     view: &TimelineView,
@@ -919,6 +1924,7 @@ fn draw_handle(
     neighbour: f64,
     handle_value: f64,
     ahead: bool,
+    selected: bool,
 ) {
     let span = (neighbour - time).abs();
     let handle_time = if ahead {
@@ -935,6 +1941,15 @@ fn draw_handle(
         None,
         &arm,
     );
+    if selected {
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            SELECTED_RING,
+            None,
+            &Circle::new(center, HANDLE_RADIUS + 2.5),
+        );
+    }
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -969,7 +1984,7 @@ fn value_bounds(animation: &Animation) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BoneProperty, Keyframe, KeyframeTarget};
+    use crate::model::{BoneProperty, Document, FORMAT_VERSION, Keyframe, KeyframeTarget};
 
     fn target(bone: &str, property: BoneProperty) -> KeyframeTarget {
         KeyframeTarget::Bone {
@@ -1148,5 +2163,291 @@ mod tests {
         // A zero-length animation pins the playhead to the start.
         assert_eq!(clamp_playhead(3.0, 0.0), 0.0);
         assert_eq!(clamp_playhead(f32::NAN, 5.0), 0.0);
+    }
+
+    #[test]
+    fn drag_axis_is_the_most_aligned_cardinal_direction() {
+        assert_eq!(dominant_axis(Vec2::new(1.0, 0.0), 3.0), None);
+        assert_eq!(
+            dominant_axis(Vec2::new(10.0, 2.0), 3.0),
+            Some(DragAxis::Time)
+        );
+        assert_eq!(
+            dominant_axis(Vec2::new(2.0, -10.0), 3.0),
+            Some(DragAxis::Value)
+        );
+        // Ties go to time.
+        assert_eq!(
+            dominant_axis(Vec2::new(5.0, 5.0), 3.0),
+            Some(DragAxis::Time)
+        );
+    }
+
+    #[test]
+    fn keyframe_hit_testing_finds_the_nearest_point() {
+        let animation = animation_with(&[0.0, 1.0, 2.0], &[0.0, 10.0, 20.0], 2.0);
+        let view = fitted(&animation, Vec2::new(400.0, 200.0));
+        let size = content_size(Vec2::new(400.0, 200.0));
+        let position = keyframe_position(&view, &animation.keyframes[1]);
+
+        assert_eq!(keyframe_under(&animation, &view, size, position), Some(1));
+        assert_eq!(
+            keyframe_under(&animation, &view, size, position + Vec2::splat(100.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_handles_sit_a_third_toward_their_neighbour() {
+        let mut animation = animation_with(&[0.0, 3.0], &[0.0, 30.0], 3.0);
+        animation.keyframes[0].handle_out = Some(15.0);
+        animation.keyframes[1].handle_in = Some(20.0);
+        let view = fitted(&animation, Vec2::new(300.0, 200.0));
+
+        let position = handle_position(&animation, &view, 0, HandleSide::Out, 0.0).unwrap();
+        let expected = Vec2::new(view.screen_x(1.0) as f32, view.screen_y(15.0) as f32);
+        assert!((position - expected).length() < 0.01);
+        assert_eq!(
+            handle_under(
+                &animation,
+                &view,
+                content_size(Vec2::new(300.0, 200.0)),
+                position
+            ),
+            Some((0, HandleSide::Out))
+        );
+
+        // Omitted handles have no position and cannot be grabbed.
+        assert!(handle_position(&animation, &view, 0, HandleSide::In, 0.0).is_none());
+    }
+
+    #[test]
+    fn cyclic_handles_wrap_across_the_seam() {
+        let mut animation = animation_with(&[0.5, 1.5], &[0.0, 100.0], 2.0);
+        animation.cyclic = true;
+        animation.keyframes[0].handle_in = Some(10.0);
+        animation.keyframes[1].handle_out = Some(90.0);
+        let view = fitted(&animation, Vec2::new(400.0, 200.0));
+
+        // The first keyframe's incoming handle looks back into the previous
+        // period, and the last keyframe's outgoing handle forward into the
+        // next one.
+        let incoming = handle_position(&animation, &view, 0, HandleSide::In, 0.0).unwrap();
+        let outgoing = handle_position(&animation, &view, 1, HandleSide::Out, 0.0).unwrap();
+        assert!((incoming.x - view.screen_x(0.5 - 1.0 / 3.0) as f32).abs() < 0.01);
+        assert!((outgoing.x - view.screen_x(1.5 + 1.0 / 3.0) as f32).abs() < 0.01);
+    }
+
+    #[test]
+    fn time_drags_stop_at_neighbouring_keyframes() {
+        let animation = animation_with(&[0.0, 1.0, 2.0, 3.0], &[0.0, 1.0, 2.0, 3.0], 4.0);
+
+        // A lone keyframe can move until it meets a same-curve neighbour.
+        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[1]);
+        assert!((min_dt - -1.0).abs() < 1e-6);
+        assert!((max_dt - 1.0).abs() < 1e-6);
+
+        // Neighbours that move together only stop at the surrounding pairs.
+        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[1, 2]);
+        assert!((min_dt - -1.0).abs() < 1e-6);
+        assert!((max_dt - 1.0).abs() < 1e-6);
+
+        // A whole curve still has to stay inside the animation.
+        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[0, 1, 2, 3]);
+        assert_eq!((min_dt, max_dt), (0.0, 1.0));
+    }
+
+    #[test]
+    fn different_curves_do_not_constrain_each_other() {
+        let mut animation = Animation::new(10.0);
+        animation.insert_keyframe(Keyframe::new(1.0, 0.0, target("Arm", BoneProperty::X)));
+        animation.insert_keyframe(Keyframe::new(2.0, 0.0, target("Arm", BoneProperty::Y)));
+
+        // The Arm X keyframe may slide past the Arm Y keyframe.
+        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[0]);
+        assert_eq!((min_dt, max_dt), (-1.0, 9.0));
+    }
+
+    fn document_with(animation: Animation) -> Document {
+        Document {
+            version: FORMAT_VERSION,
+            shapes: Vec::new(),
+            bones: Vec::new(),
+            animations: vec![animation],
+        }
+    }
+
+    #[test]
+    fn delete_removes_selected_handles_and_keyframes() {
+        let mut animation = animation_with(&[0.0, 1.0, 2.0], &[0.0, 10.0, 20.0], 2.0);
+        animation.keyframes[1].handle_out = Some(15.0);
+        let mut editor = EditorState::new(document_with(animation));
+        editor.selected_animation = Some(0);
+
+        let mut edit = TimelineEdit {
+            animation: Some(0),
+            selected: vec![0, 2],
+            selected_handles: vec![(1, HandleSide::Out)],
+            ..default()
+        };
+
+        delete_selection(&mut editor, &mut edit);
+
+        let animation = &editor.document.animations[0];
+        // Only the unselected middle keyframe survives.
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].timestamp, 1.0);
+        // Its selected handle was cleared as well.
+        assert_eq!(animation.keyframes[0].handle_out, None);
+        assert!(!edit.has_selection());
+    }
+
+    #[test]
+    fn symmetric_handles_mirror_across_the_keyframe_value() {
+        // With equally spaced neighbours the offset is simply reflected.
+        assert_eq!(mirror_handle(10.0, 14.0, 1.0, 1.0), 6.0);
+        assert_eq!(mirror_handle(10.0, 6.0, 1.0, 1.0), 14.0);
+        // A flat handle stays flat.
+        assert_eq!(mirror_handle(10.0, 10.0, 1.0, 1.0), 10.0);
+    }
+
+    #[test]
+    fn symmetric_handles_match_slopes_across_uneven_spans() {
+        let value = 0.7;
+        let incoming = 0.3;
+        let gap_in = 0.4;
+        let gap_out = 1.3;
+
+        let outgoing = mirror_handle(value, incoming, gap_in, gap_out);
+
+        // The value slope per second is the same on both sides of the pivot.
+        let left_slope = (value - incoming) / gap_in;
+        let right_slope = (outgoing - value) / gap_out;
+        assert!((left_slope - right_slope).abs() < 1e-5);
+    }
+
+    #[test]
+    fn adjacent_spans_measure_the_surrounding_segments() {
+        let animation = animation_with(&[0.0, 1.0, 3.0], &[0.0, 1.0, 2.0], 3.0);
+        // The middle keyframe has a one-second incoming and two-second
+        // outgoing segment.
+        assert_eq!(adjacent_spans(&animation, 1), Some((1.0, 2.0)));
+
+        // Cyclic endpoints wrap across the seam.
+        let mut cyclic = animation_with(&[1.0, 2.0, 3.0], &[0.0, 1.0, 2.0], 4.0);
+        cyclic.cyclic = true;
+        assert_eq!(adjacent_spans(&cyclic, 0), Some((2.0, 1.0)));
+        assert_eq!(adjacent_spans(&cyclic, 2), Some((1.0, 2.0)));
+
+        // Non-cyclic endpoints have no opposite segment.
+        let open = animation_with(&[1.0, 2.0], &[0.0, 1.0], 2.0);
+        assert_eq!(adjacent_spans(&open, 0), None);
+        assert_eq!(adjacent_spans(&open, 1), None);
+    }
+
+    #[test]
+    fn shift_drag_side_follows_the_horizontal_direction() {
+        // Movement below the commit threshold does not choose a side.
+        assert_eq!(handle_side_toward(1.0), None);
+        assert_eq!(handle_side_toward(10.0), Some(HandleSide::Out));
+        assert_eq!(handle_side_toward(-10.0), Some(HandleSide::In));
+    }
+
+    #[test]
+    fn double_clicks_repeat_a_recent_press_on_the_same_keyframe() {
+        let last = Some((10.0, 3, Vec2::new(40.0, 20.0)));
+        // A second press soon after, on the same keyframe and spot, counts.
+        assert!(repeats_press(last, 10.2, 3, Vec2::new(41.0, 21.0)));
+        // Too late, a different keyframe, or too far away does not.
+        assert!(!repeats_press(last, 10.6, 3, Vec2::new(40.0, 20.0)));
+        assert!(!repeats_press(last, 10.2, 4, Vec2::new(40.0, 20.0)));
+        assert!(!repeats_press(last, 10.2, 3, Vec2::new(60.0, 20.0)));
+        // Without a previous press there is nothing to repeat.
+        assert!(!repeats_press(None, 10.2, 3, Vec2::new(40.0, 20.0)));
+    }
+
+    #[test]
+    fn value_drags_carry_handles_along() {
+        let mut keyframe = Keyframe::new(1.0, 10.0, target("Arm", BoneProperty::X));
+        keyframe.handle_in = Some(8.0);
+        keyframe.handle_out = Some(12.0);
+
+        move_keyframe_value(&mut keyframe, 10.0, Some(8.0), Some(12.0), 5.0);
+
+        assert_eq!(keyframe.value, 15.0);
+        assert_eq!(keyframe.handle_in, Some(13.0));
+        assert_eq!(keyframe.handle_out, Some(17.0));
+        // A value drag leaves the keyframe's time alone.
+        assert_eq!(keyframe.timestamp, 1.0);
+    }
+
+    #[test]
+    fn value_drags_leave_omitted_handles_omitted() {
+        let mut keyframe = Keyframe::new(1.0, 10.0, target("Arm", BoneProperty::X));
+
+        move_keyframe_value(&mut keyframe, 10.0, None, None, -2.0);
+
+        assert_eq!(keyframe.value, 8.0);
+        assert_eq!(keyframe.handle_in, None);
+        assert_eq!(keyframe.handle_out, None);
+    }
+
+    #[test]
+    fn aligning_merges_same_curve_keyframes_at_the_target_time() {
+        let mut animation = Animation::new(4.0);
+        let x = target("Arm", BoneProperty::X);
+        animation.insert_keyframe(Keyframe::new(1.0, 0.0, x.clone()));
+        animation.insert_keyframe(Keyframe::new(1.4, 1.0, x.clone()));
+        animation.insert_keyframe(Keyframe::new(2.5, 2.0, target("Arm", BoneProperty::Y)));
+        animation.insert_keyframe(Keyframe::new(3.5, 3.0, x.clone()));
+
+        // Align the two Arm X points and the Arm Y point to t = 1, anchored on
+        // the second Arm X point.
+        let selected = align_selection(&mut animation, &[0, 1, 2], 1.0, 1);
+
+        // One Arm X point and one Arm Y point survive.
+        assert_eq!(selected.len(), 2);
+        assert_eq!(animation.keyframes.len(), 3);
+        let values: Vec<f32> = selected
+            .iter()
+            .map(|&index| animation.keyframes[index].value)
+            .collect();
+        // The anchor (value 1) and the Arm Y point (value 2) survive; the
+        // other Arm X point was merged away.
+        assert!(values.contains(&1.0));
+        assert!(values.contains(&2.0));
+        // The unselected keyframe kept its time, and the list stays sorted.
+        assert_eq!(animation.keyframes[0].timestamp, 1.0);
+        assert_eq!(animation.keyframes[1].timestamp, 1.0);
+        assert_eq!(animation.keyframes[2].timestamp, 3.5);
+        assert_eq!(animation.keyframes[2].value, 3.0);
+    }
+
+    #[test]
+    fn alignment_keeps_the_keyframe_nearest_the_target_on_other_curves() {
+        let mut animation = Animation::new(6.0);
+        let x = target("Arm", BoneProperty::X);
+        let y = target("Arm", BoneProperty::Y);
+        animation.insert_keyframe(Keyframe::new(0.0, 0.0, x.clone()));
+        animation.insert_keyframe(Keyframe::new(1.2, 1.0, y.clone()));
+        animation.insert_keyframe(Keyframe::new(2.6, 2.0, y.clone()));
+        animation.insert_keyframe(Keyframe::new(3.0, 3.0, x.clone()));
+
+        // Align to the Arm X point at t = 3. Of the two Arm Y points, the one
+        // at t = 2.6 was closer to the target than the one at t = 1.2.
+        let selected = align_selection(&mut animation, &[0, 1, 2, 3], 3.0, 3);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(animation.keyframes.len(), 2);
+        let values: Vec<f32> = selected
+            .iter()
+            .map(|&index| animation.keyframes[index].value)
+            .collect();
+        assert!(values.contains(&2.0));
+        assert!(values.contains(&3.0));
+        assert!(!values.contains(&1.0));
+        for keyframe in &animation.keyframes {
+            assert_eq!(keyframe.timestamp, 3.0);
+        }
     }
 }

@@ -18,6 +18,7 @@ use crate::animate::{
 use crate::animate_panel::DurationEdit;
 use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH};
 use crate::theme;
+use crate::timeline::{TimelineEdit, TimelineInput};
 
 /// Longest gap between two presses that still counts as a double-click, in
 /// seconds.
@@ -35,7 +36,7 @@ impl Plugin for AnimateSidebarPlugin {
             (
                 handle_row_press,
                 handle_rename_input,
-                handle_delete_key,
+                handle_delete_key.before(TimelineInput),
                 handle_add,
                 commit_on_empty_press,
                 rebuild_list,
@@ -257,17 +258,20 @@ fn handle_rename_input(
 /// Removes the selected animation when `Delete` is pressed.
 ///
 /// Nothing is deleted while a name or the duration field is being edited, so
-/// the key belongs to whichever text field has the keyboard.
+/// the key belongs to whichever text field has the keyboard. A timeline
+/// selection also claims the key, deleting its keyframes or handles instead of
+/// the whole animation.
 fn handle_delete_key(
     mode: Res<EditorMode>,
     keys: Res<ButtonInput<KeyCode>>,
     mut editor: ResMut<EditorState>,
     duration_edit: Res<DurationEdit>,
+    timeline: Res<TimelineEdit>,
 ) {
     if *mode != EditorMode::Animate || !keys.just_pressed(KeyCode::Delete) {
         return;
     }
-    if editor.is_renaming() || duration_edit.is_editing() {
+    if editor.is_renaming() || duration_edit.is_editing() || timeline.has_selection() {
         return;
     }
     delete_selected_animation(&mut editor);

@@ -32,8 +32,9 @@ pub const SIDEBAR_WIDTH: f32 = 260.0;
 
 /// Height of the style panel along the bottom, in screen pixels.
 ///
-/// The document is fitted into the remaining area above it.
-pub const BOTTOM_BAR_HEIGHT: f32 = 200.0;
+/// The document is fitted into the remaining area above it. All three modes
+/// share this height so switching modes does not resize the canvas.
+pub const BOTTOM_BAR_HEIGHT: f32 = 320.0;
 
 /// Width of the tool palette along the left, in screen pixels.
 ///
