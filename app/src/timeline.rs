@@ -45,7 +45,7 @@ use bevy_vello::vello::{
 };
 
 use crate::animate::{curve_groups, effective_handle_in, effective_handle_out, selected_animation};
-use crate::animate_panel::DurationEdit;
+use crate::animate_panel::{DurationEdit, SpeedEdit};
 use crate::editor::{EditorMode, EditorState};
 use crate::model::{Animation, Keyframe, KeyframeTarget};
 use crate::rig::bone_name_at;
@@ -987,6 +987,7 @@ fn handle_timeline_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     duration_edit: Res<DurationEdit>,
+    speed_edit: Res<SpeedEdit>,
     time: Res<Time>,
     mut wheel: MessageReader<MouseWheel>,
     area: Query<(&RelativeCursorPosition, &ComputedNode), With<TimelineArea>>,
@@ -1026,7 +1027,11 @@ fn handle_timeline_input(
     // `Delete` removes the timeline selection even when the pointer is no
     // longer over the track. The animation list checks `has_selection` and
     // runs first, so it does not delete the whole animation at the same time.
-    if keys.just_pressed(KeyCode::Delete) && !duration_edit.is_editing() && !editor.is_renaming() {
+    if keys.just_pressed(KeyCode::Delete)
+        && !duration_edit.is_editing()
+        && !speed_edit.is_editing()
+        && !editor.is_renaming()
+    {
         delete_selection(&mut editor, &mut edit);
     }
 

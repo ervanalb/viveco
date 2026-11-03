@@ -119,6 +119,20 @@ pub enum Tool {
 #[derive(Resource, Default)]
 pub struct ToolState(pub Tool);
 
+/// Whether animate mode draws the skeleton over the artwork.
+///
+/// Rig mode always shows its bones; this only controls the animate page, where
+/// the skeleton is an optional aid rather than the thing being edited. The
+/// playback row toggles it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShowBones(pub bool);
+
+impl Default for ShowBones {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// Bounds of the loaded document, used to fit it to the window.
 ///
 /// Kept fixed for the session so that dragging a point does not rescale the
@@ -486,6 +500,7 @@ impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ToolState>()
             .init_resource::<Viewport>()
+            .init_resource::<ShowBones>()
             .init_resource::<EditorMode>()
             .add_systems(
                 Update,
@@ -1022,6 +1037,7 @@ fn refresh_scene(
     mode: Res<EditorMode>,
     tool: Res<ToolState>,
     brush: Res<crate::weight_paint::WeightPaintBrush>,
+    show_bones: Res<ShowBones>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut scenes: Query<&mut VelloScene2d, With<DocumentScene>>,
 ) {
@@ -1108,7 +1124,7 @@ fn refresh_scene(
                 &mut scene, displayed, selected, &brush, scale, cursor,
             );
         }
-    } else if *mode == EditorMode::Animate {
+    } else if *mode == EditorMode::Animate && show_bones.0 {
         // The animate page shows the same skeleton as the rig page, posed by
         // the animation at the playhead. With no animation selected it rests.
         let rest = crate::pose::Pose::default();

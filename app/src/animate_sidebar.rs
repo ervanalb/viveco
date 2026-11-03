@@ -15,7 +15,7 @@ use crate::animate::{
     add_animation, animation_label, begin_animation_rename, cancel_animation_rename,
     commit_animation_rename, delete_selected_animation,
 };
-use crate::animate_panel::DurationEdit;
+use crate::animate_panel::{DurationEdit, SpeedEdit};
 use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH};
 use crate::theme;
 use crate::timeline::{TimelineEdit, TimelineInput};
@@ -160,6 +160,7 @@ fn handle_row_press(
     rows: Query<(&Interaction, &AnimationRow), Changed<Interaction>>,
     mut editor: ResMut<EditorState>,
     mut duration_edit: ResMut<DurationEdit>,
+    mut speed_edit: ResMut<SpeedEdit>,
     mut last_click: Local<Option<(f64, Vec2, usize)>>,
 ) {
     if *mode != EditorMode::Animate || !mouse.just_pressed(MouseButton::Left) {
@@ -196,8 +197,9 @@ fn handle_row_press(
 
         if double_click {
             *last_click = None;
-            // The text field and the rename cannot both own the keyboard.
+            // The text fields and the rename cannot both own the keyboard.
             duration_edit.cancel();
+            speed_edit.cancel();
             begin_animation_rename(&mut editor, index);
             return;
         }
@@ -266,12 +268,17 @@ fn handle_delete_key(
     keys: Res<ButtonInput<KeyCode>>,
     mut editor: ResMut<EditorState>,
     duration_edit: Res<DurationEdit>,
+    speed_edit: Res<SpeedEdit>,
     timeline: Res<TimelineEdit>,
 ) {
     if *mode != EditorMode::Animate || !keys.just_pressed(KeyCode::Delete) {
         return;
     }
-    if editor.is_renaming() || duration_edit.is_editing() || timeline.has_selection() {
+    if editor.is_renaming()
+        || duration_edit.is_editing()
+        || speed_edit.is_editing()
+        || timeline.has_selection()
+    {
         return;
     }
     delete_selected_animation(&mut editor);
@@ -283,6 +290,7 @@ fn handle_add(
     buttons: Query<&Interaction, (Changed<Interaction>, With<AddAnimationButton>)>,
     mut editor: ResMut<EditorState>,
     mut duration_edit: ResMut<DurationEdit>,
+    mut speed_edit: ResMut<SpeedEdit>,
 ) {
     if *mode != EditorMode::Animate {
         return;
@@ -292,6 +300,7 @@ fn handle_add(
     }
     commit_animation_rename(&mut editor);
     duration_edit.cancel();
+    speed_edit.cancel();
     add_animation(&mut editor);
 }
 

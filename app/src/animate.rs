@@ -209,6 +209,40 @@ pub(crate) fn set_bone_keyframe(
     animation.insert_keyframe(Keyframe::new(time, value, target));
 }
 
+/// Advances the playhead by one frame of playback.
+///
+/// Returns the new time and whether playback should continue. A cyclic
+/// animation wraps around either end; otherwise playback stops on reaching the
+/// end, or the start when the velocity is negative. An animation with no
+/// duration cannot play.
+pub fn advance_playhead(
+    playhead: f32,
+    velocity: f32,
+    delta: f32,
+    duration: f32,
+    cyclic: bool,
+) -> (f32, bool) {
+    let playhead = if playhead.is_finite() { playhead } else { 0.0 };
+    if !duration.is_finite() || duration <= 0.0 {
+        return (0.0, false);
+    }
+    if !velocity.is_finite() || !delta.is_finite() || velocity == 0.0 {
+        return (playhead.clamp(0.0, duration), true);
+    }
+
+    let next = playhead + velocity * delta;
+    if cyclic {
+        return (next.rem_euclid(duration), true);
+    }
+    if next <= 0.0 {
+        (0.0, false)
+    } else if next >= duration {
+        (duration, false)
+    } else {
+        (next, true)
+    }
+}
+
 /// Clamps a playhead time to the animation's `0..=duration` range.
 fn clamped_time(animation: &Animation, time: f32) -> f32 {
     let time = if time.is_finite() { time } else { 0.0 };
@@ -686,6 +720,45 @@ mod tests {
 
         assert_eq!(animation.keyframes.len(), 1);
         assert_eq!(animation.keyframes[0].timestamp, 2.0);
+    }
+
+    #[test]
+    fn cyclic_playback_wraps_around_the_end() {
+        let (time, playing) = advance_playhead(1.9, 1.0, 0.2, 2.0, true);
+        assert!((time - 0.1).abs() < 1e-5);
+        assert!(playing);
+
+        // Negative velocity wraps around the start too.
+        let (time, playing) = advance_playhead(0.1, -1.0, 0.2, 2.0, true);
+        assert!((time - 1.9).abs() < 1e-5);
+        assert!(playing);
+    }
+
+    #[test]
+    fn non_cyclic_playback_stops_at_either_end() {
+        assert_eq!(advance_playhead(1.9, 1.0, 0.2, 2.0, false), (2.0, false));
+        assert_eq!(advance_playhead(0.1, -1.0, 0.2, 2.0, false), (0.0, false));
+
+        // Before the end the playhead keeps moving.
+        let (time, playing) = advance_playhead(1.0, 1.0, 0.2, 2.0, false);
+        assert!((time - 1.2).abs() < 1e-5);
+        assert!(playing);
+    }
+
+    #[test]
+    fn playback_without_a_duration_stops_immediately() {
+        assert_eq!(advance_playhead(1.0, 1.0, 0.1, 0.0, true), (0.0, false));
+        assert_eq!(
+            advance_playhead(1.0, 1.0, 0.1, f32::NAN, false),
+            (0.0, false)
+        );
+    }
+
+    #[test]
+    fn zero_velocity_holds_the_playhead() {
+        let (time, playing) = advance_playhead(0.75, 0.0, 0.1, 2.0, true);
+        assert_eq!(time, 0.75);
+        assert!(playing);
     }
 
     #[test]
