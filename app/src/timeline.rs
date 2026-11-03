@@ -28,6 +28,10 @@
 //! pointer moves toward, and shift-dragging an existing handle places the
 //! opposite handle on the same tangent, scaling for the different time spans
 //! of the two neighbouring segments, so the curve stays smooth through it.
+//!
+//! Selecting a bone focuses the view on its curves: curves for other bones are
+//! dimmed, and the value axis refits to the selected bone's value range while
+//! the time axis keeps its current pan and zoom.
 
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::Color as BevyColor;
@@ -43,7 +47,8 @@ use bevy_vello::vello::{
 use crate::animate::{curve_groups, effective_handle_in, effective_handle_out, selected_animation};
 use crate::animate_panel::DurationEdit;
 use crate::editor::{EditorMode, EditorState};
-use crate::model::{Animation, Keyframe};
+use crate::model::{Animation, Keyframe, KeyframeTarget};
+use crate::rig::bone_name_at;
 use crate::theme;
 
 /// Amount one wheel notch multiplies the zoom by.
@@ -90,6 +95,12 @@ const DISABLED_SCRIM: Color = Color::from_rgba8(0x0d, 0x10, 0x16, 0xa0);
 const SELECTED_RING: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xcc);
 const MARQUEE_FILL: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x24);
 const MARQUEE_STROKE: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xb0);
+
+/// Colors for curves that belong to bones other than the selected one, when
+/// the timeline is focused on a bone.
+const DIMMED_CURVE: Color = Color::from_rgba8(0x6b, 0x73, 0x7d, 0x80);
+const DIMMED_HANDLE_ARM: Color = Color::from_rgba8(0xff, 0xff, 0xff, 0x20);
+const DIMMED_HANDLE_FILL: Color = Color::from_rgba8(0x8b, 0x93, 0xa1, 0x88);
 
 const PLAYHEAD_COLOR: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xff);
 const PLAYHEAD_OUTLINE: Color = Color::from_rgba8(0x0b, 0x2a, 0x40, 0xff);
@@ -340,7 +351,10 @@ struct TimelineView {
     time_per_pixel: f32,
     value0: f32,
     value_per_pixel: f32,
+    /// What the last framing of the time axis was computed for.
     fitted: Option<FitKey>,
+    /// What the last fit of the value axis was computed for.
+    fitted_values: Option<ValueFitKey>,
 }
 
 impl Default for TimelineView {
@@ -351,6 +365,7 @@ impl Default for TimelineView {
             value0: 1.0,
             value_per_pixel: 0.01,
             fitted: None,
+            fitted_values: None,
         }
     }
 }
@@ -380,8 +395,9 @@ impl TimelineView {
         (self.time_at(0.0), self.time_at(size.x.max(0.0)))
     }
 
-    /// Frames the animation's duration and values with a small margin.
-    fn fit(&mut self, animation: &Animation, size: Vec2) {
+    /// Frames the animation's duration and values with a small margin,
+    /// optionally limiting the value range to one bone's curves.
+    fn fit(&mut self, animation: &Animation, size: Vec2, bone: Option<&str>) {
         if size.x <= 0.0 || size.y <= 0.0 {
             return;
         }
@@ -403,7 +419,15 @@ impl TimelineView {
         self.time_per_pixel = ((span_end - span_start + 2.0 * time_pad) / size.x)
             .clamp(MIN_TIME_PER_PIXEL, MAX_TIME_PER_PIXEL);
 
-        let (mut low, mut high) = value_bounds(animation);
+        self.fit_value(animation, size, bone);
+    }
+
+    /// Frames only the value axis, leaving the time axis untouched.
+    fn fit_value(&mut self, animation: &Animation, size: Vec2, bone: Option<&str>) {
+        if size.y <= 0.0 {
+            return;
+        }
+        let (mut low, mut high) = value_bounds(animation, bone);
         if (high - low).abs() < f32::EPSILON {
             low -= 0.5;
             high += 0.5;
@@ -446,17 +470,55 @@ impl TimelineView {
     }
 }
 
-/// What the current framing was computed for. Re-fitting only when this
-/// changes keeps manual panning and zooming intact.
+/// What the current time-axis framing was computed for. Re-fitting only when
+/// this changes keeps manual panning and zooming intact.
 #[derive(Clone, Copy, PartialEq)]
 struct FitKey {
     selected: Option<usize>,
     duration: f32,
     cyclic: bool,
-    keyframes: usize,
     width: f32,
     height: f32,
     scale: f32,
+}
+
+/// What the current value-axis fit was computed for.
+///
+/// The value axis depends on the focused bone as well as the curves, so it is
+/// tracked separately: selecting a bone refits the values without touching the
+/// time axis.
+#[derive(Clone, PartialEq)]
+struct ValueFitKey {
+    /// The focused bone, if any.
+    bone: Option<String>,
+    /// Number of keyframes whose values the fit covers.
+    keyframes: usize,
+}
+
+/// The name of the selected bone, when it still resolves to a named bone.
+///
+/// The timeline focuses on this bone's curves, dimming the rest.
+fn selected_bone_name(editor: &EditorState) -> Option<&str> {
+    editor
+        .selected_bone
+        .as_ref()
+        .and_then(|address| bone_name_at(&editor.document, address))
+        .filter(|name| !name.is_empty())
+}
+
+/// The bone a keyframe drives, if it drives a bone at all.
+fn keyframe_bone(keyframe: &Keyframe) -> Option<&str> {
+    match &keyframe.target {
+        KeyframeTarget::Bone { bone, .. } => Some(bone),
+        KeyframeTarget::Shape { .. } => None,
+    }
+}
+
+/// Whether a grouped curve drives `bone`.
+fn group_is_bone(group: &[&Keyframe], bone: &str) -> bool {
+    group
+        .first()
+        .is_some_and(|keyframe| keyframe_bone(keyframe) == Some(bone))
 }
 
 /// Logical size of a UI node. `ComputedNode` sizes are in physical pixels;
@@ -498,22 +560,40 @@ fn fit_timeline(
     let area = content_size(size);
     let Some(animation) = selected_animation(&editor) else {
         view.fitted = None;
+        view.fitted_values = None;
         return;
     };
+    let bone = selected_bone_name(&editor).map(str::to_owned);
     let key = FitKey {
         selected: editor.selected_animation,
         duration: animation.duration,
         cyclic: animation.cyclic,
-        keyframes: animation.keyframes.len(),
         width: area.x,
         height: area.y,
         scale: node.inverse_scale_factor,
     };
-    if view.fitted == Some(key) {
-        return;
+    let values = ValueFitKey {
+        keyframes: match bone.as_deref() {
+            Some(bone) => animation
+                .keyframes
+                .iter()
+                .filter(|keyframe| keyframe_bone(keyframe) == Some(bone))
+                .count(),
+            None => animation.keyframes.len(),
+        },
+        bone: bone.clone(),
+    };
+
+    // Re-framing both axes when the animation or view changes; otherwise only
+    // the values are refitted, so selecting a bone never rescales time.
+    if view.fitted.as_ref() != Some(&key) {
+        view.fit(animation, area, bone.as_deref());
+        view.fitted = Some(key);
+        view.fitted_values = Some(values);
+    } else if view.fitted_values.as_ref() != Some(&values) {
+        view.fit_value(animation, area, bone.as_deref());
+        view.fitted_values = Some(values);
     }
-    view.fit(animation, area);
-    view.fitted = Some(key);
 }
 
 /// Discards queued wheel events.
@@ -1412,11 +1492,13 @@ fn draw_timeline(
             size,
             editor.playhead,
             &edit,
+            selected_bone_name(&editor),
         );
     }
     *component = UiVelloScene::from(scene);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_frame(
     scene: &mut Scene,
     animation: Option<&Animation>,
@@ -1424,6 +1506,7 @@ fn draw_frame(
     size: Vec2,
     playhead: f32,
     edit: &TimelineEdit,
+    focus: Option<&str>,
 ) {
     // The panel and track backgrounds live in the scene because Bevy UI is
     // composited over Vello UI scenes.
@@ -1461,7 +1544,12 @@ fn draw_frame(
 
         let groups = curve_groups(animation);
         for (index, group) in groups.iter().enumerate() {
-            let color = CHANNEL_COLORS[index % CHANNEL_COLORS.len()];
+            let dimmed = focus.is_some_and(|bone| !group_is_bone(group, bone));
+            let color = if dimmed {
+                DIMMED_CURVE
+            } else {
+                CHANNEL_COLORS[index % CHANNEL_COLORS.len()]
+            };
             if animation.cyclic && duration > 0.0 {
                 for cycle in visible_cycles(view, area, duration) {
                     draw_group(
@@ -1473,6 +1561,7 @@ fn draw_frame(
                         view,
                         &selected,
                         &selected_handles,
+                        dimmed,
                     );
                 }
             } else {
@@ -1485,6 +1574,7 @@ fn draw_frame(
                     view,
                     &selected,
                     &selected_handles,
+                    dimmed,
                 );
             }
         }
@@ -1758,6 +1848,7 @@ fn draw_group(
     view: &TimelineView,
     selected: &[&Keyframe],
     selected_handles: &[(&Keyframe, HandleSide)],
+    dimmed: bool,
 ) {
     let Some(first) = group.first() else {
         return;
@@ -1825,6 +1916,7 @@ fn draw_group(
                 f64::from(handle),
                 true,
                 handle_selected(HandleSide::Out),
+                dimmed,
             );
         }
 
@@ -1843,6 +1935,7 @@ fn draw_group(
                 f64::from(handle),
                 false,
                 handle_selected(HandleSide::In),
+                dimmed,
             );
         }
 
@@ -1925,6 +2018,7 @@ fn draw_handle(
     handle_value: f64,
     ahead: bool,
     selected: bool,
+    dimmed: bool,
 ) {
     let span = (neighbour - time).abs();
     let handle_time = if ahead {
@@ -1937,7 +2031,11 @@ fn draw_handle(
     scene.stroke(
         &Stroke::new(HANDLE_ARM_WIDTH),
         Affine::IDENTITY,
-        HANDLE_ARM,
+        if dimmed {
+            DIMMED_HANDLE_ARM
+        } else {
+            HANDLE_ARM
+        },
         None,
         &arm,
     );
@@ -1953,17 +2051,25 @@ fn draw_handle(
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
-        HANDLE_FILL,
+        if dimmed {
+            DIMMED_HANDLE_FILL
+        } else {
+            HANDLE_FILL
+        },
         None,
         &Circle::new(center, HANDLE_RADIUS),
     );
 }
 
-/// Lowest and highest value reached by the keyframes and their handles.
-fn value_bounds(animation: &Animation) -> (f32, f32) {
+/// Lowest and highest value reached by the keyframes and their handles,
+/// optionally limited to one bone's curves.
+fn value_bounds(animation: &Animation, bone: Option<&str>) -> (f32, f32) {
     let mut low = f32::INFINITY;
     let mut high = f32::NEG_INFINITY;
     for keyframe in &animation.keyframes {
+        if bone.is_some_and(|bone| keyframe_bone(keyframe) != Some(bone)) {
+            continue;
+        }
         for value in [
             Some(keyframe.value),
             keyframe.handle_in,
@@ -2007,8 +2113,58 @@ mod tests {
 
     fn fitted(animation: &Animation, size: Vec2) -> TimelineView {
         let mut view = TimelineView::default();
-        view.fit(animation, size);
+        view.fit(animation, size, None);
         view
+    }
+
+    fn two_bone_animation() -> Animation {
+        let mut animation = Animation::new(4.0);
+        animation.insert_keyframe(Keyframe::new(0.0, 0.0, target("Arm", BoneProperty::X)));
+        animation.insert_keyframe(Keyframe::new(4.0, 100.0, target("Arm", BoneProperty::X)));
+        animation.insert_keyframe(Keyframe::new(0.0, -500.0, target("Leg", BoneProperty::Y)));
+        animation.insert_keyframe(Keyframe::new(4.0, 500.0, target("Leg", BoneProperty::Y)));
+        animation
+    }
+
+    #[test]
+    fn value_bounds_can_be_limited_to_one_bone() {
+        let animation = two_bone_animation();
+
+        assert_eq!(value_bounds(&animation, None), (-500.0, 500.0));
+        assert_eq!(value_bounds(&animation, Some("Arm")), (0.0, 100.0));
+        // A bone with no curves has no range to frame.
+        assert_eq!(value_bounds(&animation, Some("Tail")), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn focusing_a_bone_refits_only_the_value_axis() {
+        let animation = two_bone_animation();
+        let size = Vec2::new(400.0, 200.0);
+        let mut view = fitted(&animation, size);
+        let time0 = view.time0;
+        let time_per_pixel = view.time_per_pixel;
+        let whole = view.value_per_pixel;
+
+        view.fit_value(&animation, size, Some("Arm"));
+
+        // The time axis is untouched, while the values frame Arm's range.
+        assert_eq!(view.time0, time0);
+        assert_eq!(view.time_per_pixel, time_per_pixel);
+        assert!(view.value_per_pixel < whole);
+        assert!(view.value_at(0.0) > 100.0);
+        assert!(view.value_at(size.y) < 0.0);
+    }
+
+    #[test]
+    fn groups_are_matched_to_their_bone() {
+        let animation = two_bone_animation();
+        let groups = curve_groups(&animation);
+
+        assert!(group_is_bone(&groups[0], "Arm"));
+        assert!(!group_is_bone(&groups[0], "Leg"));
+        assert!(!group_is_bone(&groups[1], "Arm"));
+        assert!(group_is_bone(&groups[1], "Leg"));
+        assert!(!group_is_bone(&[], "Arm"));
     }
 
     #[test]

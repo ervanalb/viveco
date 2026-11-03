@@ -8,6 +8,10 @@
 //! The select tool moves a bone by dragging its body and reshapes it by
 //! dragging either endpoint. The pen tool places connected bone chains, each
 //! new bone parented to the previous one. Weight painting is a later stage.
+//!
+//! Animate mode reuses the pose tools: dragging a bone there keys its rotation,
+//! shift-drag keys its translation, and ctrl-drag keys its scale, writing the
+//! values into the selected animation at the playhead.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -16,12 +20,13 @@ use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
+use crate::animate::{sample_pose, set_bone_keyframe};
 use crate::editor::{
     CONTENT_TOP, CanvasInput, DocumentBounds, EditorMode, EditorState, SIDEBAR_WIDTH, Tool,
     ToolState, ViewMapping, Viewport, over_ui,
 };
 use crate::menu_bar::MenuState;
-use crate::model::{Bone, Document, Point};
+use crate::model::{Bone, BoneProperty, Document, Point};
 use crate::pose::{BonePose, Pose, Similarity};
 use crate::render::to_kurbo_point;
 use crate::weight_paint::{WeightPaintBrush, paint_document};
@@ -1536,6 +1541,32 @@ fn handle_bone_input(
     mut editor: ResMut<EditorState>,
     mut paint_last: Local<Option<Point>>,
 ) {
+    // Animate mode reuses the pose gestures, keying their result into the
+    // selected animation instead of the transient rig pose.
+    if *mode == EditorMode::Animate {
+        if menu.is_some_and(|menu| menu.is_open()) {
+            if mouse.just_released(MouseButton::Left) {
+                editor.rig.pose_drag = None;
+            }
+            return;
+        }
+        if editor.is_renaming() {
+            return;
+        }
+        let Ok(window) = windows.single() else {
+            return;
+        };
+        let Some(cursor) = window.cursor_position() else {
+            return;
+        };
+        let view = ViewMapping::new(bounds.0, window.width(), window.height(), &viewport);
+        let point = view.screen_to_document(cursor);
+        let pixel = view.document_per_pixel();
+        let over = over_ui(cursor, window);
+        handle_animate_bone(&mouse, &keys, &mut editor, point, pixel, over);
+        return;
+    }
+
     if *mode != EditorMode::Rig {
         return;
     }
@@ -1868,6 +1899,120 @@ fn handle_bone_pose(
 
     if mouse.just_released(MouseButton::Left) {
         editor.rig.pose_drag = None;
+    }
+}
+
+/// Animate mode: drag a bone to key its pose at the playhead.
+///
+/// A plain drag keys rotation, shift-drag keys translation, and ctrl-drag keys
+/// scale. A press that never moves only selects the bone, so a click does not
+/// silently add keyframes.
+fn handle_animate_bone(
+    mouse: &ButtonInput<MouseButton>,
+    keys: &ButtonInput<KeyCode>,
+    editor: &mut EditorState,
+    point: Point,
+    pixel: f32,
+    over: bool,
+) {
+    if over {
+        if mouse.just_released(MouseButton::Left) {
+            editor.rig.pose_drag = None;
+        }
+        return;
+    }
+
+    // The animate page shows the animation sampled at the playhead, so
+    // hit-testing and drag origins use that pose rather than the rig pose.
+    let pose = animate_pose(editor);
+
+    if mouse.just_pressed(MouseButton::Left) {
+        let Some(address) = bone_near(&editor.document, &pose, point, pixel * BONE_HIT_SLACK)
+        else {
+            editor.select_bone(None);
+            return;
+        };
+        // Poses are keyed by bone name, so an unnamed bone cannot be animated.
+        let Some(name) = bone_name_at(&editor.document, &address) else {
+            return;
+        };
+        if name.is_empty() {
+            return;
+        }
+
+        let kind = pose_kind(keys);
+        let connected = bone_at(&editor.document, &address).is_some_and(|bone| bone.head.is_none());
+        let (rest_head, pivot) = bone_endpoints(&editor.document, &address)
+            .map(|(head, _)| {
+                let posed = bone_world(&editor.document, &pose, &address).apply(head);
+                (head, posed)
+            })
+            .unwrap_or((point, point));
+        let start_pose = if connected {
+            pose.get(name)
+        } else {
+            pose.get(name).with_pivot(rest_head)
+        };
+        let parent_inverse = parent_world(&editor.document, &pose, &address).inverse();
+
+        // Selecting clears any previous gesture, so store the drag after it.
+        editor.select_bone(Some(address.clone()));
+        editor.rig.pose_drag = Some(PoseDrag {
+            address,
+            kind,
+            start_pose,
+            parent_inverse,
+            pivot,
+            start_cursor: point,
+        });
+        return;
+    }
+
+    if mouse.pressed(MouseButton::Left)
+        && let Some(drag) = editor.rig.pose_drag.clone()
+        && distance(drag.start_cursor, point) > pixel * BONE_ENDPOINT_CLICK_SLOP
+    {
+        let pose = dragged_pose(&drag, point);
+        key_dragged_pose(editor, &drag, pose);
+    }
+
+    if mouse.just_released(MouseButton::Left) {
+        editor.rig.pose_drag = None;
+    }
+}
+
+/// The pose the animate page shows: the selected animation at the playhead.
+fn animate_pose(editor: &EditorState) -> Pose {
+    crate::animate::selected_animation(editor)
+        .map(|animation| sample_pose(&editor.document, animation, editor.playhead))
+        .unwrap_or_default()
+}
+
+/// Writes the properties `drag` affects into the selected animation at the
+/// playhead, replacing an existing keyframe for the same target there.
+fn key_dragged_pose(editor: &mut EditorState, drag: &PoseDrag, pose: BonePose) {
+    let Some(index) = editor.selected_animation else {
+        return;
+    };
+    let Some(name) = bone_name_at(&editor.document, &drag.address) else {
+        return;
+    };
+    let name = name.to_owned();
+    let time = editor.playhead;
+    let Some(animation) = editor.document.animations.get_mut(index) else {
+        return;
+    };
+    match drag.kind {
+        PoseKind::Rotate => {
+            set_bone_keyframe(animation, &name, BoneProperty::Angle, time, pose.rotation)
+        }
+        PoseKind::Translate => {
+            set_bone_keyframe(animation, &name, BoneProperty::X, time, pose.translation[0]);
+            set_bone_keyframe(animation, &name, BoneProperty::Y, time, pose.translation[1]);
+        }
+        PoseKind::Scale => {
+            set_bone_keyframe(animation, &name, BoneProperty::Scale, time, pose.scale)
+        }
     }
 }
 
@@ -3507,5 +3652,113 @@ mod tests {
             KeyframeTarget::Bone { bone, .. } => assert_eq!(bone, "Limb"),
             KeyframeTarget::Shape { .. } => unreachable!(),
         }
+    }
+
+    fn animatable_editor() -> EditorState {
+        let mut document = document_with_bones();
+        document.bones[0].name = "Arm".into();
+        document.animations.push(Animation::new(4.0));
+        let mut editor = EditorState::new(document);
+        editor.selected_animation = Some(0);
+        editor.playhead = 1.0;
+        editor
+    }
+
+    /// Presses on the bone, then drags to `to` with the pointer held.
+    fn drag_bone(editor: &mut EditorState, keys: &ButtonInput<KeyCode>, from: Point, to: Point) {
+        let mut mouse = ButtonInput::<MouseButton>::default();
+        mouse.press(MouseButton::Left);
+        handle_animate_bone(&mouse, keys, editor, from, 1.0, false);
+        // A second frame keeps the button held but drops `just_pressed`.
+        mouse.clear();
+        handle_animate_bone(&mouse, keys, editor, to, 1.0, false);
+    }
+
+    fn keyed_value(animation: &Animation, property: BoneProperty) -> Option<f32> {
+        animation
+            .keyframes
+            .iter()
+            .find_map(|keyframe| match &keyframe.target {
+                KeyframeTarget::Bone {
+                    bone,
+                    property: keyed,
+                } if bone == "Arm" && *keyed == property => Some(keyframe.value),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn animate_drags_key_the_bone_at_the_playhead() {
+        let mut editor = animatable_editor();
+        let keys = ButtonInput::<KeyCode>::default();
+
+        drag_bone(&mut editor, &keys, [5.0, 0.0], [5.0, 5.0]);
+
+        assert_eq!(editor.selected_bone, Some(address(&[0])));
+        let animation = &editor.document.animations[0];
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].timestamp, 1.0);
+        let angle = keyed_value(animation, BoneProperty::Angle).unwrap();
+        assert!((angle - std::f32::consts::FRAC_PI_4).abs() < 1e-4);
+    }
+
+    #[test]
+    fn animate_clicks_alone_do_not_key_the_bone() {
+        let mut editor = animatable_editor();
+        let keys = ButtonInput::<KeyCode>::default();
+
+        drag_bone(&mut editor, &keys, [5.0, 0.0], [5.0, 1.0]);
+
+        // The pointer stayed inside the click slop, so nothing was keyed.
+        assert_eq!(editor.selected_bone, Some(address(&[0])));
+        assert!(editor.document.animations[0].keyframes.is_empty());
+    }
+
+    #[test]
+    fn animate_shift_drags_key_translation() {
+        let mut editor = animatable_editor();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+
+        drag_bone(&mut editor, &keys, [5.0, 0.0], [5.0, 5.0]);
+
+        let animation = &editor.document.animations[0];
+        assert_eq!(animation.keyframes.len(), 2);
+        assert_eq!(keyed_value(animation, BoneProperty::X), Some(0.0));
+        assert_eq!(keyed_value(animation, BoneProperty::Y), Some(5.0));
+    }
+
+    #[test]
+    fn animate_ctrl_drags_key_scale() {
+        let mut editor = animatable_editor();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+
+        drag_bone(&mut editor, &keys, [5.0, 0.0], [10.0, 0.0]);
+
+        let animation = &editor.document.animations[0];
+        assert_eq!(animation.keyframes.len(), 1);
+        assert!((keyed_value(animation, BoneProperty::Scale).unwrap() - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn animate_drags_replace_the_keyframe_at_the_playhead() {
+        let mut editor = animatable_editor();
+        editor.document.animations[0].insert_keyframe(Keyframe::new(
+            1.0,
+            0.0,
+            KeyframeTarget::Bone {
+                bone: "Arm".into(),
+                property: BoneProperty::Angle,
+            },
+        ));
+        let keys = ButtonInput::<KeyCode>::default();
+
+        drag_bone(&mut editor, &keys, [5.0, 0.0], [5.0, 5.0]);
+
+        let animation = &editor.document.animations[0];
+        assert_eq!(animation.keyframes.len(), 1);
+        let angle = keyed_value(animation, BoneProperty::Angle).unwrap();
+        assert!((angle - std::f32::consts::FRAC_PI_4).abs() < 1e-4);
     }
 }

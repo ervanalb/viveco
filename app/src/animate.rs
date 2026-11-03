@@ -180,6 +180,35 @@ pub fn sample_pose(document: &Document, animation: &Animation, time: f32) -> Pos
     pose
 }
 
+/// Writes `value` into the curve for `property` of `bone` at `time`.
+///
+/// The time is clamped to the animation's range, matching the sampler. An
+/// existing keyframe for the same target at that time is updated in place,
+/// keeping its handles, so dragging a bone at a keyframed time edits rather
+/// than stacks keyframes.
+pub(crate) fn set_bone_keyframe(
+    animation: &mut Animation,
+    bone: &str,
+    property: BoneProperty,
+    time: f32,
+    value: f32,
+) {
+    let time = clamped_time(animation, time);
+    let target = KeyframeTarget::Bone {
+        bone: bone.into(),
+        property,
+    };
+    if let Some(existing) = animation
+        .keyframes
+        .iter_mut()
+        .find(|keyframe| keyframe.target == target && keyframe.timestamp == time)
+    {
+        existing.value = value;
+        return;
+    }
+    animation.insert_keyframe(Keyframe::new(time, value, target));
+}
+
 /// Clamps a playhead time to the animation's `0..=duration` range.
 fn clamped_time(animation: &Animation, time: f32) -> f32 {
     let time = if time.is_finite() { time } else { 0.0 };
@@ -624,6 +653,39 @@ mod tests {
         assert_eq!(arm.scale, 2.0);
         // The pose pivots about the bone's rest head, like the rig page.
         assert_eq!(arm.pivot, [10.0, 20.0]);
+    }
+
+    #[test]
+    fn setting_a_bone_keyframe_inserts_or_replaces() {
+        let mut animation = Animation::new(4.0);
+
+        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Angle, 1.0, 0.5);
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].timestamp, 1.0);
+        assert_eq!(animation.keyframes[0].value, 0.5);
+
+        // The same target at the same time updates in place, keeping handles.
+        animation.keyframes[0].handle_out = Some(0.9);
+        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Angle, 1.0, 0.75);
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].value, 0.75);
+        assert_eq!(animation.keyframes[0].handle_out, Some(0.9));
+
+        // A different bone, property, or time is its own keyframe.
+        set_bone_keyframe(&mut animation, "Leg", BoneProperty::Angle, 1.0, 0.1);
+        set_bone_keyframe(&mut animation, "Arm", BoneProperty::X, 1.0, 2.0);
+        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Angle, 2.0, 0.2);
+        assert_eq!(animation.keyframes.len(), 4);
+    }
+
+    #[test]
+    fn setting_a_bone_keyframe_clamps_to_the_duration() {
+        let mut animation = Animation::new(2.0);
+
+        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Scale, 9.0, 3.0);
+
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].timestamp, 2.0);
     }
 
     #[test]

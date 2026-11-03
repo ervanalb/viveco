@@ -1113,7 +1113,14 @@ fn refresh_scene(
         // the animation at the playhead. With no animation selected it rests.
         let rest = crate::pose::Pose::default();
         let pose = animation_pose.as_ref().unwrap_or(&rest);
-        crate::rig::draw_bone_overlay(&mut scene, &editor.document, pose, None, None, scale);
+        crate::rig::draw_bone_overlay(
+            &mut scene,
+            &editor.document,
+            pose,
+            editor.selected_bone.as_ref(),
+            None,
+            scale,
+        );
     }
 
     if let Ok(mut scene_component) = scenes.single_mut() {
