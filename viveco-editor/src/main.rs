@@ -11,27 +11,27 @@ use bevy::window::PrimaryWindow;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
 
-use vector_anim_app::animate_panel::AnimatePanelPlugin;
-use vector_anim_app::animate_sidebar::AnimateSidebarPlugin;
-use vector_anim_app::clipboard::ClipboardPlugin;
-use vector_anim_app::dialogs::DialogPlugin;
-use vector_anim_app::editor::{
+use viveco_editor::animate_panel::AnimatePanelPlugin;
+use viveco_editor::animate_sidebar::AnimateSidebarPlugin;
+use viveco_editor::clipboard::ClipboardPlugin;
+use viveco_editor::dialogs::DialogPlugin;
+use viveco_editor::editor::{
     DocumentBounds, DocumentScene, EditorPlugin, EditorState, fit_transform,
 };
-use vector_anim_app::file::{DocumentFile, FilePlugin, bounds_for};
-use vector_anim_app::history::{History, HistoryPlugin};
-use vector_anim_app::menu_bar::MenuBarPlugin;
-use vector_anim_app::mode_tabs::ModeTabsPlugin;
-use vector_anim_app::model::Document;
-use vector_anim_app::render::build_scene;
-use vector_anim_app::rig::RigPlugin;
-use vector_anim_app::rig_panel::RigPanelPlugin;
-use vector_anim_app::rig_sidebar::RigSidebarPlugin;
-use vector_anim_app::sidebar::SidebarPlugin;
-use vector_anim_app::style_panel::StylePanelPlugin;
-use vector_anim_app::theme;
-use vector_anim_app::timeline::TimelinePlugin;
-use vector_anim_app::toolbar::ToolbarPlugin;
+use viveco_editor::file::{DocumentFile, FilePlugin, bounds_for};
+use viveco_editor::history::{History, HistoryPlugin};
+use viveco_editor::menu_bar::MenuBarPlugin;
+use viveco_editor::mode_tabs::ModeTabsPlugin;
+use viveco_editor::model::Document;
+use viveco_editor::render::build_scene;
+use viveco_editor::rig::RigPlugin;
+use viveco_editor::rig_panel::RigPanelPlugin;
+use viveco_editor::rig_sidebar::RigSidebarPlugin;
+use viveco_editor::sidebar::SidebarPlugin;
+use viveco_editor::style_panel::StylePanelPlugin;
+use viveco_editor::theme;
+use viveco_editor::timeline::TimelinePlugin;
+use viveco_editor::toolbar::ToolbarPlugin;
 
 /// Initial window size, in logical pixels.
 const WINDOW_SIZE: u32 = 900;
@@ -41,7 +41,7 @@ fn main() {
         .insert_resource(ClearColor(theme::CANVAS_BG))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Vector Anim".into(),
+                title: "Viveco Editor".into(),
                 resolution: (WINDOW_SIZE, WINDOW_SIZE).into(),
                 ..default()
             }),

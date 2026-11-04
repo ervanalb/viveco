@@ -16,16 +16,16 @@ use crate::file::{DocumentFile, open_document, save_document_to};
 use crate::history::History;
 
 /// Shown in the dialog's file-type filter.
-const FILTER_NAME: &str = "Vector Anim";
+const FILTER_NAME: &str = "Viveco";
 
 /// Extensions accepted by the file-type filter.
-const FILTER_EXTENSIONS: &[&str] = &["vecart.json", "json"];
+const FILTER_EXTENSIONS: &[&str] = &["json"];
 
 /// Title of the open dialog.
-const OPEN_TITLE: &str = "Open Vector Anim";
+const OPEN_TITLE: &str = "Open Viveco";
 
 /// Title of the save dialog.
-const SAVE_TITLE: &str = "Save Vector Anim";
+const SAVE_TITLE: &str = "Save Viveco";
 
 pub struct DialogPlugin;
 

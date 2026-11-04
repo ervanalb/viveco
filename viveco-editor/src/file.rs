@@ -23,7 +23,7 @@ const EMPTY_BOUNDS: Bounds = Bounds {
 };
 
 /// Name used for a fresh document that has not been saved anywhere yet.
-const UNTITLED_FILE: &str = "untitled.vecart.json";
+const UNTITLED_FILE: &str = "untitled.json";
 
 /// Title shown when the document has no file.
 const UNTITLED_TITLE: &str = "Untitled";
@@ -223,7 +223,7 @@ fn sync_window_title(
     *last = Some(name.clone());
 
     for mut window in &mut windows {
-        window.title = format!("Vector Anim - {name}");
+        window.title = format!("Viveco Editor - {name}");
     }
 }
 
@@ -277,10 +277,8 @@ mod tests {
 
     #[test]
     fn saving_and_opening_round_trips() {
-        let path = std::env::temp_dir().join(format!(
-            "vector_anim_app_test_{}.vecart.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("viveco_editor_test_{}.json", std::process::id()));
         let mut file = DocumentFile::untitled();
 
         let mut document = Document::new();

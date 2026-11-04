@@ -1,0 +1,1187 @@
+{
+  "type": "viveco",
+  "version": 2,
+  "shapes": [
+    {
+      "name": "Legs",
+      "z": 0.0,
+      "style": {
+        "stroke": {
+          "color": "#dde1e8",
+          "width": 7.000707
+        }
+      },
+      "paths": [
+        {
+          "ends": {
+            "open": [
+              149.95064,
+              931.4566
+            ]
+          },
+          "segments": [
+            {
+              "ctrl2": [
+                220.16847,
+                756.2321
+              ],
+              "to": [
+                233.32037,
+                730.92786
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Upper leg L",
+                  "weight": 0.4405418
+                },
+                {
+                  "bone": "Lower leg L",
+                  "weight": 0.5594582
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Upper leg L",
+                  "weight": 0.99999994
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                244.9397,
+                705.09296
+              ],
+              "to": [
+                337.12866,
+                523.35675
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Upper leg L",
+                  "weight": 0.4864845
+                },
+                {
+                  "bone": "Lower leg L",
+                  "weight": 0.51351553
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Body",
+                  "weight": 0.99942535
+                }
+              ]
+            },
+            {
+              "ctrl2": [
+                440.90848,
+                708.8498
+              ],
+              "to": [
+                452.7291,
+                732.45233
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Upper leg R",
+                  "weight": 0.75734854
+                },
+                {
+                  "bone": "Lower leg R",
+                  "weight": 0.24265146
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Upper leg R",
+                  "weight": 0.9999998
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                464.02753,
+                757.6829
+              ],
+              "to": [
+                544.3157,
+                923.4506
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Lower leg R",
+                  "weight": 0.4259827
+                },
+                {
+                  "bone": "Upper leg R",
+                  "weight": 0.5740173
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Lower leg R",
+                  "weight": 0.9997239
+                }
+              ]
+            }
+          ],
+          "start_weights": [
+            {
+              "bone": "Lower leg L",
+              "weight": 0.99998176
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Body",
+      "z": 1.0,
+      "style": {
+        "stroke": {
+          "color": "#dde1e8",
+          "width": 7.0135746
+        }
+      },
+      "paths": [
+        {
+          "ends": {
+            "open": [
+              312.05972,
+              92.184555
+            ]
+          },
+          "segments": [
+            {
+              "ctrl2": [
+                313.91437,
+                171.91916
+              ],
+              "to": [
+                313.0097,
+                202.19893
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Neck",
+                  "weight": 0.47721982
+                },
+                {
+                  "bone": "Body",
+                  "weight": 0.5227802
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Neck",
+                  "weight": 0.43537673
+                },
+                {
+                  "bone": "Body",
+                  "weight": 0.56462324
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                316.55322,
+                258.13385
+              ],
+              "to": [
+                337.29932,
+                522.05975
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Neck",
+                  "weight": 0.53843635
+                },
+                {
+                  "bone": "Body",
+                  "weight": 0.46156365
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Body",
+                  "weight": 0.9995215
+                }
+              ]
+            }
+          ],
+          "start_weights": [
+            {
+              "bone": "Head",
+              "weight": 1.0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Arms",
+      "z": 2.0,
+      "style": {
+        "stroke": {
+          "color": "#dde1e8",
+          "width": 6.9768105
+        }
+      },
+      "paths": [
+        {
+          "ends": {
+            "open": [
+              -3.2901833,
+              240.20338
+            ]
+          },
+          "segments": [
+            {
+              "ctrl2": [
+                151.75717,
+                232.65915
+              ],
+              "to": [
+                173.8307,
+                231.59679
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Shoudler R",
+                  "weight": 0.43040186
+                },
+                {
+                  "bone": "Elbow R",
+                  "weight": 0.56959814
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Shoudler R",
+                  "weight": 0.99999994
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                197.24503,
+                230.00864
+              ],
+              "ctrl2": [
+                309.5909,
+                219.98668
+              ],
+              "to": [
+                310.2508,
+                219.98668
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Shoudler R",
+                  "weight": 0.5086513
+                },
+                {
+                  "bone": "Elbow R",
+                  "weight": 0.49134868
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Neck",
+                  "weight": 0.00004868933
+                },
+                {
+                  "bone": "Shoudler R",
+                  "weight": 0.6164581
+                },
+                {
+                  "bone": "Shoulder L",
+                  "weight": 0.38349324
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Neck",
+                  "weight": 0.000082216764
+                },
+                {
+                  "bone": "Shoudler R",
+                  "weight": 0.5372643
+                },
+                {
+                  "bone": "Shoulder L",
+                  "weight": 0.46265352
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                310.91068,
+                219.98668
+              ],
+              "ctrl2": [
+                445.96722,
+                217.15598
+              ],
+              "to": [
+                468.25854,
+                217.39275
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Neck",
+                  "weight": 0.0001880661
+                },
+                {
+                  "bone": "Shoudler R",
+                  "weight": 0.4901345
+                },
+                {
+                  "bone": "Shoulder L",
+                  "weight": 0.50967747
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Shoulder L",
+                  "weight": 0.49338382
+                },
+                {
+                  "bone": "Elbow L",
+                  "weight": 0.5066162
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Shoulder L",
+                  "weight": 0.8329586
+                },
+                {
+                  "bone": "Elbow L",
+                  "weight": 0.16704145
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                491.56894,
+                218.17764
+              ],
+              "to": [
+                651.65375,
+                217.08557
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Shoulder L",
+                  "weight": 0.29978222
+                },
+                {
+                  "bone": "Elbow L",
+                  "weight": 0.7002178
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Elbow L",
+                  "weight": 0.99999994
+                }
+              ]
+            }
+          ],
+          "start_weights": [
+            {
+              "bone": "Elbow R",
+              "weight": 0.99999994
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Head",
+      "z": 3.0,
+      "style": {
+        "stroke": {
+          "color": "#dde1e8",
+          "width": 7.0267253
+        }
+      },
+      "paths": [
+        {
+          "ends": "closed",
+          "segments": [
+            {
+              "ctrl1": [
+                256.10394,
+                91.799225
+              ],
+              "ctrl2": [
+                180.81944,
+                45.378166
+              ],
+              "to": [
+                174.21182,
+                -27.090607
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 0.99997795
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 0.9998096
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                169.46223,
+                -111.07335
+              ],
+              "ctrl2": [
+                242.77841,
+                -193.14906
+              ],
+              "to": [
+                304.22675,
+                -195.96326
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 0.99521106
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 0.99986935
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 0.99994767
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                368.13486,
+                -196.44995
+              ],
+              "ctrl2": [
+                435.42404,
+                -119.691605
+              ],
+              "to": [
+                435.7093,
+                -57.859364
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 0.99984586
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                434.80432,
+                0.016732186
+              ],
+              "ctrl2": [
+                396.93088,
+                89.92401
+              ],
+              "to": [
+                310.07446,
+                91.96839
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 0.99999994
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "bones": [
+    {
+      "name": "Body",
+      "head": [
+        337.08502,
+        522.1945
+      ],
+      "tail": [
+        314.86603,
+        221.44804
+      ],
+      "children": [
+        {
+          "name": "Shoulder L",
+          "tail": [
+            469.3204,
+            218.56137
+          ],
+          "children": [
+            {
+              "name": "Elbow L",
+              "tail": [
+                657.0896,
+                218.92195
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Shoudler R",
+          "tail": [
+            168.25285,
+            231.80666
+          ],
+          "children": [
+            {
+              "name": "Elbow R",
+              "tail": [
+                -5.574408,
+                238.3348
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Neck",
+          "tail": [
+            312.08542,
+            90.48816
+          ],
+          "children": [
+            {
+              "name": "Head",
+              "tail": [
+                311.9713,
+                -47.39799
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Upper leg L",
+          "head": [
+            335.88266,
+            525.7204
+          ],
+          "tail": [
+            232.32788,
+            734.95056
+          ],
+          "children": [
+            {
+              "name": "Lower leg L",
+              "tail": [
+                146.90268,
+                930.0285
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Upper leg R",
+          "head": [
+            334.66437,
+            521.3772
+          ],
+          "tail": [
+            440.2542,
+            719.74756
+          ],
+          "children": [
+            {
+              "name": "Lower leg R",
+              "tail": [
+                544.3387,
+                922.7689
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "animations": [
+    {
+      "name": "Wave",
+      "duration": 2.0,
+      "cyclic": false,
+      "keyframes": [
+        {
+          "timestamp": 0.0,
+          "value": -0.85785985,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": -0.42720187,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.59176636,
+          "value": -0.68437874,
+          "handle_in": -0.68940824,
+          "handle_out": -0.682975,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.593228,
+          "value": -0.18820047,
+          "handle_in": -0.15673172,
+          "handle_out": -0.21331823,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.6597161,
+          "value": -0.6642695,
+          "handle_in": -0.62157524,
+          "handle_out": -0.6983473,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.7569293,
+          "value": -0.52515304,
+          "handle_in": -0.5238837,
+          "handle_out": -0.52515304,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.9533442,
+          "value": -0.71149206,
+          "handle_in": -0.71263444,
+          "handle_out": -0.709603,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.1191417,
+          "value": -0.49568963,
+          "handle_in": -0.49196374,
+          "handle_out": -0.49956936,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.186289,
+          "value": -0.67495024,
+          "handle_in": -0.68580675,
+          "handle_out": -0.65817374,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.275702,
+          "value": -0.18457033,
+          "handle_in": -0.20912065,
+          "handle_out": -0.1466328,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.2917844,
+          "value": -0.7202952,
+          "handle_in": -0.7240083,
+          "handle_out": -0.7050633,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Walk",
+      "duration": 2.0,
+      "cyclic": true,
+      "keyframes": [
+        {
+          "timestamp": 0.0,
+          "value": 0.13564774,
+          "handle_in": 0.14380524,
+          "handle_out": 0.11839077,
+          "target": {
+            "kind": "bone",
+            "bone": "Upper leg R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.08582284,
+          "value": -4.3474245,
+          "handle_out": -9.577862,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.26938906,
+          "value": -0.19393161,
+          "handle_in": 1.0020684,
+          "handle_out": -0.8966679,
+          "target": {
+            "kind": "bone",
+            "bone": "Upper leg L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.18579678,
+          "value": -0.11148486,
+          "handle_in": -0.09032944,
+          "handle_out": -0.12456763,
+          "target": {
+            "kind": "bone",
+            "bone": "Lower leg R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.5142098,
+          "value": 1.0872389,
+          "handle_in": 1.075559,
+          "handle_out": 1.0896477,
+          "target": {
+            "kind": "bone",
+            "bone": "Lower leg L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.5602688,
+          "value": -34.84925,
+          "handle_in": -29.357323,
+          "handle_out": -41.313194,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 1.2094812,
+          "value": 0.057761796,
+          "handle_in": 0.09472503,
+          "target": {
+            "kind": "bone",
+            "bone": "Lower leg L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.0012363,
+          "value": -0.89857256,
+          "handle_in": -0.9027476,
+          "handle_out": -0.89440787,
+          "target": {
+            "kind": "bone",
+            "bone": "Upper leg L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.79278,
+          "value": -0.16547659,
+          "handle_out": -0.1656682,
+          "target": {
+            "kind": "bone",
+            "bone": "Lower leg R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.1186869,
+          "value": -5.853904,
+          "handle_out": -14.451131,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 1.4281898,
+          "value": -32.88108,
+          "handle_in": -29.17653,
+          "handle_out": -40.752525,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 1.3017766,
+          "value": 0.6462392,
+          "handle_in": 1.2402997,
+          "handle_out": 0.20125659,
+          "target": {
+            "kind": "bone",
+            "bone": "Upper leg R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.5063637,
+          "value": 0.76732516,
+          "handle_in": 0.78413475,
+          "handle_out": 0.75282604,
+          "target": {
+            "kind": "bone",
+            "bone": "Lower leg R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.8836529,
+          "value": 0.09728089,
+          "handle_out": 0.09728089,
+          "target": {
+            "kind": "bone",
+            "bone": "Lower leg L",
+            "property": "angle"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Arm Swing",
+      "duration": 2.0,
+      "cyclic": true,
+      "keyframes": [
+        {
+          "timestamp": 0.0,
+          "value": -0.94017684,
+          "handle_in": -0.94107705,
+          "handle_out": -0.94017684,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": 0.9337283,
+          "handle_in": 0.94057286,
+          "handle_out": 0.9337283,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.23976028,
+          "value": -0.094639584,
+          "handle_in": -0.09524565,
+          "handle_out": -0.09386356,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.24670339,
+          "value": -0.08341454,
+          "handle_in": -0.08261282,
+          "handle_out": -0.08341454,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.9990899,
+          "value": -2.0674138,
+          "handle_in": -2.0674138,
+          "handle_out": -2.0674138,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.9990899,
+          "value": 2.053204,
+          "handle_in": 2.0479827,
+          "handle_out": 2.048605,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.2041719,
+          "value": -0.24127197,
+          "handle_in": -0.24161054,
+          "handle_out": -0.24127197,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.3068669,
+          "value": -0.21389273,
+          "handle_in": -0.21389273,
+          "handle_out": -0.21421799,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow R",
+            "property": "angle"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Shrug",
+      "duration": 2.0,
+      "cyclic": false,
+      "keyframes": [
+        {
+          "timestamp": 0.0,
+          "value": 1.7641499,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": -1.7943596,
+          "target": {
+            "kind": "bone",
+            "bone": "Elbow L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": -3.5305176,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "x"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": -86.28256,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": -2.5446777,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "x"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": -89.05473,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.15955229,
+          "value": -6.7511992,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.18122423,
+          "value": 0.3510325,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.25446874,
+          "value": 0.48611158,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.70887953,
+          "value": -6.815178,
+          "handle_in": -6.8145366,
+          "handle_out": -6.8157835,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.70887953,
+          "value": 0.58716965,
+          "handle_in": 0.58763504,
+          "handle_out": 0.5866387,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.2273897,
+          "value": 0.47259033,
+          "handle_in": 0.47595763,
+          "handle_out": 0.46918583,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.2273897,
+          "value": -6.7412143,
+          "handle_in": -6.7428083,
+          "handle_out": -6.7392764,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.7516282,
+          "value": 0.57095957,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoulder L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.827239,
+          "value": -0.40914345,
+          "handle_in": -0.049354084,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.8577179,
+          "value": -6.8230124,
+          "target": {
+            "kind": "bone",
+            "bone": "Shoudler R",
+            "property": "angle"
+          }
+        }
+      ]
+    }
+  ]
+}

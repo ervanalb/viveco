@@ -1,0 +1,849 @@
+{
+  "type": "viveco",
+  "version": 4,
+  "shapes": [
+    {
+      "name": "Legs",
+      "z": 0.0,
+      "style": {
+        "stroke": {
+          "color": "#c98f4a",
+          "width": 30.0
+        }
+      },
+      "paths": [
+        {
+          "ends": {
+            "open": [
+              350.0,
+              520.0
+            ]
+          },
+          "segments": [
+            {
+              "to": [
+                285.0,
+                690.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Leg L",
+                  "weight": 1.0
+                }
+              ]
+            }
+          ],
+          "start_weights": [
+            {
+              "bone": "Leg L",
+              "weight": 1.0
+            }
+          ]
+        },
+        {
+          "ends": {
+            "open": [
+              350.0,
+              520.0
+            ]
+          },
+          "segments": [
+            {
+              "to": [
+                415.0,
+                690.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Leg R",
+                  "weight": 1.0
+                }
+              ]
+            }
+          ],
+          "start_weights": [
+            {
+              "bone": "Leg R",
+              "weight": 1.0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Arms",
+      "z": 1.0,
+      "style": {
+        "stroke": {
+          "color": "#c98f4a",
+          "width": 24.0
+        }
+      },
+      "paths": [
+        {
+          "ends": {
+            "open": [
+              350.0,
+              290.0
+            ]
+          },
+          "segments": [
+            {
+              "to": [
+                220.0,
+                380.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Arm L",
+                  "weight": 1.0
+                }
+              ]
+            }
+          ],
+          "start_weights": [
+            {
+              "bone": "Arm L",
+              "weight": 1.0
+            }
+          ]
+        },
+        {
+          "ends": {
+            "open": [
+              350.0,
+              290.0
+            ]
+          },
+          "segments": [
+            {
+              "to": [
+                480.0,
+                380.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Arm R",
+                  "weight": 1.0
+                }
+              ]
+            }
+          ],
+          "start_weights": [
+            {
+              "bone": "Arm R",
+              "weight": 1.0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Body",
+      "z": 2.0,
+      "style": {
+        "fill": "#4cc9f099",
+        "stroke": {
+          "color": "#2b6c86",
+          "width": 3.0
+        }
+      },
+      "paths": [
+        {
+          "ends": "closed",
+          "segments": [
+            {
+              "to": [
+                400.0,
+                270.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Body",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "to": [
+                400.0,
+                520.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Body",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "to": [
+                300.0,
+                520.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Body",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "to": [
+                300.0,
+                270.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Body",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "to": [
+                400.0,
+                270.0
+              ],
+              "to_weights": [
+                {
+                  "bone": "Body",
+                  "weight": 1.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Head",
+      "z": 3.0,
+      "style": {
+        "fill": "#f5c542"
+      },
+      "paths": [
+        {
+          "ends": "closed",
+          "segments": [
+            {
+              "ctrl1": [
+                430.0,
+                234.182784
+              ],
+              "ctrl2": [
+                394.18278399999997,
+                270.0
+              ],
+              "to": [
+                350.0,
+                270.0
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                305.81721600000003,
+                270.0
+              ],
+              "ctrl2": [
+                270.0,
+                234.182784
+              ],
+              "to": [
+                270.0,
+                190.0
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                270.0,
+                145.817216
+              ],
+              "ctrl2": [
+                305.81721600000003,
+                110.0
+              ],
+              "to": [
+                350.0,
+                110.0
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ]
+            },
+            {
+              "ctrl1": [
+                394.18278399999997,
+                110.0
+              ],
+              "ctrl2": [
+                430.0,
+                145.817216
+              ],
+              "to": [
+                430.0,
+                190.0
+              ],
+              "ctrl1_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "ctrl2_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ],
+              "to_weights": [
+                {
+                  "bone": "Head",
+                  "weight": 1.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "bones": [
+    {
+      "name": "Body",
+      "head": [
+        350.0,
+        520.0
+      ],
+      "tail": [
+        350.0,
+        270.0
+      ],
+      "children": [
+        {
+          "name": "Head",
+          "head": [
+            350.0,
+            270.0
+          ],
+          "tail": [
+            350.0,
+            150.0
+          ]
+        },
+        {
+          "name": "Arm L",
+          "head": [
+            350.0,
+            290.0
+          ],
+          "tail": [
+            220.0,
+            380.0
+          ]
+        },
+        {
+          "name": "Arm R",
+          "head": [
+            350.0,
+            290.0
+          ],
+          "tail": [
+            480.0,
+            380.0
+          ]
+        },
+        {
+          "name": "Leg L",
+          "head": [
+            350.0,
+            520.0
+          ],
+          "tail": [
+            285.0,
+            690.0
+          ]
+        },
+        {
+          "name": "Leg R",
+          "head": [
+            350.0,
+            520.0
+          ],
+          "tail": [
+            415.0,
+            690.0
+          ]
+        }
+      ]
+    }
+  ],
+  "animations": [
+    {
+      "name": "Wave",
+      "duration": 2.0,
+      "cyclic": true,
+      "keyframes": [
+        {
+          "timestamp": 0.0,
+          "value": -0.6,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          },
+          "handle_in": -0.6,
+          "handle_out": -0.6
+        },
+        {
+          "timestamp": 0.5,
+          "value": 0.7,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          },
+          "handle_in": 0.3,
+          "handle_out": 0.8
+        },
+        {
+          "timestamp": 1.0,
+          "value": -0.6,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          },
+          "handle_in": -0.6,
+          "handle_out": -0.6
+        },
+        {
+          "timestamp": 1.5,
+          "value": 0.7,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          },
+          "handle_in": 0.3,
+          "handle_out": 0.8
+        },
+        {
+          "timestamp": 0.0,
+          "value": 0.7,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          },
+          "handle_in": 0.3,
+          "handle_out": 0.8
+        },
+        {
+          "timestamp": 0.5,
+          "value": -0.6,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          },
+          "handle_in": -0.6,
+          "handle_out": -0.6
+        },
+        {
+          "timestamp": 1.0,
+          "value": 0.7,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          },
+          "handle_in": 0.3,
+          "handle_out": 0.8
+        },
+        {
+          "timestamp": 1.5,
+          "value": -0.6,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          },
+          "handle_in": -0.6,
+          "handle_out": -0.6
+        },
+        {
+          "timestamp": 0.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.5,
+          "value": 0.09,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.5,
+          "value": -0.09,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Bounce",
+      "duration": 1.2,
+      "cyclic": true,
+      "keyframes": [
+        {
+          "timestamp": 0.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.3,
+          "value": -25.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.6,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.9,
+          "value": 12.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 1.2,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Body",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.3,
+          "value": -18.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.6,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.9,
+          "value": 8.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 1.2,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.3,
+          "value": -0.5,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.6,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.9,
+          "value": 0.4,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.2,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm L",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.3,
+          "value": 0.5,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.6,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.9,
+          "value": -0.4,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.2,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Arm R",
+            "property": "angle"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Nod",
+      "duration": 2.0,
+      "cyclic": false,
+      "keyframes": [
+        {
+          "timestamp": 0.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.5,
+          "value": 0.35,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 1.5,
+          "value": -0.25,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 2.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "angle"
+          }
+        },
+        {
+          "timestamp": 0.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 0.5,
+          "value": 8.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 1.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 1.5,
+          "value": -6.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        },
+        {
+          "timestamp": 2.0,
+          "value": 0.0,
+          "target": {
+            "kind": "bone",
+            "bone": "Head",
+            "property": "y"
+          }
+        }
+      ]
+    }
+  ]
+}

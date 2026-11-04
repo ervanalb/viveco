@@ -1,0 +1,11 @@
+[package]
+name = "viveco"
+description = "Zero-copy binary format, animation sampling, and skinning for viveco files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vello.workspace = true
+thiserror.workspace = true

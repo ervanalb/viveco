@@ -26,7 +26,14 @@ use std::io;
 use std::path::Path as FsPath;
 
 use serde::de;
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Identifier written to and expected in a document's `type` field.
+pub const FORMAT_TYPE: &str = "viveco";
+
+/// Oldest document version this build can load.
+pub const MIN_FORMAT_VERSION: u32 = 1;
 
 /// Version written to and expected by this build of the format.
 pub const FORMAT_VERSION: u32 = 4;
@@ -304,27 +311,73 @@ impl<'de> Deserialize<'de> for Rgba8 {
 // ---------------------------------------------------------------------------
 
 /// The root of a vector-art file.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     /// Format version; currently [`FORMAT_VERSION`].
-    #[serde(default = "default_version")]
     pub version: u32,
 
-    #[serde(default)]
     pub shapes: Vec<Shape>,
 
     /// Top-level bones of the rig, in tree order. Empty for an unrigged
     /// document.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bones: Vec<Bone>,
 
     /// Animation clips stored in the document.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub animations: Vec<Animation>,
 }
 
-fn default_version() -> u32 {
-    FORMAT_VERSION
+impl Serialize for Document {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("type", FORMAT_TYPE)?;
+        map.serialize_entry("version", &self.version)?;
+        map.serialize_entry("shapes", &self.shapes)?;
+        if !self.bones.is_empty() {
+            map.serialize_entry("bones", &self.bones)?;
+        }
+        if !self.animations.is_empty() {
+            map.serialize_entry("animations", &self.animations)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Document {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(rename = "type")]
+            kind: String,
+            version: u32,
+            #[serde(default)]
+            shapes: Vec<Shape>,
+            #[serde(default)]
+            bones: Vec<Bone>,
+            #[serde(default)]
+            animations: Vec<Animation>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.kind != FORMAT_TYPE {
+            return Err(de::Error::custom(format!(
+                "expected type {FORMAT_TYPE:?}, found {:?}",
+                wire.kind
+            )));
+        }
+        if !(MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&wire.version) {
+            return Err(de::Error::custom(format!(
+                "unsupported viveco version {} (supported {MIN_FORMAT_VERSION}..={FORMAT_VERSION})",
+                wire.version
+            )));
+        }
+
+        Ok(Self {
+            version: wire.version,
+            shapes: wire.shapes,
+            bones: wire.bones,
+            animations: wire.animations,
+        })
+    }
 }
 
 impl Default for Document {
@@ -1464,6 +1517,7 @@ mod tests {
     #[test]
     fn loading_animations_normalizes_their_keyframes() {
         let json = r#"{
+            "type": "viveco",
             "version": 3,
             "animations": [{
                 "duration": 4.0,
@@ -1515,6 +1569,7 @@ mod tests {
         // `ShapeProperty` is uninhabited, so a shape-targeted keyframe cannot
         // be constructed or deserialized.
         let json = r#"{
+            "type": "viveco",
             "version": 3,
             "animations": [{
                 "duration": 1.0,
