@@ -1,15 +1,26 @@
-//! The Viveco vector-art and animation document format.
+//! The Viveco vector-art and animation asset format.
 //!
-//! This crate owns the format's document object model ([`model`]), reading and
-//! writing it as JSON, and the operations other tools need to inspect or edit a
-//! document:
+//! This crate owns the format's object model ([`Asset`]), reading and writing
+//! it as JSON, and the operations other tools need to inspect or edit an
+//! asset:
 //!
-//! - [`model`]: the complete document object model and its JSON encoding.
-//! - [`rig`]: skeleton tree addressing and bone manipulation.
-//! - [`pose`]: poses and the linear-blend skinning they apply to artwork.
-//! - [`animation`]: sampling animation curves into poses.
+//! - [`Asset`]: the complete asset, its JSON encoding, and its shape/bone
+//!   addressing.
+//! - shapes: [`Shape`], [`Path`], [`Segment`], styling, and vertex weights.
+//! - bones: [`Bone`], the skeleton tree, and rig editing.
+//! - poses: [`Pose`] and the linear-blend skinning it applies to artwork.
+//! - animation: [`Animation`] clips, keyframes, sampling, and playback.
+//!
+//! All of these types live at the crate root.
 
-pub mod animation;
-pub mod model;
-pub mod pose;
-pub mod rig;
+mod animation;
+mod asset;
+mod bone;
+mod pose;
+mod shape;
+
+pub use animation::*;
+pub use asset::*;
+pub use bone::*;
+pub use pose::*;
+pub use shape::*;

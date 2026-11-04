@@ -27,18 +27,9 @@ use crate::editor::{
 use crate::menu_bar::MenuState;
 use crate::render::to_kurbo_point;
 use crate::weight_paint::{WeightPaintBrush, paint_document};
-use viveco::animation::{sample_pose, set_bone_keyframe};
-use viveco::model::{
-    Bone, BoneIndex, BoneProperty, Document, Point, insertion_map, move_map, removal_map,
-};
-use viveco::pose::{BonePose, Pose, Similarity};
-
-// Skeleton model operations are shared with other Viveco consumers, so they
-// live in the `viveco` crate. Re-export them here for the editor's UI modules.
-pub use viveco::rig::{
-    BoneEnd, add_bone, add_child_bone, bone_endpoints, bone_name_at, bone_world,
-    drag_bone_endpoint, is_ancestor_or_self, move_bone_into, move_bone_near, parent_of,
-    parent_tail, parent_world, remove_bone, rename_bone_at, translate_bone, unique_bone_name,
+use viveco::{
+    Asset, Bone, BoneEnd, BoneIndex, BonePose, BoneProperty, Point, Pose, Similarity,
+    insertion_map, move_map, removal_map,
 };
 
 /// Extra distance, in screen pixels, within which a click counts as hitting a
@@ -247,7 +238,7 @@ fn freeze_connected_pivots(editor: &mut EditorState, base: BoneIndex) {
         }
     }
 
-    let parent = parent_tail(&editor.document, base);
+    let parent = editor.document.parent_tail(base);
     let Some(bone) = editor.document.bone_by_index(base) else {
         return;
     };
@@ -277,7 +268,7 @@ fn freeze_connected_pivots(editor: &mut EditorState, base: BoneIndex) {
 /// This is the target a dragged head snaps to, so it can attach to any bone
 /// that would not put it inside itself.
 fn nearest_tail(
-    document: &Document,
+    document: &Asset,
     pose: &Pose,
     point: Point,
     tolerance: f32,
@@ -290,7 +281,7 @@ fn nearest_tail(
         parent_world: Similarity,
         point: Point,
         tolerance: f32,
-        document: &Document,
+        document: &Asset,
         exclude: BoneIndex,
         pose: &Pose,
         cursor: &mut BoneIndex,
@@ -303,7 +294,7 @@ fn nearest_tail(
             let local = pose.get(bone_index).local(rest_head, bone.head.is_none());
             let world = Similarity::compose(parent_world, local);
             // A bone cannot attach to itself or to one of its descendants.
-            if !is_ancestor_or_self(document, exclude, bone_index) {
+            if !document.is_ancestor_or_self(exclude, bone_index) {
                 // Snap against where the joint is drawn, not its rest position.
                 let distance = distance(point, world.apply(bone.tail));
                 if distance <= tolerance && best.as_ref().is_none_or(|(best, _)| distance < *best) {
@@ -349,7 +340,7 @@ fn nearest_tail(
 /// `exclude` or one of its ancestors is skipped, since making it a child of the
 /// dragged bone would form a cycle.
 fn nearest_head(
-    document: &Document,
+    document: &Asset,
     pose: &Pose,
     point: Point,
     tolerance: f32,
@@ -362,7 +353,7 @@ fn nearest_head(
         parent_world: Similarity,
         point: Point,
         tolerance: f32,
-        document: &Document,
+        document: &Asset,
         exclude: BoneIndex,
         pose: &Pose,
         cursor: &mut BoneIndex,
@@ -380,7 +371,7 @@ fn nearest_head(
             // ancestor of it is skipped, since adopting it would form a cycle.
             if let Some(head) = bone.head
                 && Some(head) != parent_tail
-                && !is_ancestor_or_self(document, bone_index, exclude)
+                && !document.is_ancestor_or_self(bone_index, exclude)
             {
                 // Snap against where the head is drawn, not its rest position.
                 let distance = distance(point, world.apply(head));
@@ -430,8 +421,8 @@ fn nearest_head(
 /// of the drag—a stored-head bone pivots about its frozen pivot and a connected
 /// bone about its head (the parent's tail, which the drag does not move)—so the
 /// other endpoint stays put.
-fn endpoint_rest_point(document: &Document, pose: &Pose, index: BoneIndex, posed: Point) -> Point {
-    bone_world(document, pose, index).inverse().apply(posed)
+fn endpoint_rest_point(document: &Asset, pose: &Pose, index: BoneIndex, posed: Point) -> Point {
+    document.bone_world(pose, index).inverse().apply(posed)
 }
 
 /// Prepares a body drag of `address`, returning the inverse transform that
@@ -443,7 +434,7 @@ fn endpoint_rest_point(document: &Document, pose: &Pose, index: BoneIndex, posed
 /// exact mapping back to rest.
 fn begin_bulk_drag(editor: &mut EditorState, index: BoneIndex) -> Similarity {
     freeze_connected_pivots(editor, index);
-    bone_world(&editor.document, &editor.pose, index).inverse()
+    editor.document.bone_world(&editor.pose, index).inverse()
 }
 
 /// One bone's drawn head and tail under a pose.
@@ -479,12 +470,12 @@ fn capture_posed(
 /// The drawn endpoints of the subtree at `address`, plus the parent frame they
 /// hang from, so compensation can be driven from the same frame afterwards.
 fn capture_subtree(
-    document: &Document,
+    document: &Asset,
     pose: &Pose,
     index: BoneIndex,
 ) -> Option<(Vec<PosedEnds>, Option<Point>, Similarity)> {
-    let frame_tail = parent_tail(document, index);
-    let frame_world = parent_world(document, pose, index);
+    let frame_tail = document.parent_tail(index);
+    let frame_world = document.parent_world(pose, index);
     let bone = document.bone_by_index(index)?;
     let mut cursor = index;
     let mut posed = Vec::new();
@@ -565,7 +556,7 @@ fn compensate_posed(
 /// Applies [`compensate_posed`] to the subtree rooted at `address`.
 #[allow(clippy::too_many_arguments)]
 fn compensate_subtree(
-    document: &mut Document,
+    document: &mut Asset,
     pose: &Pose,
     index: BoneIndex,
     parent_tail: Option<Point>,
@@ -607,7 +598,7 @@ fn drag_endpoint_keeping_children(
 ) {
     match end {
         BoneEnd::Head => {
-            drag_bone_endpoint(&mut editor.document, index, end, rest);
+            editor.document.drag_bone_endpoint(index, end, rest);
         }
         BoneEnd::Tail => {
             let Some((old, frame_tail, frame_world)) =
@@ -615,7 +606,7 @@ fn drag_endpoint_keeping_children(
             else {
                 return;
             };
-            if !drag_bone_endpoint(&mut editor.document, index, end, rest) {
+            if !editor.document.drag_bone_endpoint(index, end, rest) {
                 return;
             }
             compensate_subtree(
@@ -638,7 +629,7 @@ fn drag_endpoint_keeping_children(
 /// [`add_child_bone`] inserts inside the parent's subtree, so every later bone
 /// shifts up by one.
 fn add_child_bone_with_pose(
-    document: &mut Document,
+    document: &mut Asset,
     pose: &mut Pose,
     parent: BoneIndex,
     head: Point,
@@ -647,7 +638,7 @@ fn add_child_bone_with_pose(
 ) -> Option<BoneIndex> {
     let count = document.bone_count();
     let start = parent + document.bone_subtree_len(parent)?;
-    let index = add_child_bone(document, parent, head, tail, name)?;
+    let index = document.add_child_bone(parent, head, tail, name)?;
     pose.apply_bone_map(&insertion_map(count, start, 1));
     Some(index)
 }
@@ -655,14 +646,14 @@ fn add_child_bone_with_pose(
 /// Reparents `source` under `target`, remapping `pose` to match the document's
 /// new bone indices.
 fn move_bone_into_with_pose(
-    document: &mut Document,
+    document: &mut Asset,
     pose: &mut Pose,
     source: BoneIndex,
     target: BoneIndex,
 ) -> Option<BoneIndex> {
     let count = document.bone_count();
     let len = document.bone_subtree_len(source)?;
-    let index = move_bone_into(document, source, target)?;
+    let index = document.move_bone_into(source, target)?;
     pose.apply_bone_map(&move_map(count, source, len, index));
     Some(index)
 }
@@ -694,7 +685,7 @@ pub fn finish_endpoint_drag(
             let Some(target) = nearest_tail(&editor.document, pose, cursor, snap, index) else {
                 return false;
             };
-            if parent_of(&editor.document, index) == Some(target) {
+            if editor.document.parent_of(index) == Some(target) {
                 // Reconnecting to the current parent only omits the head. The
                 // bone switches from its frozen pivot to the parent's live tail
                 // joint, so its drawn tail would jump; restore it in rest
@@ -741,8 +732,8 @@ pub fn finish_endpoint_drag(
             if let Some(bone) = editor.document.bone_by_index_mut(new_index) {
                 bone.head = None;
             }
-            let frame_tail = parent_tail(&editor.document, new_index);
-            let frame_world = parent_world(&editor.document, pose, new_index);
+            let frame_tail = editor.document.parent_tail(new_index);
+            let frame_world = editor.document.parent_world(pose, new_index);
             compensate_subtree(
                 &mut editor.document,
                 pose,
@@ -787,10 +778,15 @@ pub fn finish_endpoint_drag(
                 .get(index)
                 .copied()
                 .flatten();
-            let new_tail = bone_world(&editor.document, pose, index)
+            let new_tail = editor
+                .document
+                .bone_world(pose, index)
                 .inverse()
                 .apply(world_joint);
-            if !drag_bone_endpoint(&mut editor.document, index, BoneEnd::Tail, new_tail) {
+            if !editor
+                .document
+                .drag_bone_endpoint(index, BoneEnd::Tail, new_tail)
+            {
                 return false;
             }
             compensate_subtree(
@@ -814,8 +810,8 @@ pub fn finish_endpoint_drag(
             }
             // The target now pivots about the dragged bone's tail joint, so
             // restore its drawn geometry from the endpoints sampled earlier.
-            let frame_tail = parent_tail(&editor.document, new_target);
-            let frame_world = parent_world(&editor.document, pose, new_target);
+            let frame_tail = editor.document.parent_tail(new_target);
+            let frame_world = editor.document.parent_world(pose, new_target);
             compensate_subtree(
                 &mut editor.document,
                 pose,
@@ -911,12 +907,7 @@ fn distance_to_kite(point: Point, head: Point, tail: Point) -> f32 {
 
 /// Returns the bone whose posed body is nearest to `point`, within
 /// `tolerance`.
-pub fn bone_near(
-    document: &Document,
-    pose: &Pose,
-    point: Point,
-    tolerance: f32,
-) -> Option<BoneIndex> {
+pub fn bone_near(document: &Asset, pose: &Pose, point: Point, tolerance: f32) -> Option<BoneIndex> {
     #[allow(clippy::too_many_arguments)]
     fn walk(
         bones: &[Bone],
@@ -977,7 +968,7 @@ pub fn bone_near(
 /// parent's tail is that same shared joint, so it resolves to the parent's
 /// tail rather than to a separate head.
 pub fn endpoint_near(
-    document: &Document,
+    document: &Asset,
     pose: &Pose,
     point: Point,
     radius: f32,
@@ -1060,7 +1051,9 @@ pub fn endpoint_near(
 
 /// Starts renaming the bone at `index`.
 pub fn begin_bone_rename(editor: &mut EditorState, index: BoneIndex) {
-    let buffer = bone_name_at(&editor.document, index)
+    let buffer = editor
+        .document
+        .bone_name(index)
         .unwrap_or_default()
         .to_owned();
     editor.selected_bone = Some(index);
@@ -1075,7 +1068,7 @@ pub fn commit_bone_rename(editor: &mut EditorState) {
     let name = renaming.buffer.trim().to_owned();
     // Names are descriptive only; weights, poses, and animation targets are
     // keyed by index, so a rename never disturbs them.
-    if rename_bone_at(&mut editor.document, renaming.index, name) {
+    if editor.document.rename_bone(renaming.index, name) {
         editor.structure_revision += 1;
     }
 }
@@ -1098,7 +1091,7 @@ pub fn delete_selected_bone(editor: &mut EditorState) -> bool {
         return false;
     };
     let count = editor.document.bone_count();
-    if remove_bone(&mut editor.document, index) {
+    if editor.document.remove_bone(index) {
         editor.pose.apply_bone_map(&removal_map(count, index, len));
         editor.structure_revision += 1;
         true
@@ -1350,7 +1343,7 @@ fn handle_bone_select(
             }) => {
                 let delta = [point[0] - last[0], point[1] - last[1]];
                 let rest_delta = inverse.apply_vector(delta);
-                translate_bone(&mut editor.document, index, rest_delta);
+                editor.document.translate_bone(index, rest_delta);
                 editor.rig.drag = Some(BoneDrag::Bulk {
                     index,
                     last: point,
@@ -1434,9 +1427,11 @@ fn handle_bone_pose(
             .document
             .bone_by_index(index)
             .is_some_and(|bone| bone.head.is_none());
-        let (rest_head, pivot) = bone_endpoints(&editor.document, index)
+        let (rest_head, pivot) = editor
+            .document
+            .bone_endpoints(index)
             .map(|(head, _)| {
-                let posed = bone_world(&editor.document, &editor.pose, index).apply(head);
+                let posed = editor.document.bone_world(&editor.pose, index).apply(head);
                 (head, posed)
             })
             .unwrap_or((point, point));
@@ -1445,7 +1440,7 @@ fn handle_bone_pose(
         } else {
             editor.pose.get(index).with_pivot(rest_head)
         };
-        let parent_inverse = parent_world(&editor.document, &editor.pose, index).inverse();
+        let parent_inverse = editor.document.parent_world(&editor.pose, index).inverse();
 
         // Selecting clears any previous gesture, so the drag is stored after it.
         editor.select_bone(Some(index));
@@ -1507,9 +1502,11 @@ fn handle_animate_bone(
             .document
             .bone_by_index(index)
             .is_some_and(|bone| bone.head.is_none());
-        let (rest_head, pivot) = bone_endpoints(&editor.document, index)
+        let (rest_head, pivot) = editor
+            .document
+            .bone_endpoints(index)
             .map(|(head, _)| {
-                let posed = bone_world(&editor.document, &pose, index).apply(head);
+                let posed = editor.document.bone_world(&pose, index).apply(head);
                 (head, posed)
             })
             .unwrap_or((point, point));
@@ -1518,7 +1515,7 @@ fn handle_animate_bone(
         } else {
             pose.get(index).with_pivot(rest_head)
         };
-        let parent_inverse = parent_world(&editor.document, &pose, index).inverse();
+        let parent_inverse = editor.document.parent_world(&pose, index).inverse();
 
         // Selecting clears any previous gesture, so store the drag after it.
         editor.select_bone(Some(index));
@@ -1549,7 +1546,7 @@ fn handle_animate_bone(
 /// The pose the animate page shows: the selected animation at the playhead.
 fn animate_pose(editor: &EditorState) -> Pose {
     crate::animate::selected_animation(editor)
-        .map(|animation| sample_pose(&editor.document, animation, editor.playhead))
+        .map(|animation| animation.sample_pose(&editor.document, editor.playhead))
         .unwrap_or_default()
 }
 
@@ -1566,15 +1563,13 @@ fn key_dragged_pose(editor: &mut EditorState, drag: &PoseDrag, pose: BonePose) {
     };
     match drag.kind {
         PoseKind::Rotate => {
-            set_bone_keyframe(animation, bone, BoneProperty::Angle, time, pose.rotation)
+            animation.set_bone_keyframe(bone, BoneProperty::Angle, time, pose.rotation)
         }
         PoseKind::Translate => {
-            set_bone_keyframe(animation, bone, BoneProperty::X, time, pose.translation[0]);
-            set_bone_keyframe(animation, bone, BoneProperty::Y, time, pose.translation[1]);
+            animation.set_bone_keyframe(bone, BoneProperty::X, time, pose.translation[0]);
+            animation.set_bone_keyframe(bone, BoneProperty::Y, time, pose.translation[1]);
         }
-        PoseKind::Scale => {
-            set_bone_keyframe(animation, bone, BoneProperty::Scale, time, pose.scale)
-        }
+        PoseKind::Scale => animation.set_bone_keyframe(bone, BoneProperty::Scale, time, pose.scale),
     }
 }
 
@@ -1653,7 +1648,7 @@ fn handle_bone_pen(
             Some(chain) => {
                 if distance(chain.last, point) > pixel * MIN_BONE_SCREEN_LENGTH {
                     // Give each new bone a readable name no other bone uses.
-                    let name = unique_bone_name(&editor.document);
+                    let name = editor.document.unique_bone_name();
                     let index = match chain.parent {
                         Some(parent) => add_child_bone_with_pose(
                             &mut editor.document,
@@ -1663,7 +1658,7 @@ fn handle_bone_pen(
                             point,
                             name,
                         ),
-                        None => Some(add_bone(&mut editor.document, chain.last, point, name)),
+                        None => Some(editor.document.add_bone(chain.last, point, name)),
                     };
                     if let Some(index) = index {
                         editor.selected_bone = Some(index);
@@ -1694,7 +1689,7 @@ fn handle_bone_pen(
 /// previewing the next pen joint.
 pub fn draw_bone_overlay(
     scene: &mut Scene,
-    document: &Document,
+    document: &Asset,
     pose: &Pose,
     selected: Option<BoneIndex>,
     preview: Option<(Point, Point)>,
@@ -1715,9 +1710,9 @@ pub fn draw_bone_overlay(
 
     // Redraw the selection last so it is never hidden behind another bone.
     if let Some(index) = selected
-        && let Some((rest_head, rest_tail)) = bone_endpoints(document, index)
+        && let Some((rest_head, rest_tail)) = document.bone_endpoints(index)
     {
-        let world = bone_world(document, pose, index);
+        let world = document.bone_world(pose, index);
         let head = world.apply(rest_head);
         let tail = world.apply(rest_tail);
         draw_bone(
@@ -1878,9 +1873,7 @@ fn px(value: f32, scale: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::{
-        Animation, BoneProperty, FORMAT_VERSION, Keyframe, KeyframeTarget, Path, Shape,
-    };
+    use viveco::{Animation, BoneProperty, Keyframe, KeyframeTarget, Path, Shape};
 
     /// A shape whose only path carries the given start/anchor weights.
     fn shape_with_weights(start: &[(BoneIndex, f32)], anchor: &[(BoneIndex, f32)]) -> Shape {
@@ -1897,9 +1890,8 @@ mod tests {
         }
     }
 
-    fn document_with_bones() -> Document {
-        Document {
-            version: FORMAT_VERSION,
+    fn document_with_bones() -> Asset {
+        Asset {
             animations: Vec::new(),
             shapes: Vec::new(),
             bones: vec![Bone::from_endpoints([0.0, 0.0], [10.0, 0.0])],
@@ -1915,14 +1907,14 @@ mod tests {
 
     #[test]
     fn a_new_bone_runs_from_head_to_tail() {
-        let mut document = Document::new();
-        let index = add_bone(&mut document, [10.0, 20.0], [10.0, 50.0], "Bone");
+        let mut document = Asset::new();
+        let index = document.add_bone([10.0, 20.0], [10.0, 50.0], "Bone");
 
         let bone = document.bone_by_index(index).unwrap();
         assert_eq!(bone.head, Some([10.0, 20.0]));
         assert_point(bone.tail, [10.0, 50.0]);
         assert_eq!(
-            bone_endpoints(&document, index),
+            document.bone_endpoints(index),
             Some(([10.0, 20.0], [10.0, 50.0]))
         );
     }
@@ -1931,59 +1923,44 @@ mod tests {
     fn dragging_the_head_moves_only_the_head() {
         let mut document = document_with_bones();
 
-        assert!(drag_bone_endpoint(
-            &mut document,
-            0,
-            BoneEnd::Head,
-            [5.0, 5.0]
-        ));
-        assert_eq!(
-            bone_endpoints(&document, 0),
-            Some(([5.0, 5.0], [10.0, 0.0]))
-        );
+        assert!(document.drag_bone_endpoint(0, BoneEnd::Head, [5.0, 5.0]));
+        assert_eq!(document.bone_endpoints(0), Some(([5.0, 5.0], [10.0, 0.0])));
     }
 
     #[test]
     fn dragging_the_tail_moves_only_the_tail() {
         let mut document = document_with_bones();
 
-        assert!(drag_bone_endpoint(
-            &mut document,
-            0,
-            BoneEnd::Tail,
-            [0.0, 20.0]
-        ));
-        let (head, tail) = bone_endpoints(&document, 0).unwrap();
+        assert!(document.drag_bone_endpoint(0, BoneEnd::Tail, [0.0, 20.0]));
+        let (head, tail) = document.bone_endpoints(0).unwrap();
         assert_point(head, [0.0, 0.0]);
         assert_point(tail, [0.0, 20.0]);
     }
 
     #[test]
     fn dragging_a_parents_tail_carries_its_connected_child() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child =
-            add_child_bone(&mut document, parent, [10.0, 0.0], [10.0, 10.0], "Child").unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
 
         // A connected child shares the parent's tail joint, so moving the tail
         // carries the child's head with it while its own tail stays put.
-        assert!(drag_bone_endpoint(
-            &mut document,
-            parent,
-            BoneEnd::Tail,
-            [0.0, 10.0]
-        ));
+        assert!(document.drag_bone_endpoint(parent, BoneEnd::Tail, [0.0, 10.0]));
 
-        let (head, tail) = bone_endpoints(&document, child).unwrap();
+        let (head, tail) = document.bone_endpoints(child).unwrap();
         assert_point(head, [0.0, 10.0]);
         assert_point(tail, [10.0, 10.0]);
     }
 
     #[test]
     fn a_connected_childs_joint_is_its_parents_tail() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        add_child_bone(&mut document, parent, [10.0, 0.0], [10.0, 10.0], "Child").unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
 
         // The connected child has no head handle of its own: the joint at its
         // head is the parent's tail handle.
@@ -1995,8 +1972,8 @@ mod tests {
 
     #[test]
     fn a_loose_head_is_its_own_handle() {
-        let mut document = Document::new();
-        add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Bone");
+        let mut document = Asset::new();
+        document.add_bone([0.0, 0.0], [10.0, 0.0], "Bone");
 
         assert_eq!(
             endpoint_near(&document, &Pose::default(), [0.0, 0.0], 1.0),
@@ -2006,9 +1983,11 @@ mod tests {
 
     #[test]
     fn dragging_a_head_onto_another_bones_tail_reparents_it() {
-        let mut editor = EditorState::new(Document::new());
-        let dragged = add_bone(&mut editor.document, [40.0, 40.0], [50.0, 40.0], "Dragged");
-        add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Host");
+        let mut editor = EditorState::new(Asset::new());
+        let dragged = editor
+            .document
+            .add_bone([40.0, 40.0], [50.0, 40.0], "Dragged");
+        editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Host");
 
         // Releasing the head near the host's tail attaches it there.
         assert!(finish_endpoint_drag(
@@ -2025,16 +2004,16 @@ mod tests {
         assert_eq!(attached, 1);
         assert_eq!(editor.document.bone_by_index(attached).unwrap().head, None);
         assert_eq!(
-            bone_endpoints(&editor.document, attached),
+            editor.document.bone_endpoints(attached),
             Some(([10.0, 0.0], [50.0, 40.0]))
         );
     }
 
     #[test]
     fn dragging_a_tail_onto_another_bones_head_reparents_it() {
-        let mut editor = EditorState::new(Document::new());
-        let dragged = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Dragged");
-        add_bone(&mut editor.document, [20.0, 0.0], [30.0, 0.0], "Host");
+        let mut editor = EditorState::new(Asset::new());
+        let dragged = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Dragged");
+        editor.document.add_bone([20.0, 0.0], [30.0, 0.0], "Host");
 
         // Releasing the tail near the host's head takes the host as a child.
         assert!(finish_endpoint_drag(
@@ -2046,25 +2025,25 @@ mod tests {
             &mut Pose::default()
         ));
 
-        let (head, tail) = bone_endpoints(&editor.document, dragged).unwrap();
+        let (head, tail) = editor.document.bone_endpoints(dragged).unwrap();
         assert_point(head, [0.0, 0.0]);
         assert_point(tail, [20.0, 0.0]);
         // The host became the dragged bone's first child.
         let host = 1;
         assert_eq!(editor.document.bone_by_index(host).unwrap().head, None);
         assert_eq!(
-            bone_endpoints(&editor.document, host),
+            editor.document.bone_endpoints(host),
             Some(([20.0, 0.0], [30.0, 0.0]))
         );
     }
 
     #[test]
     fn snapping_a_tail_keeps_the_dragged_selection_valid() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         // The target is an earlier sibling, so removing it shifts the dragged
         // bone down one index.
-        add_bone(&mut editor.document, [20.0, 0.0], [30.0, 0.0], "First");
-        let dragged = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Second");
+        editor.document.add_bone([20.0, 0.0], [30.0, 0.0], "First");
+        let dragged = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Second");
         editor.select_bone(Some(dragged));
 
         assert!(finish_endpoint_drag(
@@ -2077,7 +2056,7 @@ mod tests {
         ));
 
         let selected = editor.selected_bone.expect("a bone stays selected");
-        assert_eq!(bone_name_at(&editor.document, selected), Some("Second"));
+        assert_eq!(editor.document.bone_name(selected), Some("Second"));
         // The dragged bone shifted down to the front; the host is its child.
         assert_eq!(selected, 0);
         assert_eq!(editor.document.bone_by_index(1).unwrap().name, "First");
@@ -2085,9 +2064,9 @@ mod tests {
 
     #[test]
     fn snapping_a_tail_keeps_the_attached_bones_drawn_tail_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let dragged = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Dragged");
-        let host = add_bone(&mut editor.document, [20.0, 0.0], [30.0, 0.0], "Host");
+        let mut editor = EditorState::new(Asset::new());
+        let dragged = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Dragged");
+        let host = editor.document.add_bone([20.0, 0.0], [30.0, 0.0], "Host");
         // Pose both so only the shared joint may move, not the attached body.
         editor.pose.set(
             0,
@@ -2105,8 +2084,8 @@ mod tests {
             },
         );
 
-        let (host_head, host_tail) = bone_endpoints(&editor.document, host).unwrap();
-        let host_world = bone_world(&editor.document, &editor.pose, host);
+        let (host_head, host_tail) = editor.document.bone_endpoints(host).unwrap();
+        let host_world = editor.document.bone_world(&editor.pose, host);
         let drawn_tail_before = host_world.apply(host_tail);
         let cursor = host_world.apply(host_head);
 
@@ -2124,49 +2103,51 @@ mod tests {
         // The host is now a child of the dragged bone, but its drawn tail must
         // stay where it was; only rest geometry changed.
         let attached = 1;
-        assert_eq!(bone_name_at(&editor.document, attached), Some("Host"));
-        let (_, tail) = bone_endpoints(&editor.document, attached).unwrap();
-        let world = bone_world(&editor.document, &editor.pose, attached);
+        assert_eq!(editor.document.bone_name(attached), Some("Host"));
+        let (_, tail) = editor.document.bone_endpoints(attached).unwrap();
+        let world = editor.document.bone_world(&editor.pose, attached);
         assert_point(world.apply(tail), drawn_tail_before);
     }
 
     #[test]
     fn translating_a_bone_leaves_its_children_in_place() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child =
-            add_child_bone(&mut document, parent, [10.0, 0.0], [10.0, 10.0], "Child").unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
 
-        assert!(translate_bone(&mut document, parent, [5.0, 2.0]));
+        assert!(document.translate_bone(parent, [5.0, 2.0]));
 
         assert_eq!(
-            bone_endpoints(&document, parent),
+            document.bone_endpoints(parent),
             Some(([5.0, 2.0], [15.0, 2.0]))
         );
-        let (head, tail) = bone_endpoints(&document, child).unwrap();
+        let (head, tail) = document.bone_endpoints(child).unwrap();
         assert_point(head, [10.0, 0.0]);
         assert_point(tail, [10.0, 10.0]);
     }
 
     #[test]
     fn a_child_at_its_parents_tail_omits_its_head() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child =
-            add_child_bone(&mut document, parent, [10.0, 0.0], [20.0, 0.0], "Child").unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document
+            .add_child_bone(parent, [10.0, 0.0], [20.0, 0.0], "Child")
+            .unwrap();
 
         // Connected at the parent's tail, so it stores no head of its own.
         assert_eq!(document.bone_by_index(child).unwrap().head, None);
         assert_eq!(
-            bone_endpoints(&document, child),
+            document.bone_endpoints(child),
             Some(([10.0, 0.0], [20.0, 0.0]))
         );
     }
 
     #[test]
     fn a_click_on_the_wide_part_of_a_bone_hits_it() {
-        let mut document = Document::new();
-        let index = add_bone(&mut document, [0.0, 0.0], [100.0, 0.0], "Bone");
+        let mut document = Asset::new();
+        let index = document.add_bone([0.0, 0.0], [100.0, 0.0], "Bone");
 
         // The kite is widest near its shoulder, well away from the centre
         // line, so clicking the painted body selects the bone.
@@ -2183,83 +2164,79 @@ mod tests {
 
     #[test]
     fn translating_by_zero_leaves_connected_children_attached() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child =
-            add_child_bone(&mut document, parent, [10.0, 0.0], [10.0, 10.0], "Child").unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
 
         // The first frame of a body drag applies no movement; it must not
         // silently materialize the child's head and split the shared joint.
-        assert!(translate_bone(&mut document, parent, [0.0, 0.0]));
+        assert!(document.translate_bone(parent, [0.0, 0.0]));
         assert_eq!(document.bone_by_index(child).unwrap().head, None);
     }
 
     #[test]
     fn reordering_a_connected_child_keeps_it_shared() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child =
-            add_child_bone(&mut document, parent, [10.0, 0.0], [10.0, 10.0], "Child").unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
         assert_eq!(document.bone_by_index(child).unwrap().head, None);
 
         // Dropping a connected child back onto its own parent reorders it;
         // the shared joint must survive.
-        let moved = move_bone_into(&mut document, child, parent).unwrap();
+        let moved = document.move_bone_into(child, parent).unwrap();
         assert_eq!(moved, 1);
         assert_eq!(document.bone_by_index(moved).unwrap().head, None);
     }
 
     #[test]
     fn dragging_a_shared_tail_carries_every_connected_child() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let a = add_child_bone(&mut document, parent, [10.0, 0.0], [10.0, 10.0], "A").unwrap();
-        let b = add_child_bone(&mut document, parent, [10.0, 0.0], [10.0, -10.0], "B").unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let a = document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "A")
+            .unwrap();
+        let b = document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, -10.0], "B")
+            .unwrap();
 
-        assert!(drag_bone_endpoint(
-            &mut document,
-            parent,
-            BoneEnd::Tail,
-            [20.0, 0.0]
-        ));
+        assert!(document.drag_bone_endpoint(parent, BoneEnd::Tail, [20.0, 0.0]));
 
         // Every connected child shares the moved joint, so all their heads
         // follow it and the joint never comes apart.
         for child in [a, b] {
-            let (head, _) = bone_endpoints(&document, child).unwrap();
+            let (head, _) = document.bone_endpoints(child).unwrap();
             assert_point(head, [20.0, 0.0]);
         }
     }
 
     #[test]
     fn dragging_a_tail_pulls_in_a_child_stored_on_it() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_bone(&mut document, [10.0, 0.0], [10.0, 10.0], "Child");
-        let child = move_bone_into(&mut document, child, parent).unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document.add_bone([10.0, 0.0], [10.0, 10.0], "Child");
+        let child = document.move_bone_into(child, parent).unwrap();
         assert_eq!(document.bone_by_index(child).unwrap().head, None);
 
         // Stand in for an older file that stored a redundant head on the
         // parent's tail instead of omitting it.
         document.bone_by_index_mut(child).unwrap().head = Some([10.0, 0.0]);
 
-        assert!(drag_bone_endpoint(
-            &mut document,
-            parent,
-            BoneEnd::Tail,
-            [20.0, 0.0]
-        ));
+        assert!(document.drag_bone_endpoint(parent, BoneEnd::Tail, [20.0, 0.0]));
         // A stored head sitting on the old tail is the shared joint, so it is
         // folded back into an omitted head and follows the tail.
         assert_eq!(document.bone_by_index(child).unwrap().head, None);
-        let (head, _) = bone_endpoints(&document, child).unwrap();
+        let (head, _) = document.bone_endpoints(child).unwrap();
         assert_point(head, [20.0, 0.0]);
     }
 
     #[test]
     fn dragging_a_scaled_bones_head_follows_the_cursor() {
-        let mut editor = EditorState::new(Document::new());
-        let bone = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Bone");
+        let mut editor = EditorState::new(Asset::new());
+        let bone = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Bone");
         // Scaling about the head must not damp the head drag.
         editor.pose.set(
             0,
@@ -2270,28 +2247,26 @@ mod tests {
         );
 
         let rest = endpoint_rest_point(&editor.document, &editor.pose, bone, [4.0, 3.0]);
-        drag_bone_endpoint(&mut editor.document, bone, BoneEnd::Head, rest);
+        editor
+            .document
+            .drag_bone_endpoint(bone, BoneEnd::Head, rest);
 
         // The posed head lands exactly on the cursor and the posed tail stays
         // where the scale put it.
-        let posed = |point: Point| bone_world(&editor.document, &editor.pose, bone).apply(point);
-        let (head, tail) = bone_endpoints(&editor.document, bone).unwrap();
+        let posed = |point: Point| editor.document.bone_world(&editor.pose, bone).apply(point);
+        let (head, tail) = editor.document.bone_endpoints(bone).unwrap();
         assert_point(posed(head), [4.0, 3.0]);
         assert_point(posed(tail), [20.0, 0.0]);
     }
 
     #[test]
     fn dragging_a_posed_shared_joint_keeps_the_chain_connected() {
-        let mut editor = EditorState::new(Document::new());
-        let parent = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_child_bone(
-            &mut editor.document,
-            parent,
-            [10.0, 0.0],
-            [20.0, 0.0],
-            "Child",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let parent = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = editor
+            .document
+            .add_child_bone(parent, [10.0, 0.0], [20.0, 0.0], "Child")
+            .unwrap();
         // Pose both bones so the child's frozen body must still track the joint.
         editor.pose.set(
             0,
@@ -2309,34 +2284,29 @@ mod tests {
         );
 
         // The parent's tail is the child's shared head joint.
-        assert!(drag_bone_endpoint(
-            &mut editor.document,
-            parent,
-            BoneEnd::Tail,
-            [12.0, 3.0]
-        ));
+        assert!(
+            editor
+                .document
+                .drag_bone_endpoint(parent, BoneEnd::Tail, [12.0, 3.0])
+        );
 
         let posed = |index: BoneIndex, point: Point| {
-            bone_world(&editor.document, &editor.pose, index).apply(point)
+            editor.document.bone_world(&editor.pose, index).apply(point)
         };
-        let (_, parent_tail) = bone_endpoints(&editor.document, parent).unwrap();
-        let (child_head, _) = bone_endpoints(&editor.document, child).unwrap();
+        let (_, parent_tail) = editor.document.bone_endpoints(parent).unwrap();
+        let (child_head, _) = editor.document.bone_endpoints(child).unwrap();
         // The child's drawn head stays on the parent's drawn tail.
         assert_point(posed(child, child_head), posed(parent, parent_tail));
     }
 
     #[test]
     fn dragging_a_posed_shared_joint_keeps_the_childs_tail_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let parent = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_child_bone(
-            &mut editor.document,
-            parent,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let parent = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = editor
+            .document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -2353,17 +2323,17 @@ mod tests {
         );
 
         let posed = |editor: &EditorState, index: BoneIndex, point: Point| {
-            bone_world(&editor.document, &editor.pose, index).apply(point)
+            editor.document.bone_world(&editor.pose, index).apply(point)
         };
-        let (_, child_tail) = bone_endpoints(&editor.document, child).unwrap();
+        let (_, child_tail) = editor.document.bone_endpoints(child).unwrap();
         let before = posed(&editor, child, child_tail);
 
         // Drag the shared joint through the editor path, which edits the
         // child's rest geometry to compensate.
         drag_endpoint_keeping_children(&mut editor, parent, BoneEnd::Tail, [12.0, 3.0]);
 
-        let (_, parent_tail) = bone_endpoints(&editor.document, parent).unwrap();
-        let (child_head, child_tail) = bone_endpoints(&editor.document, child).unwrap();
+        let (_, parent_tail) = editor.document.bone_endpoints(parent).unwrap();
+        let (child_head, child_tail) = editor.document.bone_endpoints(child).unwrap();
         // The head stays on the moved joint while the tail stays drawn where it
         // was, so no other endpoint moved.
         assert_point(
@@ -2375,16 +2345,12 @@ mod tests {
 
     #[test]
     fn bulk_dragging_a_posed_connected_child_moves_only_that_bone() {
-        let mut editor = EditorState::new(Document::new());
-        let parent = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_child_bone(
-            &mut editor.document,
-            parent,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let parent = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = editor
+            .document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -2402,9 +2368,9 @@ mod tests {
         );
 
         let posed = |editor: &EditorState, point: Point| {
-            bone_world(&editor.document, &editor.pose, child).apply(point)
+            editor.document.bone_world(&editor.pose, child).apply(point)
         };
-        let (head, tail) = bone_endpoints(&editor.document, child).unwrap();
+        let (head, tail) = editor.document.bone_endpoints(child).unwrap();
         let head_before = posed(&editor, head);
         let tail_before = posed(&editor, tail);
 
@@ -2417,9 +2383,9 @@ mod tests {
         // vector, rather than flinging the bone to a stale pose pivot.
         let world_delta = [3.0, -4.0];
         let rest_delta = inverse.apply_vector(world_delta);
-        translate_bone(&mut editor.document, child, rest_delta);
+        editor.document.translate_bone(child, rest_delta);
 
-        let (head, tail) = bone_endpoints(&editor.document, child).unwrap();
+        let (head, tail) = editor.document.bone_endpoints(child).unwrap();
         assert_point(
             posed(&editor, head),
             [
@@ -2438,9 +2404,11 @@ mod tests {
 
     #[test]
     fn snapping_uses_posed_joint_positions() {
-        let mut editor = EditorState::new(Document::new());
-        let dragged = add_bone(&mut editor.document, [40.0, 40.0], [50.0, 40.0], "Dragged");
-        add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Host");
+        let mut editor = EditorState::new(Asset::new());
+        let dragged = editor
+            .document
+            .add_bone([40.0, 40.0], [50.0, 40.0], "Dragged");
+        editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Host");
         // A quarter turn about the host's head draws its tail at [0, 10].
         editor.pose.set(
             1,
@@ -2471,24 +2439,20 @@ mod tests {
         // The head joins the host's drawn tail, while the dragged bone's own
         // drawn tail stays where it was; only rest geometry changed to make
         // that so.
-        let world = bone_world(&editor.document, &editor.pose, attached);
-        let (head, tail) = bone_endpoints(&editor.document, attached).unwrap();
+        let world = editor.document.bone_world(&editor.pose, attached);
+        let (head, tail) = editor.document.bone_endpoints(attached).unwrap();
         assert_point(world.apply(head), [0.0, 10.0]);
         assert_point(world.apply(tail), [50.0, 40.0]);
     }
 
     #[test]
     fn dragging_a_posed_parents_tail_leaves_the_child_posed_where_it_was() {
-        let mut editor = EditorState::new(Document::new());
-        let parent = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_child_bone(
-            &mut editor.document,
-            parent,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let parent = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = editor
+            .document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -2497,18 +2461,17 @@ mod tests {
             },
         );
 
-        let posed_child_tail = |document: &Document, pose: &Pose| {
-            let (_, tail) = bone_endpoints(document, child).unwrap();
-            bone_world(document, pose, child).apply(tail)
+        let posed_child_tail = |document: &Asset, pose: &Pose| {
+            let (_, tail) = document.bone_endpoints(child).unwrap();
+            document.bone_world(pose, child).apply(tail)
         };
         let before = posed_child_tail(&editor.document, &editor.pose);
 
-        assert!(drag_bone_endpoint(
-            &mut editor.document,
-            parent,
-            BoneEnd::Tail,
-            [0.0, 10.0]
-        ));
+        assert!(
+            editor
+                .document
+                .drag_bone_endpoint(parent, BoneEnd::Tail, [0.0, 10.0])
+        );
 
         // The child keeps its rest geometry, so its posed tail stays put even
         // though its parent's tail moved.
@@ -2518,10 +2481,10 @@ mod tests {
 
     #[test]
     fn a_head_resting_on_the_parents_tail_resolves_to_the_tail() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_bone(&mut document, [10.0, 0.0], [10.0, 10.0], "Child");
-        let child = move_bone_into(&mut document, child, parent).unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document.add_bone([10.0, 0.0], [10.0, 10.0], "Child");
+        let child = document.move_bone_into(child, parent).unwrap();
         document.bone_by_index_mut(child).unwrap().head = Some([10.0, 0.0]);
 
         // The redundant head is the parent's tail joint, owned by the parent.
@@ -2533,10 +2496,10 @@ mod tests {
 
     #[test]
     fn dragging_a_head_onto_the_parents_tail_reconnects_it() {
-        let mut editor = EditorState::new(Document::new());
-        let parent = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_bone(&mut editor.document, [20.0, 0.0], [20.0, 10.0], "Child");
-        let child = move_bone_into(&mut editor.document, child, parent).unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let parent = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = editor.document.add_bone([20.0, 0.0], [20.0, 10.0], "Child");
+        let child = editor.document.move_bone_into(child, parent).unwrap();
         assert_eq!(
             editor.document.bone_by_index(child).unwrap().head,
             Some([20.0, 0.0])
@@ -2554,65 +2517,65 @@ mod tests {
         ));
         assert_eq!(editor.document.bone_by_index(child).unwrap().head, None);
         assert_eq!(
-            bone_endpoints(&editor.document, child),
+            editor.document.bone_endpoints(child),
             Some(([10.0, 0.0], [20.0, 10.0]))
         );
     }
 
     #[test]
     fn reparenting_keeps_the_stored_points() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_bone(&mut document, [40.0, 10.0], [50.0, 10.0], "Child");
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = document.add_bone([40.0, 10.0], [50.0, 10.0], "Child");
 
-        let moved = move_bone_into(&mut document, child, parent).unwrap();
+        let moved = document.move_bone_into(child, parent).unwrap();
         assert_eq!(moved, 1);
         assert_eq!(
-            bone_endpoints(&document, moved),
+            document.bone_endpoints(moved),
             Some(([40.0, 10.0], [50.0, 10.0]))
         );
 
         // Rig-mode edits stay local: moving the parent leaves the child alone.
-        translate_bone(&mut document, parent, [5.0, 0.0]);
+        document.translate_bone(parent, [5.0, 0.0]);
         assert_eq!(
-            bone_endpoints(&document, moved),
+            document.bone_endpoints(moved),
             Some(([40.0, 10.0], [50.0, 10.0]))
         );
     }
 
     #[test]
     fn a_bone_cannot_be_moved_inside_itself() {
-        let mut document = Document::new();
-        let parent = add_bone(&mut document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let raw_child = add_bone(&mut document, [0.0, 0.0], [5.0, 0.0], "Child");
-        let child = move_bone_into(&mut document, raw_child, parent).unwrap();
+        let mut document = Asset::new();
+        let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let raw_child = document.add_bone([0.0, 0.0], [5.0, 0.0], "Child");
+        let child = document.move_bone_into(raw_child, parent).unwrap();
 
-        assert!(move_bone_into(&mut document, parent, child).is_none());
+        assert!(document.move_bone_into(parent, child).is_none());
     }
 
     #[test]
     fn bones_round_trip_through_json() {
         let mut document = document_with_bones();
         let parent = 0;
-        let child = add_bone(&mut document, [10.0, 0.0], [20.0, 0.0], "Child");
-        let child = move_bone_into(&mut document, child, parent).unwrap();
+        let child = document.add_bone([10.0, 0.0], [20.0, 0.0], "Child");
+        let child = document.move_bone_into(child, parent).unwrap();
         assert_eq!(child, 1);
 
         let json = serde_json::to_string(&document).unwrap();
-        let loaded: Document = serde_json::from_str(&json).unwrap();
+        let loaded: Asset = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded, document);
     }
 
     #[test]
     fn replacing_the_document_clears_rig_editing() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         editor.rig.chain = Some(PenChain {
             last: [0.0, 0.0],
             parent: None,
         });
         editor.rig.preview = Some(([0.0, 0.0], [10.0, 10.0]));
 
-        editor.replace_document(Document::new());
+        editor.replace_document(Asset::new());
 
         assert!(editor.rig.chain.is_none());
         assert!(editor.rig.preview().is_none());
@@ -2634,23 +2597,23 @@ mod tests {
 
     #[test]
     fn new_bones_get_unique_names() {
-        let mut document = Document::new();
-        assert_eq!(unique_bone_name(&document), "Bone");
+        let mut document = Asset::new();
+        assert_eq!(document.unique_bone_name(), "Bone");
 
-        let name = unique_bone_name(&document);
-        add_bone(&mut document, [0.0, 0.0], [1.0, 0.0], name);
-        assert_eq!(unique_bone_name(&document), "Bone 2");
+        let name = document.unique_bone_name();
+        document.add_bone([0.0, 0.0], [1.0, 0.0], name);
+        assert_eq!(document.unique_bone_name(), "Bone 2");
 
-        let name = unique_bone_name(&document);
-        add_bone(&mut document, [0.0, 0.0], [1.0, 0.0], name);
-        assert_eq!(unique_bone_name(&document), "Bone 3");
+        let name = document.unique_bone_name();
+        document.add_bone([0.0, 0.0], [1.0, 0.0], name);
+        assert_eq!(document.unique_bone_name(), "Bone 3");
     }
 
     #[test]
     fn deleting_a_bone_drops_it_from_weights_and_keeps_the_total() {
-        let mut editor = EditorState::new(Document::new());
-        let bone = add_bone(&mut editor.document, [0.0, 0.0], [1.0, 0.0], "Arm");
-        add_bone(&mut editor.document, [1.0, 0.0], [2.0, 0.0], "Leg");
+        let mut editor = EditorState::new(Asset::new());
+        let bone = editor.document.add_bone([0.0, 0.0], [1.0, 0.0], "Arm");
+        editor.document.add_bone([1.0, 0.0], [2.0, 0.0], "Leg");
         editor
             .document
             .shapes
@@ -2672,9 +2635,9 @@ mod tests {
     }
 
     /// Rest and posed head/tail of every bone, in document order.
-    fn posed_endpoints(document: &Document, pose: &Pose) -> Vec<(Point, Point)> {
+    fn posed_endpoints(document: &Asset, pose: &Pose) -> Vec<(Point, Point)> {
         fn walk(
-            document: &Document,
+            document: &Asset,
             bones: &[Bone],
             cursor: &mut BoneIndex,
             pose: &Pose,
@@ -2683,8 +2646,8 @@ mod tests {
             for bone in bones {
                 let index = *cursor;
                 *cursor += 1;
-                let world = bone_world(document, pose, index);
-                let (head, tail) = bone_endpoints(document, index).unwrap();
+                let world = document.bone_world(pose, index);
+                let (head, tail) = document.bone_endpoints(index).unwrap();
                 out.push((head, world.apply(head)));
                 out.push((tail, world.apply(tail)));
                 walk(document, &bone.children, cursor, pose, out);
@@ -2705,7 +2668,7 @@ mod tests {
         cursor: Point,
     ) {
         let dragged_rest = {
-            let (head, tail) = bone_endpoints(&editor.document, index).unwrap();
+            let (head, tail) = editor.document.bone_endpoints(index).unwrap();
             match end {
                 BoneEnd::Head => head,
                 BoneEnd::Tail => tail,
@@ -2715,11 +2678,14 @@ mod tests {
         // A real drag runs for many frames, so apply the edit in steps the way
         // the handler does and make sure the compensation does not drift.
         let start = {
-            let (head, tail) = bone_endpoints(&editor.document, index).unwrap();
-            bone_world(&editor.document, &editor.pose, index).apply(match end {
-                BoneEnd::Head => head,
-                BoneEnd::Tail => tail,
-            })
+            let (head, tail) = editor.document.bone_endpoints(index).unwrap();
+            editor
+                .document
+                .bone_world(&editor.pose, index)
+                .apply(match end {
+                    BoneEnd::Head => head,
+                    BoneEnd::Tail => tail,
+                })
         };
         const STEPS: usize = 8;
         for step in 1..=STEPS {
@@ -2747,24 +2713,16 @@ mod tests {
 
     #[test]
     fn dragging_a_posed_chain_tail_keeps_other_endpoints_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let root = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Root");
-        let child = add_child_bone(
-            &mut editor.document,
-            root,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
-        let _grandchild = add_child_bone(
-            &mut editor.document,
-            child,
-            [10.0, 10.0],
-            [20.0, 10.0],
-            "Grand",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let root = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Root");
+        let child = editor
+            .document
+            .add_child_bone(root, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
+        let _grandchild = editor
+            .document
+            .add_child_bone(child, [10.0, 10.0], [20.0, 10.0], "Grand")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -2788,30 +2746,25 @@ mod tests {
             },
         );
 
-        let cursor = bone_world(&editor.document, &editor.pose, root).apply([12.0, 3.0]);
+        let cursor = editor
+            .document
+            .bone_world(&editor.pose, root)
+            .apply([12.0, 3.0]);
         assert_only_dragged_joint_moves(&mut editor, root, BoneEnd::Tail, cursor);
     }
 
     #[test]
     fn dragging_a_posed_mid_tail_keeps_other_endpoints_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let root = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Root");
-        let child = add_child_bone(
-            &mut editor.document,
-            root,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
-        add_child_bone(
-            &mut editor.document,
-            child,
-            [10.0, 10.0],
-            [20.0, 10.0],
-            "Grand",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let root = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Root");
+        let child = editor
+            .document
+            .add_child_bone(root, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
+        editor
+            .document
+            .add_child_bone(child, [10.0, 10.0], [20.0, 10.0], "Grand")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -2834,30 +2787,25 @@ mod tests {
             },
         );
 
-        let cursor = bone_world(&editor.document, &editor.pose, child).apply([12.0, 12.0]);
+        let cursor = editor
+            .document
+            .bone_world(&editor.pose, child)
+            .apply([12.0, 12.0]);
         assert_only_dragged_joint_moves(&mut editor, child, BoneEnd::Tail, cursor);
     }
 
     #[test]
     fn dragging_a_posed_head_keeps_other_endpoints_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let root = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Root");
-        let child = add_child_bone(
-            &mut editor.document,
-            root,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
-        add_child_bone(
-            &mut editor.document,
-            child,
-            [10.0, 10.0],
-            [20.0, 10.0],
-            "Grand",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let root = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Root");
+        let child = editor
+            .document
+            .add_child_bone(root, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
+        editor
+            .document
+            .add_child_bone(child, [10.0, 10.0], [20.0, 10.0], "Grand")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -2882,30 +2830,25 @@ mod tests {
 
         // Give the child a loose head to drag.
         editor.document.bone_by_index_mut(child).unwrap().head = Some([14.0, 2.0]);
-        let cursor = bone_world(&editor.document, &editor.pose, child).apply([18.0, 5.0]);
+        let cursor = editor
+            .document
+            .bone_world(&editor.pose, child)
+            .apply([18.0, 5.0]);
         assert_only_dragged_joint_moves(&mut editor, child, BoneEnd::Head, cursor);
     }
 
     #[test]
     fn dragging_a_tail_past_a_posed_stored_head_child_keeps_endpoints_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let root = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Root");
-        let child = add_child_bone(
-            &mut editor.document,
-            root,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
-        add_child_bone(
-            &mut editor.document,
-            child,
-            [10.0, 10.0],
-            [20.0, 10.0],
-            "Grand",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let root = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Root");
+        let child = editor
+            .document
+            .add_child_bone(root, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
+        editor
+            .document
+            .add_child_bone(child, [10.0, 10.0], [20.0, 10.0], "Grand")
+            .unwrap();
         // Stand in for an older file that stored the head on the tail.
         editor.document.bone_by_index_mut(child).unwrap().head = Some([10.0, 0.0]);
         editor.pose.set(
@@ -2930,16 +2873,25 @@ mod tests {
             },
         );
 
-        let cursor = bone_world(&editor.document, &editor.pose, root).apply([12.0, 3.0]);
+        let cursor = editor
+            .document
+            .bone_world(&editor.pose, root)
+            .apply([12.0, 3.0]);
         assert_only_dragged_joint_moves(&mut editor, root, BoneEnd::Tail, cursor);
     }
 
     #[test]
     fn dragging_a_posed_tail_with_two_children_keeps_endpoints_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let root = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Root");
-        add_child_bone(&mut editor.document, root, [10.0, 0.0], [10.0, 10.0], "A").unwrap();
-        add_child_bone(&mut editor.document, root, [10.0, 0.0], [10.0, -10.0], "B").unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let root = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Root");
+        editor
+            .document
+            .add_child_bone(root, [10.0, 0.0], [10.0, 10.0], "A")
+            .unwrap();
+        editor
+            .document
+            .add_child_bone(root, [10.0, 0.0], [10.0, -10.0], "B")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -2963,7 +2915,10 @@ mod tests {
             },
         );
 
-        let cursor = bone_world(&editor.document, &editor.pose, root).apply([12.0, 3.0]);
+        let cursor = editor
+            .document
+            .bone_world(&editor.pose, root)
+            .apply([12.0, 3.0]);
         assert_only_dragged_joint_moves(&mut editor, root, BoneEnd::Tail, cursor);
     }
 
@@ -2990,8 +2945,8 @@ mod tests {
         for _ in 0..roots {
             let head = [rng.range(-20.0, 20.0), rng.range(-20.0, 20.0)];
             let tail = [rng.range(-20.0, 20.0), rng.range(-20.0, 20.0)];
-            let name = unique_bone_name(&editor.document);
-            let index = add_bone(&mut editor.document, head, tail, name);
+            let name = editor.document.unique_bone_name();
+            let index = editor.document.add_bone(head, tail, name);
             indices.push(index);
             grow_random_rig(rng, editor, index, depth, &mut indices);
         }
@@ -3010,7 +2965,7 @@ mod tests {
         }
         let children = (rng.next() * 3.0) as usize;
         for _ in 0..children {
-            let (_, tail) = bone_endpoints(&editor.document, parent).unwrap();
+            let (_, tail) = editor.document.bone_endpoints(parent).unwrap();
             let connected = rng.next() < 0.6;
             let start = if connected {
                 tail
@@ -3018,8 +2973,8 @@ mod tests {
                 [rng.range(-20.0, 20.0), rng.range(-20.0, 20.0)]
             };
             let end = [rng.range(-20.0, 20.0), rng.range(-20.0, 20.0)];
-            let name = unique_bone_name(&editor.document);
-            if let Some(child) = add_child_bone(&mut editor.document, parent, start, end, name) {
+            let name = editor.document.unique_bone_name();
+            if let Some(child) = editor.document.add_child_bone(parent, start, end, name) {
                 indices.push(child);
                 grow_random_rig(rng, editor, child, depth - 1, indices);
             }
@@ -3030,14 +2985,14 @@ mod tests {
     fn randomized_endpoint_drags_keep_other_posed_endpoints_fixed() {
         let mut rng = Rng(0x1234_5678_9abc_def0);
         for _ in 0..200 {
-            let mut editor = EditorState::new(Document::new());
+            let mut editor = EditorState::new(Asset::new());
             let indices = random_rig(&mut rng, &mut editor, 3);
             for &index in &indices {
                 let pose = BonePose {
                     rotation: rng.range(-1.5, 1.5),
                     translation: [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0)],
                     scale: rng.range(0.6, 1.6),
-                    pivot: bone_endpoints(&editor.document, index).unwrap().0,
+                    pivot: editor.document.bone_endpoints(index).unwrap().0,
                 };
                 editor.pose.set(index, pose);
             }
@@ -3046,7 +3001,7 @@ mod tests {
                     let mut trial = EditorState::new(editor.document.clone());
                     trial.pose = editor.pose.clone();
                     let target = [rng.range(-25.0, 25.0), rng.range(-25.0, 25.0)];
-                    let cursor = bone_world(&trial.document, &trial.pose, index).apply(target);
+                    let cursor = trial.document.bone_world(&trial.pose, index).apply(target);
                     assert_only_dragged_joint_moves(&mut trial, index, end, cursor);
                 }
             }
@@ -3055,10 +3010,10 @@ mod tests {
 
     #[test]
     fn reconnecting_a_posed_stored_head_keeps_its_tail_fixed() {
-        let mut editor = EditorState::new(Document::new());
-        let parent = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_bone(&mut editor.document, [20.0, 0.0], [20.0, 10.0], "Child");
-        let child = move_bone_into(&mut editor.document, child, parent).unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let parent = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = editor.document.add_bone([20.0, 0.0], [20.0, 10.0], "Child");
+        let child = editor.document.move_bone_into(child, parent).unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -3074,13 +3029,15 @@ mod tests {
             },
         );
 
-        let (_, tail) = bone_endpoints(&editor.document, child).unwrap();
-        let before = bone_world(&editor.document, &editor.pose, child).apply(tail);
+        let (_, tail) = editor.document.bone_endpoints(child).unwrap();
+        let before = editor.document.bone_world(&editor.pose, child).apply(tail);
 
         // Reconnect the stored head to the parent's drawn tail.
         let mut pose = editor.pose.clone();
-        let joint = bone_world(&editor.document, &editor.pose, parent)
-            .apply(bone_endpoints(&editor.document, parent).unwrap().1);
+        let joint = editor
+            .document
+            .bone_world(&editor.pose, parent)
+            .apply(editor.document.bone_endpoints(parent).unwrap().1);
         assert!(!finish_endpoint_drag(
             &mut editor,
             child,
@@ -3091,23 +3048,19 @@ mod tests {
         ));
         editor.pose = pose;
 
-        let (_, tail) = bone_endpoints(&editor.document, child).unwrap();
-        let after = bone_world(&editor.document, &editor.pose, child).apply(tail);
+        let (_, tail) = editor.document.bone_endpoints(child).unwrap();
+        let after = editor.document.bone_world(&editor.pose, child).apply(tail);
         assert_point(after, before);
     }
 
     #[test]
     fn dragging_a_posed_tail_leaves_a_translated_childs_offset_intact() {
-        let mut editor = EditorState::new(Document::new());
-        let parent = add_bone(&mut editor.document, [0.0, 0.0], [10.0, 0.0], "Parent");
-        let child = add_child_bone(
-            &mut editor.document,
-            parent,
-            [10.0, 0.0],
-            [10.0, 10.0],
-            "Child",
-        )
-        .unwrap();
+        let mut editor = EditorState::new(Asset::new());
+        let parent = editor.document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+        let child = editor
+            .document
+            .add_child_bone(parent, [10.0, 0.0], [10.0, 10.0], "Child")
+            .unwrap();
         editor.pose.set(
             0,
             BonePose {
@@ -3125,28 +3078,35 @@ mod tests {
         );
 
         let posed_child = |editor: &EditorState, point: Point| {
-            bone_world(&editor.document, &editor.pose, child).apply(point)
+            editor.document.bone_world(&editor.pose, child).apply(point)
         };
-        let (child_head, child_tail) = bone_endpoints(&editor.document, child).unwrap();
+        let (child_head, child_tail) = editor.document.bone_endpoints(child).unwrap();
         let head_before = posed_child(&editor, child_head);
         let tail_before = posed_child(&editor, child_tail);
-        let joint_before = bone_world(&editor.document, &editor.pose, parent)
-            .apply(bone_endpoints(&editor.document, parent).unwrap().1);
+        let joint_before = editor
+            .document
+            .bone_world(&editor.pose, parent)
+            .apply(editor.document.bone_endpoints(parent).unwrap().1);
         let offset_before = [
             head_before[0] - joint_before[0],
             head_before[1] - joint_before[1],
         ];
 
-        let cursor = bone_world(&editor.document, &editor.pose, parent).apply([12.0, 3.0]);
+        let cursor = editor
+            .document
+            .bone_world(&editor.pose, parent)
+            .apply([12.0, 3.0]);
         let rest = endpoint_rest_point(&editor.document, &editor.pose, parent, cursor);
         drag_endpoint_keeping_children(&mut editor, parent, BoneEnd::Tail, rest);
 
         // The child's far endpoint must stay put, and its head keeps the same
         // offset from the joint it had before the drag. Compensation edits rest
         // geometry, so re-read the endpoints before transforming them.
-        let joint_after = bone_world(&editor.document, &editor.pose, parent)
-            .apply(bone_endpoints(&editor.document, parent).unwrap().1);
-        let (child_head_after, child_tail_after) = bone_endpoints(&editor.document, child).unwrap();
+        let joint_after = editor
+            .document
+            .bone_world(&editor.pose, parent)
+            .apply(editor.document.bone_endpoints(parent).unwrap().1);
+        let (child_head_after, child_tail_after) = editor.document.bone_endpoints(child).unwrap();
         assert_point(posed_child(&editor, child_tail_after), tail_before);
         let head_after = posed_child(&editor, child_head_after);
         assert_point(
@@ -3160,8 +3120,8 @@ mod tests {
 
     #[test]
     fn renaming_a_bone_keeps_its_index_references() {
-        let mut editor = EditorState::new(Document::new());
-        let bone = add_bone(&mut editor.document, [0.0, 0.0], [1.0, 0.0], "Arm");
+        let mut editor = EditorState::new(Asset::new());
+        let bone = editor.document.add_bone([0.0, 0.0], [1.0, 0.0], "Arm");
         editor
             .document
             .shapes
@@ -3177,15 +3137,11 @@ mod tests {
         ));
         editor.document.animations.push(animation);
 
-        assert!(rename_bone_at(
-            &mut editor.document,
-            bone,
-            "Limb".to_owned()
-        ));
+        assert!(editor.document.rename_bone(bone, "Limb".to_owned()));
 
         // Names are descriptive only: weights and animation targets refer to
         // the bone by index, so renaming changes neither.
-        assert_eq!(bone_name_at(&editor.document, bone), Some("Limb"));
+        assert_eq!(editor.document.bone_name(bone), Some("Limb"));
         let path = &editor.document.shapes[0].paths[0];
         assert_eq!(path.start_weights.get(0), Some(0.5));
         assert_eq!(path.segments[0].to_weights.get(0), Some(1.0));

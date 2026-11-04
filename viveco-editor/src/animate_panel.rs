@@ -14,9 +14,7 @@ use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
-use crate::animate::{
-    advance_playhead, commit_animation_rename, selected_animation, set_cyclic, set_duration,
-};
+use crate::animate::{commit_animation_rename, selected_animation, set_cyclic, set_duration};
 use crate::editor::{
     BOTTOM_BAR_HEIGHT, EditorMode, EditorState, SIDEBAR_WIDTH, ShowBones, TOOLBAR_WIDTH,
 };
@@ -623,19 +621,12 @@ fn advance_playback(
     if *mode != EditorMode::Animate || !playback.playing {
         return;
     }
-    let Some((duration, cyclic)) =
-        selected_animation(&editor).map(|animation| (animation.duration, animation.cyclic))
-    else {
+    let Some(animation) = selected_animation(&editor) else {
         playback.playing = false;
         return;
     };
-    let (playhead, keep_playing) = advance_playhead(
-        editor.playhead,
-        playback.velocity,
-        time.delta_secs(),
-        duration,
-        cyclic,
-    );
+    let (playhead, keep_playing) =
+        animation.advance_playhead(editor.playhead, playback.velocity, time.delta_secs());
     editor.playhead = playhead;
     if !keep_playing {
         playback.playing = false;

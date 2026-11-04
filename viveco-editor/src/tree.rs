@@ -28,7 +28,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH};
 use crate::theme;
-use viveco::model::Document;
+use viveco::Asset;
 
 /// Unselected rows are transparent.
 const ROW_BG: Color = Color::NONE;
@@ -124,10 +124,10 @@ pub trait TreeModel: Clone + PartialEq + Send + Sync + 'static {
     fn visible_in(mode: EditorMode) -> bool;
 
     /// The hierarchy to render.
-    fn layout(document: &Document) -> Vec<TreeNode<Self>>;
+    fn layout(document: &Asset) -> Vec<TreeNode<Self>>;
 
     /// The display name of the node at `address`.
-    fn name(document: &Document, address: &Self) -> String;
+    fn name(document: &Asset, address: &Self) -> String;
 
     /// The currently selected node, if any.
     fn selected(editor: &EditorState) -> Option<&Self>;
@@ -162,7 +162,7 @@ pub trait TreeModel: Clone + PartialEq + Send + Sync + 'static {
     /// The document is available so hierarchies addressed by flat index can
     /// test ancestry.
     fn resolve_drop(
-        document: &Document,
+        document: &Asset,
         source: &Self,
         target: &Self,
         kind: DropKind,
@@ -170,7 +170,7 @@ pub trait TreeModel: Clone + PartialEq + Send + Sync + 'static {
 
     /// Moves `source` to `target` and returns the node's new address.
     fn drop_move(
-        document: &mut Document,
+        document: &mut Asset,
         source: &Self,
         target: &Self,
         kind: DropKind,

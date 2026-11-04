@@ -7,7 +7,7 @@
 use bevy::prelude::Color;
 use bevy_vello::prelude::vello::peniko::Color as InkColor;
 
-use viveco::model::BoneIndex;
+use viveco::BoneIndex;
 
 /// Translucent background used by every floating panel.
 pub const PANEL_BG: Color = Color::srgba_u8(0x12, 0x15, 0x1c, 0xf2);

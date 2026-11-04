@@ -44,11 +44,11 @@ use bevy_vello::vello::{
     peniko::{Color, Fill},
 };
 
-use crate::animate::{curve_groups, effective_handle_in, effective_handle_out, selected_animation};
+use crate::animate::{effective_handle_in, effective_handle_out, selected_animation};
 use crate::animate_panel::{DurationEdit, SpeedEdit};
 use crate::editor::{EditorMode, EditorState};
 use crate::theme;
-use viveco::model::{Animation, BoneIndex, Keyframe, KeyframeTarget};
+use viveco::{Animation, BoneIndex, Keyframe, KeyframeTarget};
 
 /// Amount one wheel notch multiplies the zoom by.
 const ZOOM_STEP: f32 = 1.1;
@@ -1610,7 +1610,7 @@ fn draw_frame(
             .collect();
         draw_grid(scene, view, area);
 
-        let groups = curve_groups(animation);
+        let groups = animation.curve_groups();
         for (index, group) in groups.iter().enumerate() {
             let dimmed = focus.is_some_and(|bone| !group_is_bone(group, bone));
             // Curves take their bone's color so a bone looks the same in every
@@ -2163,7 +2163,7 @@ fn value_bounds(animation: &Animation, bone: Option<BoneIndex>) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::{BoneProperty, Document, FORMAT_VERSION, Keyframe, KeyframeTarget};
+    use viveco::{Asset, BoneProperty, Keyframe, KeyframeTarget};
 
     fn target(bone: BoneIndex, property: BoneProperty) -> KeyframeTarget {
         KeyframeTarget::Bone { bone, property }
@@ -2184,7 +2184,7 @@ mod tests {
     }
 
     fn two_bone_animation() -> Animation {
-        let mut animation = Animation::new(4.0);
+        let mut animation = Animation::new(5.0);
         animation.insert_keyframe(Keyframe::new(0.0, 0.0, target(0, BoneProperty::X)));
         animation.insert_keyframe(Keyframe::new(4.0, 100.0, target(0, BoneProperty::X)));
         animation.insert_keyframe(Keyframe::new(0.0, -500.0, target(1, BoneProperty::Y)));
@@ -2224,7 +2224,7 @@ mod tests {
     #[test]
     fn groups_are_matched_to_their_bone() {
         let animation = two_bone_animation();
-        let groups = curve_groups(&animation);
+        let groups = animation.curve_groups();
 
         assert!(group_is_bone(&groups[0], 0));
         assert!(!group_is_bone(&groups[0], 1));
@@ -2235,7 +2235,7 @@ mod tests {
 
     #[test]
     fn fit_frames_duration_and_values() {
-        let animation = animation_with(&[0.0, 4.0], &[0.0, 100.0], 4.0);
+        let animation = animation_with(&[0.0, 3.9], &[0.0, 100.0], 4.0);
         let view = fitted(&animation, Vec2::new(400.0, 200.0));
 
         // The whole duration sits inside the view with only a small margin.
@@ -2335,7 +2335,7 @@ mod tests {
         animation.insert_keyframe(Keyframe::new(2.0, 2.0, x));
         animation.insert_keyframe(Keyframe::new(3.0, 3.0, angle));
 
-        let groups = curve_groups(&animation);
+        let groups = animation.curve_groups();
 
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].len(), 2);
@@ -2421,7 +2421,7 @@ mod tests {
 
     #[test]
     fn explicit_handles_sit_a_third_toward_their_neighbour() {
-        let mut animation = animation_with(&[0.0, 3.0], &[0.0, 30.0], 3.0);
+        let mut animation = animation_with(&[0.0, 3.0], &[0.0, 30.0], 4.0);
         animation.keyframes[0].handle_out = Some(15.0);
         animation.keyframes[1].handle_in = Some(20.0);
         let view = fitted(&animation, Vec2::new(300.0, 200.0));
@@ -2548,9 +2548,8 @@ mod tests {
         assert_eq!(keyframes[1].timestamp, 2.0);
     }
 
-    fn document_with(animation: Animation) -> Document {
-        Document {
-            version: FORMAT_VERSION,
+    fn document_with(animation: Animation) -> Asset {
+        Asset {
             shapes: Vec::new(),
             bones: Vec::new(),
             animations: vec![animation],
@@ -2608,7 +2607,7 @@ mod tests {
 
     #[test]
     fn adjacent_spans_measure_the_surrounding_segments() {
-        let animation = animation_with(&[0.0, 1.0, 3.0], &[0.0, 1.0, 2.0], 3.0);
+        let animation = animation_with(&[0.0, 1.0, 3.0], &[0.0, 1.0, 2.0], 4.0);
         // The middle keyframe has a one-second incoming and two-second
         // outgoing segment.
         assert_eq!(adjacent_spans(&animation, 1), Some((1.0, 2.0)));
@@ -2620,7 +2619,7 @@ mod tests {
         assert_eq!(adjacent_spans(&cyclic, 2), Some((1.0, 2.0)));
 
         // Non-cyclic endpoints have no opposite segment.
-        let open = animation_with(&[1.0, 2.0], &[0.0, 1.0], 2.0);
+        let open = animation_with(&[1.0, 2.0], &[0.0, 1.0], 3.0);
         assert_eq!(adjacent_spans(&open, 0), None);
         assert_eq!(adjacent_spans(&open, 1), None);
     }

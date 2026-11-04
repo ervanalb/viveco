@@ -6,6 +6,7 @@
 pub mod animate;
 pub mod animate_panel;
 pub mod animate_sidebar;
+pub mod bounds;
 pub mod clipboard;
 pub mod dialogs;
 pub mod editor;

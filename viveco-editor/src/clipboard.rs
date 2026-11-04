@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 
 use crate::editor::{EditorMode, EditorState, TreeAddress, shape_at, translate_shape};
-use viveco::model::Shape;
+use viveco::Shape;
 
 /// Distance, in document units, that each successive paste is offset by.
 const PASTE_OFFSET: f32 = 10.0;
@@ -124,7 +124,7 @@ fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::{Document, FORMAT_VERSION, Path, Rgba8, Style};
+    use viveco::{Asset, Path, Rgba8, Style};
 
     fn filled(color: Rgba8) -> Style {
         Style {
@@ -133,9 +133,8 @@ mod tests {
         }
     }
 
-    fn document_with_path() -> Document {
-        Document {
-            version: FORMAT_VERSION,
+    fn document_with_path() -> Asset {
+        Asset {
             animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
@@ -184,15 +183,14 @@ mod tests {
 
         assert!(!copy_selection(&editor, &mut clipboard));
         assert!(!paste_clipboard(
-            &mut EditorState::new(Document::new()),
+            &mut EditorState::new(Asset::new()),
             &mut clipboard
         ));
     }
 
     #[test]
     fn pasting_a_shape_with_children_keeps_the_subtree() {
-        let source = Document {
-            version: FORMAT_VERSION,
+        let source = Asset {
             animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
@@ -211,7 +209,7 @@ mod tests {
 
         assert!(copy_selection(&editor, &mut clipboard));
 
-        let mut target = EditorState::new(Document::new());
+        let mut target = EditorState::new(Asset::new());
         assert!(paste_clipboard(&mut target, &mut clipboard));
         assert_eq!(target.document.shapes.len(), 1);
 
@@ -226,8 +224,7 @@ mod tests {
 
     #[test]
     fn copying_a_path_pastes_it_as_its_own_shape() {
-        let mut document = Document {
-            version: FORMAT_VERSION,
+        let mut document = Asset {
             animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {

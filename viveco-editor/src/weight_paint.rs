@@ -23,8 +23,8 @@ use vello::kurbo::{Affine, Circle, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
 use crate::render::to_kurbo_point;
-use viveco::model::{BoneIndex, Document, Path, PathEnds, Point, Shape, Weights};
-use viveco::pose::{Pose, Similarity};
+use viveco::{Asset, BoneIndex, Path, PathEnds, Point, Shape, Weights};
+use viveco::{Pose, Similarity};
 
 /// Smallest brush radius, in screen pixels.
 pub const MIN_BRUSH_SIZE: f32 = 2.0;
@@ -89,7 +89,7 @@ fn falloff(normalized: f32, hardness: f32) -> f32 {
 /// brush paints; when it is `None`, the brush paints the point's unused share
 /// instead, which reduces the weights that are already there.
 pub fn paint_document(
-    document: &mut Document,
+    document: &mut Asset,
     center: Point,
     radius: f32,
     selected_bone: Option<BoneIndex>,
@@ -98,7 +98,7 @@ pub fn paint_document(
 ) {
     // Points are painted where they appear on the posed rig page, so the brush
     // hit-tests posed positions while still editing the rest-pose weights.
-    let worlds = (!pose.is_identity()).then(|| viveco::pose::worlds(document, pose));
+    let worlds = (!pose.is_identity()).then(|| document.bone_worlds(pose));
     let worlds = worlds.as_deref();
     for shape in &mut document.shapes {
         paint_shape(shape, center, radius, selected_bone, brush, worlds);
@@ -192,7 +192,7 @@ fn paint_weights(
     // The brush is measured against where the point appears on the posed rig
     // page, not its rest position.
     let posed = worlds
-        .map(|worlds| viveco::pose::deform_point(position, weights, worlds))
+        .map(|worlds| weights.deform(position, worlds))
         .unwrap_or(position);
     let distance = ((posed[0] - center[0]).powi(2) + (posed[1] - center[1]).powi(2)).sqrt();
     if distance > radius {
@@ -232,7 +232,7 @@ fn point_value(weights: &Weights, selected_bone: Option<BoneIndex>) -> f32 {
 /// `cursor`.
 pub fn draw_overlay(
     scene: &mut Scene,
-    document: &Document,
+    document: &Asset,
     selected_bone: Option<BoneIndex>,
     brush: &WeightPaintBrush,
     view_scale: f32,
@@ -325,7 +325,7 @@ fn draw_brush(scene: &mut Scene, center: Point, brush: &WeightPaintBrush, scale:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::{Bone, FORMAT_VERSION, Path, Shape};
+    use viveco::{Bone, Path, Shape};
 
     fn brush() -> WeightPaintBrush {
         WeightPaintBrush {
@@ -335,13 +335,12 @@ mod tests {
         }
     }
 
-    fn document_with(points: &[Point]) -> Document {
+    fn document_with(points: &[Point]) -> Asset {
         let mut path = Path::new(points[0]);
         for &point in &points[1..] {
             path = path.line_to(point);
         }
-        Document {
-            version: FORMAT_VERSION,
+        Asset {
             animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
@@ -351,7 +350,7 @@ mod tests {
         }
     }
 
-    fn weights_at(document: &Document, index: usize) -> &Weights {
+    fn weights_at(document: &Asset, index: usize) -> &Weights {
         &document.shapes[0].paths[0].segments[index].to_weights
     }
 
@@ -467,7 +466,7 @@ mod tests {
         let mut pose = Pose::default();
         pose.set(
             0,
-            viveco::pose::BonePose {
+            viveco::BonePose {
                 scale: 2.0,
                 ..Default::default()
             },

@@ -11,15 +11,16 @@ use bevy::window::PrimaryWindow;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
 
-use viveco::model::Document;
+use viveco::Asset;
 use viveco_editor::animate_panel::AnimatePanelPlugin;
 use viveco_editor::animate_sidebar::AnimateSidebarPlugin;
+use viveco_editor::bounds::bounds_for;
 use viveco_editor::clipboard::ClipboardPlugin;
 use viveco_editor::dialogs::DialogPlugin;
 use viveco_editor::editor::{
     DocumentBounds, DocumentScene, EditorPlugin, EditorState, fit_transform,
 };
-use viveco_editor::file::{DocumentFile, FilePlugin, bounds_for};
+use viveco_editor::file::{DocumentFile, FilePlugin};
 use viveco_editor::history::{History, HistoryPlugin};
 use viveco_editor::menu_bar::MenuBarPlugin;
 use viveco_editor::mode_tabs::ModeTabsPlugin;
@@ -70,7 +71,7 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
-    let document = Document::new();
+    let document = Asset::new();
     let bounds = bounds_for(&document);
     let scene = build_scene(&document);
 

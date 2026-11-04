@@ -1,124 +1,284 @@
-//! Sampling a document's animation curves into bone poses.
-//!
-//! The animation data itself (clips, keyframes, targets) lives in
-//! [`crate::model`]. This module evaluates those curves: it groups keyframes
-//! into per-target curves, samples a [`Pose`] at a point in time, writes
-//! keyframes, and advances a playhead during playback.
+//! Animation clips, keyframes, curve sampling, and playback.
 
-use crate::model::{Animation, BoneIndex, BoneProperty, Document, Keyframe, KeyframeTarget};
+use std::cmp::Ordering;
+
+use serde::{Deserialize, Serialize};
+
+use crate::asset::Asset;
+use crate::bone::BoneIndex;
 use crate::pose::Pose;
+use crate::shape::ShapeIndex;
 
-/// Keyframes grouped by animated target, preserving timestamp order.
-pub fn curve_groups(animation: &Animation) -> Vec<Vec<&Keyframe>> {
-    let mut groups: Vec<Vec<&Keyframe>> = Vec::new();
-    'keyframes: for keyframe in &animation.keyframes {
-        for group in &mut groups {
-            if group[0].target == keyframe.target {
-                group.push(keyframe);
-                continue 'keyframes;
+/// A property of a bone that an animation curve can drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoneProperty {
+    /// Horizontal translation of the bone's local transform.
+    X,
+    /// Vertical translation of the bone's local transform.
+    Y,
+    /// Local rotation of the bone, in radians.
+    Angle,
+    /// Uniform scale of the bone's local transform.
+    Scale,
+}
+
+/// A property of a shape that an animation curve can drive.
+///
+/// Shape properties are not implemented yet, so this enum intentionally has no
+/// variants: no shape keyframe can be constructed, and any attempt to
+/// deserialize one fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeProperty {}
+
+/// What a [`Keyframe`] drives.
+///
+/// Bone and shape targets store the target's flat index, which is how the rest
+/// of the asset identifies both. Inserting, removing, or moving a bone or shape
+/// therefore rewrites the target of every keyframe that refers to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeyframeTarget {
+    /// Drives one property of a bone.
+    Bone {
+        /// Flat index of the bone.
+        bone: BoneIndex,
+        property: BoneProperty,
+    },
+    /// Drives one property of a shape.
+    Shape {
+        /// Flat index of the shape.
+        shape: ShapeIndex,
+        property: ShapeProperty,
+    },
+}
+
+/// One value of an animation curve at a point in time.
+///
+/// The two optional handles are the control points of the one-dimensional
+/// Bézier curve between this keyframe and its neighbours.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    /// Position along the animation, in the range `0..duration`.
+    pub timestamp: f32,
+    /// The animated value at [`Self::timestamp`].
+    pub value: f32,
+    /// Bézier handle toward the previous keyframe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_in: Option<f32>,
+    /// Bézier handle toward the next keyframe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_out: Option<f32>,
+    /// What this keyframe animates.
+    pub target: KeyframeTarget,
+}
+
+impl Keyframe {
+    /// Builds a keyframe with no curve handles.
+    pub fn new(timestamp: f32, value: f32, target: KeyframeTarget) -> Self {
+        Self {
+            timestamp,
+            value,
+            handle_in: None,
+            handle_out: None,
+            target,
+        }
+    }
+}
+
+/// A single animation clip driving one or more targets over time.
+///
+/// Keyframes are kept sorted by timestamp and constrained to `0..duration`.
+/// Both invariants are enforced whenever the list is built through
+/// [`Self::insert_keyframe`], [`Self::set_duration`], or by deserialization.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "AnimationData")]
+pub struct Animation {
+    /// User-visible name. Empty names are shown by position.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Length of the animation. Keyframes may not fall outside it.
+    pub duration: f32,
+    /// Whether the animation loops back to the start.
+    pub cyclic: bool,
+    /// The clip's keyframes, ordered by timestamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<Keyframe>,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            duration: 0.0,
+            cyclic: false,
+            keyframes: Vec::new(),
+        }
+    }
+}
+
+impl Animation {
+    /// Builds an empty animation of the given duration.
+    pub fn new(duration: f32) -> Self {
+        Self {
+            duration,
+            ..Default::default()
+        }
+    }
+
+    /// Inserts a keyframe, keeping the list ordered by timestamp.
+    ///
+    /// Keyframes outside `0..duration` are ignored, and equal timestamps place
+    /// the new keyframe after the existing ones.
+    pub fn insert_keyframe(&mut self, keyframe: Keyframe) {
+        if !self.contains_time(keyframe.timestamp) {
+            return;
+        }
+        let index = self
+            .keyframes
+            .partition_point(|existing| existing.timestamp <= keyframe.timestamp);
+        self.keyframes.insert(index, keyframe);
+    }
+
+    /// Changes the duration, dropping keyframes that now fall outside
+    /// `0..duration`.
+    pub fn set_duration(&mut self, duration: f32) {
+        self.keyframes
+            .retain(|keyframe| timestamp_within(keyframe.timestamp, duration));
+        self.duration = duration;
+    }
+
+    /// Restores the invariants: sorts keyframes by timestamp and drops those
+    /// outside `0..duration`.
+    pub fn normalize(&mut self) {
+        let duration = self.duration;
+        self.keyframes
+            .retain(|keyframe| timestamp_within(keyframe.timestamp, duration));
+        self.keyframes.sort_by(|a, b| {
+            a.timestamp
+                .partial_cmp(&b.timestamp)
+                .unwrap_or(Ordering::Equal)
+        });
+    }
+
+    fn contains_time(&self, timestamp: f32) -> bool {
+        timestamp_within(timestamp, self.duration)
+    }
+
+    /// Keyframes grouped by animated target, preserving timestamp order.
+    pub fn curve_groups(&self) -> Vec<Vec<&Keyframe>> {
+        let mut groups: Vec<Vec<&Keyframe>> = Vec::new();
+        'keyframes: for keyframe in &self.keyframes {
+            for group in &mut groups {
+                if group[0].target == keyframe.target {
+                    group.push(keyframe);
+                    continue 'keyframes;
+                }
             }
+            groups.push(vec![keyframe]);
         }
-        groups.push(vec![keyframe]);
+        groups
     }
-    groups
+
+    /// The bone pose this animation's curves describe at `time`.
+    ///
+    /// Channels the animation does not drive stay at rest. Before the first
+    /// keyframe a non-cyclic curve holds that keyframe's value, and after the
+    /// last it holds the last value. A cyclic curve repeats with a period equal
+    /// to the duration, so a sample near either end can interpolate across the
+    /// seam using the keyframe at the other end.
+    pub fn sample_pose(&self, asset: &Asset, time: f32) -> Pose {
+        let mut pose = Pose::new(asset.bone_count());
+        let heads = asset.rest_heads();
+        let time = clamped_time(self, time);
+
+        for group in self.curve_groups() {
+            let Some(first) = group.first() else {
+                continue;
+            };
+            let Some(value) = sample_curve(&group, time, self.duration, self.cyclic) else {
+                continue;
+            };
+            let KeyframeTarget::Bone { bone, property } = &first.target else {
+                continue;
+            };
+            let bone = *bone;
+            let mut bone_pose = pose.get(bone);
+            if let Some(head) = heads.get(bone) {
+                bone_pose.pivot = *head;
+            }
+            match property {
+                BoneProperty::X => bone_pose.translation[0] = value,
+                BoneProperty::Y => bone_pose.translation[1] = value,
+                BoneProperty::Angle => bone_pose.rotation = value,
+                BoneProperty::Scale => bone_pose.scale = value,
+            }
+            pose.set(bone, bone_pose);
+        }
+        pose
+    }
+
+    /// Writes `value` into the curve for `property` of `bone` at `time`.
+    ///
+    /// The time is clamped to the animation's range, matching the sampler. An
+    /// existing keyframe for the same target at that time is updated in place,
+    /// keeping its handles, so dragging a bone at a keyframed time edits rather
+    /// than stacks keyframes. A time that clamps to exactly the duration lies
+    /// outside the half-open keyframe range and is ignored.
+    pub fn set_bone_keyframe(
+        &mut self,
+        bone: BoneIndex,
+        property: BoneProperty,
+        time: f32,
+        value: f32,
+    ) {
+        let time = clamped_time(self, time);
+        let target = KeyframeTarget::Bone { bone, property };
+        if let Some(existing) = self
+            .keyframes
+            .iter_mut()
+            .find(|keyframe| keyframe.target == target && keyframe.timestamp == time)
+        {
+            existing.value = value;
+            return;
+        }
+        self.insert_keyframe(Keyframe::new(time, value, target));
+    }
+
+    /// Advances the playhead by one frame of playback.
+    ///
+    /// Returns the new time and whether playback should continue. A cyclic
+    /// animation wraps around either end; otherwise playback stops on reaching
+    /// the end, or the start when the velocity is negative. An animation with no
+    /// duration cannot play.
+    pub fn advance_playhead(&self, playhead: f32, velocity: f32, delta: f32) -> (f32, bool) {
+        let playhead = if playhead.is_finite() { playhead } else { 0.0 };
+        let duration = self.duration;
+        if !duration.is_finite() || duration <= 0.0 {
+            return (0.0, false);
+        }
+        if !velocity.is_finite() || !delta.is_finite() || velocity == 0.0 {
+            return (playhead.clamp(0.0, duration), true);
+        }
+
+        let next = playhead + velocity * delta;
+        if self.cyclic {
+            return (next.rem_euclid(duration), true);
+        }
+        if next <= 0.0 {
+            (0.0, false)
+        } else if next >= duration {
+            (duration, false)
+        } else {
+            (next, true)
+        }
+    }
 }
 
-/// The bone pose an animation's curves describe at `time`.
-///
-/// Channels the animation does not drive stay at rest. Before the first
-/// keyframe a non-cyclic curve holds that keyframe's value, and after the last
-/// it holds the last value. A cyclic curve repeats with a period equal to the
-/// duration, so a sample near either end can interpolate across the seam using
-/// the keyframe at the other end.
-pub fn sample_pose(document: &Document, animation: &Animation, time: f32) -> Pose {
-    let mut pose = Pose::new(document.bone_count());
-    let heads = crate::pose::rest_heads(document);
-    let time = clamped_time(animation, time);
-
-    for group in curve_groups(animation) {
-        let Some(first) = group.first() else {
-            continue;
-        };
-        let Some(value) = sample_curve(&group, time, animation.duration, animation.cyclic) else {
-            continue;
-        };
-        let KeyframeTarget::Bone { bone, property } = &first.target else {
-            continue;
-        };
-        let bone = *bone;
-        let mut bone_pose = pose.get(bone);
-        if let Some(head) = heads.get(bone) {
-            bone_pose.pivot = *head;
-        }
-        match property {
-            BoneProperty::X => bone_pose.translation[0] = value,
-            BoneProperty::Y => bone_pose.translation[1] = value,
-            BoneProperty::Angle => bone_pose.rotation = value,
-            BoneProperty::Scale => bone_pose.scale = value,
-        }
-        pose.set(bone, bone_pose);
-    }
-    pose
-}
-
-/// Writes `value` into the curve for `property` of `bone` at `time`.
-///
-/// The time is clamped to the animation's range, matching the sampler. An
-/// existing keyframe for the same target at that time is updated in place,
-/// keeping its handles, so dragging a bone at a keyframed time edits rather
-/// than stacks keyframes.
-pub fn set_bone_keyframe(
-    animation: &mut Animation,
-    bone: BoneIndex,
-    property: BoneProperty,
-    time: f32,
-    value: f32,
-) {
-    let time = clamped_time(animation, time);
-    let target = KeyframeTarget::Bone { bone, property };
-    if let Some(existing) = animation
-        .keyframes
-        .iter_mut()
-        .find(|keyframe| keyframe.target == target && keyframe.timestamp == time)
-    {
-        existing.value = value;
-        return;
-    }
-    animation.insert_keyframe(Keyframe::new(time, value, target));
-}
-
-/// Advances the playhead by one frame of playback.
-///
-/// Returns the new time and whether playback should continue. A cyclic
-/// animation wraps around either end; otherwise playback stops on reaching the
-/// end, or the start when the velocity is negative. An animation with no
-/// duration cannot play.
-pub fn advance_playhead(
-    playhead: f32,
-    velocity: f32,
-    delta: f32,
-    duration: f32,
-    cyclic: bool,
-) -> (f32, bool) {
-    let playhead = if playhead.is_finite() { playhead } else { 0.0 };
-    if !duration.is_finite() || duration <= 0.0 {
-        return (0.0, false);
-    }
-    if !velocity.is_finite() || !delta.is_finite() || velocity == 0.0 {
-        return (playhead.clamp(0.0, duration), true);
-    }
-
-    let next = playhead + velocity * delta;
-    if cyclic {
-        return (next.rem_euclid(duration), true);
-    }
-    if next <= 0.0 {
-        (0.0, false)
-    } else if next >= duration {
-        (duration, false)
-    } else {
-        (next, true)
-    }
+/// Whether `timestamp` falls in the valid animation range `0..duration`.
+fn timestamp_within(timestamp: f32, duration: f32) -> bool {
+    timestamp >= 0.0 && timestamp < duration
 }
 
 /// Clamps a playhead time to the animation's `0..=duration` range.
@@ -176,9 +336,9 @@ pub fn effective_handle_out(keyframes: &[&Keyframe], index: usize, cyclic: bool)
 ///
 /// Mirrors [`effective_handle_out`]: an explicit [`Keyframe::handle_in`] wins,
 /// otherwise the handle is the midpoint toward the previous keyframe's
-/// outgoing handle, or a third of the way toward the previous keyframe's
-/// value when that handle is omitted. The first keyframe of a non-cyclic curve
-/// has no incoming handle.
+/// outgoing handle, or a third of the way toward the previous keyframe's value
+/// when that handle is omitted. The first keyframe of a non-cyclic curve has no
+/// incoming handle.
 pub fn effective_handle_in(keyframes: &[&Keyframe], index: usize, cyclic: bool) -> Option<f32> {
     let keyframe = *keyframes.get(index)?;
     if let Some(handle) = keyframe.handle_in {
@@ -299,10 +459,37 @@ fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, s: f32) -> f32 {
     u * u * u * p0 + 3.0 * u * u * s * p1 + 3.0 * u * s * s * p2 + s * s * s * p3
 }
 
+/// Deserialization form of [`Animation`], normalized on conversion so a loaded
+/// asset always satisfies the keyframe invariants.
+#[derive(Deserialize)]
+struct AnimationData {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    duration: f32,
+    #[serde(default)]
+    cyclic: bool,
+    #[serde(default)]
+    keyframes: Vec<Keyframe>,
+}
+
+impl From<AnimationData> for Animation {
+    fn from(data: AnimationData) -> Self {
+        let mut animation = Self {
+            name: data.name,
+            duration: data.duration,
+            cyclic: data.cyclic,
+            keyframes: data.keyframes,
+        };
+        animation.normalize();
+        animation
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Bone;
+    use crate::bone::Bone;
 
     fn keyframe(timestamp: f32, value: f32) -> Keyframe {
         Keyframe::new(
@@ -313,6 +500,23 @@ mod tests {
                 property: BoneProperty::X,
             },
         )
+    }
+
+    fn bone_keyframe(
+        timestamp: f32,
+        value: f32,
+        bone: BoneIndex,
+        property: BoneProperty,
+    ) -> Keyframe {
+        Keyframe::new(timestamp, value, KeyframeTarget::Bone { bone, property })
+    }
+
+    fn keyframe_times(animation: &Animation) -> Vec<f32> {
+        animation
+            .keyframes
+            .iter()
+            .map(|keyframe| keyframe.timestamp)
+            .collect()
     }
 
     fn curve(duration: f32, cyclic: bool, keyframes: Vec<Keyframe>) -> Animation {
@@ -327,7 +531,7 @@ mod tests {
     #[test]
     fn non_cyclic_curves_hold_their_endpoints() {
         let animation = curve(4.0, false, vec![keyframe(1.0, 10.0), keyframe(3.0, 30.0)]);
-        let groups = curve_groups(&animation);
+        let groups = animation.curve_groups();
         let values = &groups[0];
 
         assert!((sample_curve(values, 0.0, 4.0, false).unwrap() - 10.0).abs() < 1e-4);
@@ -338,7 +542,7 @@ mod tests {
     #[test]
     fn cyclic_curves_wrap_across_the_seam() {
         let animation = curve(2.0, true, vec![keyframe(0.5, 0.0), keyframe(1.5, 100.0)]);
-        let groups = curve_groups(&animation);
+        let groups = animation.curve_groups();
         let values = &groups[0];
 
         // Before the first keyframe the sample uses the previous cycle's last
@@ -353,7 +557,7 @@ mod tests {
         let mut neighbour_handle = keyframe(2.0, 30.0);
         neighbour_handle.handle_in = Some(45.0);
         let animation = curve(4.0, false, vec![keyframe(0.0, 10.0), neighbour_handle]);
-        let values = &curve_groups(&animation)[0];
+        let values = &animation.curve_groups()[0];
 
         // The explicit incoming handle on the second keyframe is a midpoint.
         assert_eq!(effective_handle_out(values, 0, false), Some(27.5));
@@ -364,7 +568,7 @@ mod tests {
 
         // With no handle on the neighbour, the default is a third of the way.
         let animation = curve(4.0, false, vec![keyframe(0.0, 10.0), keyframe(2.0, 40.0)]);
-        let values = &curve_groups(&animation)[0];
+        let values = &animation.curve_groups()[0];
         assert_eq!(effective_handle_out(values, 0, false), Some(20.0));
         assert_eq!(effective_handle_in(values, 1, false), Some(30.0));
     }
@@ -372,7 +576,7 @@ mod tests {
     #[test]
     fn cyclic_default_handles_wrap_across_the_seam() {
         let animation = curve(2.0, true, vec![keyframe(0.5, 0.0), keyframe(1.5, 100.0)]);
-        let values = &curve_groups(&animation)[0];
+        let values = &animation.curve_groups()[0];
 
         // The first keyframe's incoming handle looks back to the last keyframe.
         let handle_in = effective_handle_in(values, 0, true).unwrap();
@@ -383,8 +587,8 @@ mod tests {
 
     #[test]
     fn sample_pose_maps_channels_to_bone_properties() {
-        let mut document = Document::new();
-        document.bones.push(Bone {
+        let mut asset = Asset::new();
+        asset.bones.push(Bone {
             name: "Arm".into(),
             head: Some([10.0, 20.0]),
             tail: [10.0, 40.0],
@@ -404,13 +608,13 @@ mod tests {
             ));
         }
 
-        let pose = sample_pose(&document, &animation, 0.5);
+        let pose = animation.sample_pose(&asset, 0.5);
         let arm = pose.get(0);
 
         assert_eq!(arm.translation, [3.0, -4.0]);
         assert_eq!(arm.rotation, 0.5);
         assert_eq!(arm.scale, 2.0);
-        // The pose pivots about the bone's rest head, like the rig page.
+        // The pose pivots about the bone's rest head, like the rig view.
         assert_eq!(arm.pivot, [10.0, 20.0]);
     }
 
@@ -418,79 +622,100 @@ mod tests {
     fn setting_a_bone_keyframe_inserts_or_replaces() {
         let mut animation = Animation::new(4.0);
 
-        set_bone_keyframe(&mut animation, 0, BoneProperty::Angle, 1.0, 0.5);
+        animation.set_bone_keyframe(0, BoneProperty::Angle, 1.0, 0.5);
         assert_eq!(animation.keyframes.len(), 1);
         assert_eq!(animation.keyframes[0].timestamp, 1.0);
         assert_eq!(animation.keyframes[0].value, 0.5);
 
         // The same target at the same time updates in place, keeping handles.
         animation.keyframes[0].handle_out = Some(0.9);
-        set_bone_keyframe(&mut animation, 0, BoneProperty::Angle, 1.0, 0.75);
+        animation.set_bone_keyframe(0, BoneProperty::Angle, 1.0, 0.75);
         assert_eq!(animation.keyframes.len(), 1);
         assert_eq!(animation.keyframes[0].value, 0.75);
         assert_eq!(animation.keyframes[0].handle_out, Some(0.9));
 
         // A different bone, property, or time is its own keyframe.
-        set_bone_keyframe(&mut animation, 1, BoneProperty::Angle, 1.0, 0.1);
-        set_bone_keyframe(&mut animation, 0, BoneProperty::X, 1.0, 2.0);
-        set_bone_keyframe(&mut animation, 0, BoneProperty::Angle, 2.0, 0.2);
+        animation.set_bone_keyframe(1, BoneProperty::Angle, 1.0, 0.1);
+        animation.set_bone_keyframe(0, BoneProperty::X, 1.0, 2.0);
+        animation.set_bone_keyframe(0, BoneProperty::Angle, 2.0, 0.2);
         assert_eq!(animation.keyframes.len(), 4);
     }
 
     #[test]
-    fn setting_a_bone_keyframe_clamps_to_the_duration() {
+    fn setting_a_bone_keyframe_outside_the_half_open_range_is_ignored() {
         let mut animation = Animation::new(2.0);
 
-        set_bone_keyframe(&mut animation, 0, BoneProperty::Scale, 9.0, 3.0);
+        // Both ends clamp to the closed sampler range, but the duration itself
+        // is outside the half-open keyframe range.
+        animation.set_bone_keyframe(0, BoneProperty::Scale, 9.0, 3.0);
+        assert!(animation.keyframes.is_empty());
+
+        animation.set_bone_keyframe(0, BoneProperty::Scale, -1.0, 3.0);
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].timestamp, 0.0);
+    }
+
+    #[test]
+    fn keyframes_at_exactly_the_duration_are_dropped() {
+        let mut animation = Animation::new(2.0);
+        animation.keyframes = vec![keyframe(0.0, 0.0), keyframe(2.0, 10.0)];
+
+        animation.normalize();
 
         assert_eq!(animation.keyframes.len(), 1);
-        assert_eq!(animation.keyframes[0].timestamp, 2.0);
+        assert_eq!(animation.keyframes[0].timestamp, 0.0);
     }
 
     #[test]
     fn cyclic_playback_wraps_around_the_end() {
-        let (time, playing) = advance_playhead(1.9, 1.0, 0.2, 2.0, true);
+        let animation = curve(2.0, true, vec![]);
+
+        let (time, playing) = animation.advance_playhead(1.9, 1.0, 0.2);
         assert!((time - 0.1).abs() < 1e-5);
         assert!(playing);
 
         // Negative velocity wraps around the start too.
-        let (time, playing) = advance_playhead(0.1, -1.0, 0.2, 2.0, true);
+        let (time, playing) = animation.advance_playhead(0.1, -1.0, 0.2);
         assert!((time - 1.9).abs() < 1e-5);
         assert!(playing);
     }
 
     #[test]
     fn non_cyclic_playback_stops_at_either_end() {
-        assert_eq!(advance_playhead(1.9, 1.0, 0.2, 2.0, false), (2.0, false));
-        assert_eq!(advance_playhead(0.1, -1.0, 0.2, 2.0, false), (0.0, false));
+        let animation = curve(2.0, false, vec![]);
+
+        assert_eq!(animation.advance_playhead(1.9, 1.0, 0.2), (2.0, false));
+        assert_eq!(animation.advance_playhead(0.1, -1.0, 0.2), (0.0, false));
 
         // Before the end the playhead keeps moving.
-        let (time, playing) = advance_playhead(1.0, 1.0, 0.2, 2.0, false);
+        let (time, playing) = animation.advance_playhead(1.0, 1.0, 0.2);
         assert!((time - 1.2).abs() < 1e-5);
         assert!(playing);
     }
 
     #[test]
     fn playback_without_a_duration_stops_immediately() {
-        assert_eq!(advance_playhead(1.0, 1.0, 0.1, 0.0, true), (0.0, false));
-        assert_eq!(
-            advance_playhead(1.0, 1.0, 0.1, f32::NAN, false),
-            (0.0, false)
-        );
+        let animation = Animation::new(0.0);
+        assert_eq!(animation.advance_playhead(1.0, 1.0, 0.1), (0.0, false));
+
+        let animation = Animation::new(f32::NAN);
+        assert_eq!(animation.advance_playhead(1.0, 1.0, 0.1), (0.0, false));
     }
 
     #[test]
     fn zero_velocity_holds_the_playhead() {
-        let (time, playing) = advance_playhead(0.75, 0.0, 0.1, 2.0, true);
+        let animation = curve(2.0, true, vec![]);
+
+        let (time, playing) = animation.advance_playhead(0.75, 0.0, 0.1);
         assert_eq!(time, 0.75);
         assert!(playing);
     }
 
     #[test]
     fn channels_missing_from_the_animation_stay_at_rest() {
-        let mut document = Document::new();
+        let mut asset = Asset::new();
         for (name, head) in [("Arm", [10.0, 20.0]), ("Leg", [20.0, 20.0])] {
-            document.bones.push(Bone {
+            asset.bones.push(Bone {
                 name: name.into(),
                 head: Some(head),
                 tail: [20.0, 40.0],
@@ -499,9 +724,120 @@ mod tests {
         }
         let animation = curve(2.0, false, vec![keyframe(0.0, 5.0)]);
 
-        let pose = sample_pose(&document, &animation, 1.0);
+        let pose = animation.sample_pose(&asset, 1.0);
 
         assert_eq!(pose.get(0).translation, [5.0, 0.0]);
         assert!(pose.get(1).is_identity());
+    }
+
+    #[test]
+    fn animations_round_trip_through_json() {
+        let mut animation = Animation::new(5.0);
+        animation.cyclic = true;
+        let mut keyframe = bone_keyframe(1.5, 10.0, 0, BoneProperty::Angle);
+        keyframe.handle_in = Some(0.25);
+        keyframe.handle_out = Some(0.75);
+        animation.insert_keyframe(keyframe);
+
+        let asset = Asset {
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        let json = asset.to_json_string().unwrap();
+        assert_eq!(Asset::from_json_str(&json).unwrap(), asset);
+
+        // Omitted handles and empty animation lists stay out of the file.
+        let empty = Asset {
+            animations: vec![Animation::new(1.0)],
+            ..Default::default()
+        };
+        let json = empty.to_json_string().unwrap();
+        assert!(!json.contains("keyframes"));
+        assert!(!json.contains("handle"));
+    }
+
+    #[test]
+    fn animation_names_round_trip_and_are_omitted_when_empty() {
+        let named = Asset {
+            animations: vec![Animation {
+                name: "Walk".into(),
+                ..Animation::new(2.0)
+            }],
+            ..Default::default()
+        };
+        let json = named.to_json_string().unwrap();
+        assert!(json.contains("\"Walk\""));
+        assert_eq!(Asset::from_json_str(&json).unwrap(), named);
+
+        let unnamed = Asset {
+            animations: vec![Animation::new(2.0)],
+            ..Default::default()
+        };
+        let json = unnamed.to_json_string().unwrap();
+        assert!(!json.contains("\"name\""));
+    }
+
+    #[test]
+    fn inserting_keyframes_keeps_them_ordered_and_in_range() {
+        let mut animation = Animation::new(10.0);
+        animation.insert_keyframe(bone_keyframe(5.0, 0.0, 1, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(1.0, 0.0, 0, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(5.0, 0.0, 2, BoneProperty::Y));
+        animation.insert_keyframe(bone_keyframe(-1.0, 0.0, 3, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(11.0, 0.0, 4, BoneProperty::X));
+
+        assert_eq!(keyframe_times(&animation), vec![1.0, 5.0, 5.0]);
+
+        // Equal timestamps keep insertion order.
+        let bones: Vec<BoneIndex> = animation
+            .keyframes
+            .iter()
+            .map(|keyframe| match &keyframe.target {
+                KeyframeTarget::Bone { bone, .. } => *bone,
+                KeyframeTarget::Shape { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(bones, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn changing_duration_drops_outlying_keyframes() {
+        let mut animation = Animation::new(10.0);
+        for timestamp in [0.0, 2.0, 8.0, 10.0] {
+            animation.insert_keyframe(bone_keyframe(timestamp, timestamp, 0, BoneProperty::X));
+        }
+
+        animation.set_duration(5.0);
+
+        assert_eq!(animation.duration, 5.0);
+        assert_eq!(keyframe_times(&animation), vec![0.0, 2.0]);
+    }
+
+    #[test]
+    fn loading_animations_normalizes_their_keyframes() {
+        let json = r#"{
+            "type": "viveco",
+            "version": 5,
+            "animations": [{
+                "duration": 4.0,
+                "cyclic": true,
+                "keyframes": [
+                    {"timestamp": 3.0, "value": 3.0,
+                     "target": {"kind": "bone", "bone": 0, "property": "x"}},
+                    {"timestamp": -1.0, "value": 0.0,
+                     "target": {"kind": "bone", "bone": 1, "property": "y"}},
+                    {"timestamp": 1.0, "value": 1.0,
+                     "target": {"kind": "bone", "bone": 2, "property": "angle"}},
+                    {"timestamp": 9.0, "value": 9.0,
+                     "target": {"kind": "bone", "bone": 3, "property": "scale"}}
+                ]
+            }]
+        }"#;
+
+        let asset = Asset::from_json_str(json).unwrap();
+        let animation = &asset.animations[0];
+        assert!(animation.cyclic);
+        assert_eq!(keyframe_times(animation), vec![1.0, 3.0]);
     }
 }

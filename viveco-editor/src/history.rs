@@ -1,6 +1,6 @@
 //! Undo and redo.
 //!
-//! History is snapshot based: a changed [`Document`] is copied onto a stack so
+//! History is snapshot based: a changed [`Asset`] is copied onto a stack so
 //! every edit can be reverted without per-edit undo code. Snapshots are only
 //! taken between gestures, so dragging a point or a slider produces one undo
 //! step rather than one per frame.
@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 
 use crate::editor::EditorState;
-use viveco::model::Document;
+use viveco::Asset;
 
 pub struct HistoryPlugin;
 
@@ -24,13 +24,13 @@ impl Plugin for HistoryPlugin {
 /// has something to return to.
 #[derive(Resource)]
 pub struct History {
-    undo: Vec<Document>,
-    redo: Vec<Document>,
-    last: Document,
+    undo: Vec<Asset>,
+    redo: Vec<Asset>,
+    last: Asset,
 }
 
 impl History {
-    pub fn new(document: Document) -> Self {
+    pub fn new(document: Asset) -> Self {
         Self {
             undo: Vec::new(),
             redo: Vec::new(),
@@ -41,7 +41,7 @@ impl History {
     /// Forgets all history and treats `document` as the new baseline.
     ///
     /// Used when the document is replaced wholesale (new or load).
-    pub fn reset(&mut self, document: Document) {
+    pub fn reset(&mut self, document: Asset) {
         self.undo.clear();
         self.redo.clear();
         self.last = document;
@@ -52,7 +52,7 @@ impl History {
     /// `continuous` suppresses recording mid-gesture; the next call with
     /// `continuous == false` then records the state from before the gesture,
     /// coalescing the whole drag into one undo step.
-    pub fn observe(&mut self, document: &Document, continuous: bool) {
+    pub fn observe(&mut self, document: &Asset, continuous: bool) {
         if continuous || *document == self.last {
             return;
         }
@@ -145,12 +145,11 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 mod tests {
     use super::*;
     use crate::editor::TreeAddress;
-    use viveco::model::{Animation, FORMAT_VERSION, Path, Shape, Style};
-    use viveco::pose::BonePose;
+    use viveco::BonePose;
+    use viveco::{Animation, Path, Shape, Style};
 
-    fn document_with_path(name: &str) -> Document {
-        Document {
-            version: FORMAT_VERSION,
+    fn document_with_path(name: &str) -> Asset {
+        Asset {
             animations: Vec::new(),
             bones: Vec::new(),
             shapes: vec![Shape {
@@ -205,7 +204,7 @@ mod tests {
         assert_eq!(editor.pose.get(0).rotation, 0.5);
     }
 
-    fn document_with_animation(duration: f32) -> Document {
+    fn document_with_animation(duration: f32) -> Asset {
         let mut document = document_with_path("animated");
         document.animations = vec![Animation::new(duration)];
         document

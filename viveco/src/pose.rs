@@ -1,9 +1,9 @@
 //! Transient bone poses and the deformation they apply to the artwork.
 //!
 //! A pose gives every bone a local rotation, translation, and scale on top of
-//! its rest geometry. Poses are editor state, not document data: they are
-//! never saved, and they only affect what the rig page shows. The draw page
-//! always edits and displays the rest pose.
+//! its rest geometry. Poses are editor state, not asset data: they are never
+//! saved, and they only affect what a rig view shows. Editing can always work
+//! against the rest pose.
 //!
 //! Each bone's local transform is a [`Similarity`] (uniform scale, rotation,
 //! and translation) that pivots about the bone's rest head. Local transforms
@@ -15,7 +15,9 @@
 //! several bones moves to the blend of where each bone's world transform puts
 //! it, with the point's unused weight `1 - sum` keeping it in place.
 
-use crate::model::{Bone, BoneIndex, Document, Path, PathEnds, Point, Shape, Weights};
+use crate::asset::Asset;
+use crate::bone::{Bone, BoneIndex};
+use crate::shape::{Path, PathEnds, Point, Shape, Weights};
 
 /// A uniform scale, rotation, and translation.
 ///
@@ -174,11 +176,10 @@ impl BonePose {
 
 /// Every bone's transient pose, ordered by [`BoneIndex`].
 ///
-/// The vector always has one entry per bone in the matching [`Document`];
-/// bones without a pose entry in a freshly built `Pose` are at rest. Because
-/// indices shift whenever the rig is edited, whoever keeps a `Pose` alongside a
-/// document must apply the same index remap to it; [`Self::apply_bone_map`]
-/// does that.
+/// The vector always has one entry per bone in the matching [`Asset`]; bones
+/// without a pose entry in a freshly built `Pose` are at rest. Because indices
+/// shift whenever the rig is edited, whoever keeps a `Pose` alongside an asset
+/// must apply the same index remap to it; [`Self::apply_bone_map`] does that.
 #[derive(Clone, Debug, Default)]
 pub struct Pose {
     bones: Vec<BonePose>,
@@ -233,75 +234,165 @@ impl Pose {
     }
 }
 
-/// The world transform of every bone, ordered by [`BoneIndex`].
-pub fn worlds(document: &Document, pose: &Pose) -> Vec<Similarity> {
+/// The world transform of the bone at `target` under `pose`.
+///
+/// Each bone contributes its local pose about its rest head, composed on top of
+/// its parent's world transform, so a child inherits everything above it.
+fn world_at(asset: &Asset, pose: &Pose, target: BoneIndex) -> Similarity {
     fn walk(
         bones: &[Bone],
         parent_world: Similarity,
         parent_tail: Option<Point>,
         pose: &Pose,
         cursor: &mut usize,
-        worlds: &mut [Similarity],
-    ) {
+        target: BoneIndex,
+    ) -> Option<Similarity> {
         for bone in bones {
             let index = *cursor;
             *cursor += 1;
             let rest_head = bone.head_with_parent(parent_tail);
             let local = pose.get(index).local(rest_head, bone.head.is_none());
             let world = Similarity::compose(parent_world, local);
-            worlds[index] = world;
-            walk(&bone.children, world, Some(bone.tail), pose, cursor, worlds);
+            if index == target {
+                return Some(world);
+            }
+            if let Some(found) = walk(&bone.children, world, Some(bone.tail), pose, cursor, target)
+            {
+                return Some(found);
+            }
         }
+        None
     }
 
-    let mut worlds = vec![Similarity::IDENTITY; document.bone_count()];
     let mut cursor = 0;
     walk(
-        &document.bones,
+        &asset.bones,
         Similarity::IDENTITY,
         None,
         pose,
         &mut cursor,
-        &mut worlds,
-    );
-    worlds
+        target,
+    )
+    .unwrap_or(Similarity::IDENTITY)
 }
 
-/// The rest head of every bone, ordered by [`BoneIndex`].
-///
-/// A connected bone has no stored head, so its head is its parent's tail. The
-/// animation sampler needs this to pivot a posed bone about the same joint the
-/// rig page uses.
-pub fn rest_heads(document: &Document) -> Vec<Point> {
-    fn walk(bones: &[Bone], parent_tail: Option<Point>, cursor: &mut usize, heads: &mut [Point]) {
-        for bone in bones {
-            let index = *cursor;
-            *cursor += 1;
-            heads[index] = bone.head_with_parent(parent_tail);
-            walk(&bone.children, Some(bone.tail), cursor, heads);
+impl Asset {
+    /// The world transform of every bone under `pose`, ordered by
+    /// [`BoneIndex`].
+    pub fn bone_worlds(&self, pose: &Pose) -> Vec<Similarity> {
+        fn walk(
+            bones: &[Bone],
+            parent_world: Similarity,
+            parent_tail: Option<Point>,
+            pose: &Pose,
+            cursor: &mut usize,
+            worlds: &mut [Similarity],
+        ) {
+            for bone in bones {
+                let index = *cursor;
+                *cursor += 1;
+                let rest_head = bone.head_with_parent(parent_tail);
+                let local = pose.get(index).local(rest_head, bone.head.is_none());
+                let world = Similarity::compose(parent_world, local);
+                worlds[index] = world;
+                walk(&bone.children, world, Some(bone.tail), pose, cursor, worlds);
+            }
+        }
+
+        let mut worlds = vec![Similarity::IDENTITY; self.bone_count()];
+        let mut cursor = 0;
+        walk(
+            &self.bones,
+            Similarity::IDENTITY,
+            None,
+            pose,
+            &mut cursor,
+            &mut worlds,
+        );
+        worlds
+    }
+
+    /// A bone's world transform under `pose`.
+    pub fn bone_world(&self, pose: &Pose, index: BoneIndex) -> Similarity {
+        world_at(self, pose, index)
+    }
+
+    /// The world transform of a bone's parent under `pose`, or the identity for
+    /// a root bone.
+    ///
+    /// Asset edits move rest geometry within the parent's frame, so this is the
+    /// transform that maps those rest-space changes into world space.
+    pub fn parent_world(&self, pose: &Pose, index: BoneIndex) -> Similarity {
+        match self.parent_of(index) {
+            Some(parent) => world_at(self, pose, parent),
+            None => Similarity::IDENTITY,
         }
     }
 
-    let mut heads = vec![[0.0, 0.0]; document.bone_count()];
-    let mut cursor = 0;
-    walk(&document.bones, None, &mut cursor, &mut heads);
-    heads
+    /// The rest head of every bone, ordered by [`BoneIndex`].
+    ///
+    /// A connected bone has no stored head, so its head is its parent's tail.
+    /// The animation sampler needs this to pivot a posed bone about the same
+    /// joint the rig view uses.
+    pub fn rest_heads(&self) -> Vec<Point> {
+        fn walk(
+            bones: &[Bone],
+            parent_tail: Option<Point>,
+            cursor: &mut usize,
+            heads: &mut [Point],
+        ) {
+            for bone in bones {
+                let index = *cursor;
+                *cursor += 1;
+                heads[index] = bone.head_with_parent(parent_tail);
+                walk(&bone.children, Some(bone.tail), cursor, heads);
+            }
+        }
+
+        let mut heads = vec![[0.0, 0.0]; self.bone_count()];
+        let mut cursor = 0;
+        walk(&self.bones, None, &mut cursor, &mut heads);
+        heads
+    }
+
+    /// Returns a copy of this asset with every curve point skinned by `pose`.
+    ///
+    /// This is what a rig view paints. The asset itself is never modified, so
+    /// the rest pose stays the single source of truth for editing and saving.
+    pub fn deformed(&self, pose: &Pose) -> Asset {
+        if pose.is_identity() {
+            return self.clone();
+        }
+        let worlds = self.bone_worlds(pose);
+        let mut deformed = self.clone();
+        for shape in &mut deformed.shapes {
+            deform_shape(shape, &worlds);
+        }
+        deformed
+    }
 }
 
-/// Returns a copy of `document` with every curve point skinned by `pose`.
-///
-/// This is what the rig page paints. The document itself is never modified, so
-/// the rest pose stays the single source of truth for editing and saving.
-pub fn deform_document(document: &Document, pose: &Pose) -> Document {
-    if pose.is_identity() {
-        return document.clone();
+impl Weights {
+    /// Skins one point: a weighted blend of each bone's world transform, with
+    /// the unused share `1 - sum` left in place.
+    pub fn deform(&self, position: Point, worlds: &[Similarity]) -> Point {
+        let mut blended = [0.0, 0.0];
+        let mut matched = 0.0;
+        for weight in self.iter() {
+            let Some(world) = worlds.get(weight.bone) else {
+                continue;
+            };
+            let posed = world.apply(position);
+            blended[0] += weight.weight * posed[0];
+            blended[1] += weight.weight * posed[1];
+            matched += weight.weight;
+        }
+        let rest = (1.0 - matched).max(0.0);
+        [
+            blended[0] + rest * position[0],
+            blended[1] + rest * position[1],
+        ]
     }
-    let worlds = worlds(document, pose);
-    let mut deformed = document.clone();
-    for shape in &mut deformed.shapes {
-        deform_shape(shape, &worlds);
-    }
-    deformed
 }
 
 fn deform_shape(shape: &mut Shape, worlds: &[Similarity]) {
@@ -315,38 +406,17 @@ fn deform_shape(shape: &mut Shape, worlds: &[Similarity]) {
 
 fn deform_path(path: &mut Path, worlds: &[Similarity]) {
     if let PathEnds::Open(start) = path.ends {
-        path.ends = PathEnds::Open(deform_point(start, &path.start_weights, worlds));
+        path.ends = PathEnds::Open(path.start_weights.deform(start, worlds));
     }
     for segment in &mut path.segments {
         if let Some(ctrl1) = segment.ctrl1.as_mut() {
-            *ctrl1 = deform_point(*ctrl1, &segment.ctrl1_weights, worlds);
+            *ctrl1 = segment.ctrl1_weights.deform(*ctrl1, worlds);
         }
         if let Some(ctrl2) = segment.ctrl2.as_mut() {
-            *ctrl2 = deform_point(*ctrl2, &segment.ctrl2_weights, worlds);
+            *ctrl2 = segment.ctrl2_weights.deform(*ctrl2, worlds);
         }
-        segment.to = deform_point(segment.to, &segment.to_weights, worlds);
+        segment.to = segment.to_weights.deform(segment.to, worlds);
     }
-}
-
-/// Skins one point: a weighted blend of each bone's world transform, with the
-/// unused share `1 - sum` left in place.
-pub fn deform_point(position: Point, weights: &Weights, worlds: &[Similarity]) -> Point {
-    let mut blended = [0.0, 0.0];
-    let mut matched = 0.0;
-    for weight in weights.iter() {
-        let Some(world) = worlds.get(weight.bone) else {
-            continue;
-        };
-        let posed = world.apply(position);
-        blended[0] += weight.weight * posed[0];
-        blended[1] += weight.weight * posed[1];
-        matched += weight.weight;
-    }
-    let rest = (1.0 - matched).max(0.0);
-    [
-        blended[0] + rest * position[0],
-        blended[1] + rest * position[1],
-    ]
 }
 
 fn rotate(vector: Point, rotation: f32) -> Point {
@@ -364,7 +434,6 @@ fn add(a: Point, b: Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FORMAT_VERSION;
 
     fn assert_point(actual: Point, expected: Point) {
         assert!(
@@ -375,10 +444,10 @@ mod tests {
 
     /// A parent bone from the origin to [10, 0] with a child continuing to
     /// [10, 10]. The parent has index 0 and the child index 1.
-    fn rigged_document(
+    fn rigged_asset(
         start_weights: &[(BoneIndex, f32)],
         anchor_weights: &[(BoneIndex, f32)],
-    ) -> Document {
+    ) -> Asset {
         let child = Bone {
             name: "Child".into(),
             head: None,
@@ -398,8 +467,7 @@ mod tests {
         for &(bone, weight) in anchor_weights {
             path.segments[0].to_weights.set(bone, weight);
         }
-        Document {
-            version: FORMAT_VERSION,
+        Asset {
             animations: Vec::new(),
             shapes: vec![Shape {
                 paths: vec![path],
@@ -411,15 +479,15 @@ mod tests {
 
     #[test]
     fn identity_pose_leaves_geometry_alone() {
-        let document = rigged_document(&[(0, 1.0)], &[(1, 1.0)]);
-        let deformed = deform_document(&document, &Pose::default());
-        assert_eq!(deformed.shapes, document.shapes);
+        let asset = rigged_asset(&[(0, 1.0)], &[(1, 1.0)]);
+        let deformed = asset.deformed(&Pose::default());
+        assert_eq!(deformed.shapes, asset.shapes);
     }
 
     #[test]
     fn rest_heads_resolve_connected_bones() {
-        let document = rigged_document(&[], &[]);
-        let heads = rest_heads(&document);
+        let asset = rigged_asset(&[], &[]);
+        let heads = asset.rest_heads();
 
         assert_eq!(heads[0], [0.0, 0.0]);
         // The child omits its head, so it sits at the parent's tail.
@@ -428,7 +496,7 @@ mod tests {
 
     #[test]
     fn a_root_rotation_turns_points_about_the_head() {
-        let document = rigged_document(&[(0, 1.0)], &[(0, 1.0)]);
+        let asset = rigged_asset(&[(0, 1.0)], &[(0, 1.0)]);
         let mut pose = Pose::default();
         pose.set(
             0,
@@ -438,7 +506,7 @@ mod tests {
             },
         );
 
-        let deformed = deform_document(&document, &pose);
+        let deformed = asset.deformed(&pose);
         let path = &deformed.shapes[0].paths[0];
         // A quarter turn maps [10, 10] to [-10, 10] about the origin.
         assert_point(path.start().unwrap(), [0.0, 0.0]);
@@ -447,7 +515,7 @@ mod tests {
 
     #[test]
     fn a_child_inherits_its_parents_transform() {
-        let document = rigged_document(&[], &[(1, 1.0)]);
+        let asset = rigged_asset(&[], &[(1, 1.0)]);
         let mut pose = Pose::default();
         pose.set(
             0,
@@ -457,7 +525,7 @@ mod tests {
             },
         );
 
-        let deformed = deform_document(&document, &pose);
+        let deformed = asset.deformed(&pose);
         let path = &deformed.shapes[0].paths[0];
         // The child's point follows the parent's rotation even though only the
         // parent is posed.
@@ -466,7 +534,7 @@ mod tests {
 
     #[test]
     fn weights_blend_between_bones() {
-        let document = rigged_document(&[(0, 0.5), (1, 0.5)], &[]);
+        let asset = rigged_asset(&[(0, 0.5), (1, 0.5)], &[]);
         let mut pose = Pose::default();
         pose.set(
             0,
@@ -478,7 +546,7 @@ mod tests {
             },
         );
 
-        let deformed = deform_document(&document, &pose);
+        let deformed = asset.deformed(&pose);
         let path = &deformed.shapes[0].paths[0];
         // The start is half on the rotated parent (origin, unmoved) and half
         // on the unposed child, so it stays put.
@@ -487,7 +555,7 @@ mod tests {
 
     #[test]
     fn an_unweighted_point_stays_in_place() {
-        let document = rigged_document(&[], &[(0, 1.0)]);
+        let asset = rigged_asset(&[], &[(0, 1.0)]);
         let mut pose = Pose::default();
         pose.set(
             0,
@@ -497,7 +565,7 @@ mod tests {
             },
         );
 
-        let deformed = deform_document(&document, &pose);
+        let deformed = asset.deformed(&pose);
         let path = &deformed.shapes[0].paths[0];
         assert_point(path.start().unwrap(), [0.0, 0.0]);
         assert_point(path.segments[0].to, [15.0, 10.0]);
@@ -561,7 +629,7 @@ mod tests {
         );
 
         // Remove bone 0; bone 2 shifts down to index 1.
-        pose.apply_bone_map(&crate::model::removal_map(3, 0, 1));
+        pose.apply_bone_map(&crate::bone::removal_map(3, 0, 1));
 
         assert_eq!(pose.get(0), BonePose::default());
         assert!((pose.get(1).rotation - 0.5).abs() < 1e-6);

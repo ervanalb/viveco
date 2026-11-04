@@ -14,16 +14,13 @@
 use bevy::prelude::*;
 
 use crate::editor::{CanvasInput, EditorMode, EditorState};
-use crate::rig::{
-    begin_bone_rename, bone_name_at, cancel_bone_rename, commit_bone_rename, is_ancestor_or_self,
-    move_bone_into, move_bone_near,
-};
+use crate::rig::{begin_bone_rename, cancel_bone_rename, commit_bone_rename};
 use crate::tree::{
     DropKind, TreeDrag, TreeModel, TreeNode, deselect_on_empty_press, finish_drag,
     handle_row_press, label, paint_rows, rebuild_tree, spawn_panel, sync_row_labels,
     sync_visibility, update_drag_hover,
 };
-use viveco::model::{Bone, BoneIndex, Document};
+use viveco::{Asset, Bone, BoneIndex};
 
 pub struct RigSidebarPlugin;
 
@@ -60,13 +57,13 @@ impl TreeModel for BoneIndex {
         mode == EditorMode::Rig
     }
 
-    fn layout(document: &Document) -> Vec<TreeNode<Self>> {
+    fn layout(document: &Asset) -> Vec<TreeNode<Self>> {
         let mut cursor = 0;
         bone_nodes(&document.bones, &mut cursor)
     }
 
-    fn name(document: &Document, address: &Self) -> String {
-        let name = bone_name_at(document, *address).unwrap_or_default();
+    fn name(document: &Asset, address: &Self) -> String {
+        let name = document.bone_name(*address).unwrap_or_default();
         label(name, "Bone")
     }
 
@@ -115,25 +112,25 @@ impl TreeModel for BoneIndex {
     /// Any bone can be moved next to or inside another bone, as long as it is
     /// not dropped on itself or into its own subtree.
     fn resolve_drop(
-        document: &Document,
+        document: &Asset,
         source: &Self,
         target: &Self,
         kind: DropKind,
     ) -> Option<(Self, DropKind)> {
-        let allowed = !is_ancestor_or_self(document, *source, *target);
+        let allowed = !document.is_ancestor_or_self(*source, *target);
         (allowed && source != target).then_some((*target, kind))
     }
 
     fn drop_move(
-        document: &mut Document,
+        document: &mut Asset,
         source: &Self,
         target: &Self,
         kind: DropKind,
     ) -> Option<Self> {
         match kind {
-            DropKind::Before => move_bone_near(document, *source, *target, false),
-            DropKind::After => move_bone_near(document, *source, *target, true),
-            DropKind::Into => move_bone_into(document, *source, *target),
+            DropKind::Before => document.move_bone_near(*source, *target, false),
+            DropKind::After => document.move_bone_near(*source, *target, true),
+            DropKind::Into => document.move_bone_into(*source, *target),
         }
     }
 }
@@ -163,11 +160,9 @@ fn bone_label(bone: &Bone) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::FORMAT_VERSION;
 
     fn state(mut bones: Vec<Bone>) -> EditorState {
-        let document = Document {
-            version: FORMAT_VERSION,
+        let document = Asset {
             animations: Vec::new(),
             shapes: Vec::new(),
             bones: std::mem::take(&mut bones),

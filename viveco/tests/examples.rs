@@ -2,7 +2,7 @@
 
 use std::path::Path as FsPath;
 
-use viveco::model::{Document, FORMAT_VERSION, KeyframeTarget, Path, Shape};
+use viveco::{Asset, KeyframeTarget, Path, Shape, Weights};
 
 fn visit_shape(shape: &Shape, bones: usize, source: &FsPath) {
     for path in &shape.paths {
@@ -22,7 +22,7 @@ fn visit_weights(path: &Path, bones: usize, source: &FsPath) {
     }
 }
 
-fn assert_weights(weights: &viveco::model::Weights, bones: usize, source: &FsPath) {
+fn assert_weights(weights: &Weights, bones: usize, source: &FsPath) {
     for weight in weights.iter() {
         assert!(
             weight.bone < bones,
@@ -44,15 +44,14 @@ fn examples_load_as_the_current_format() {
             continue;
         }
 
-        let document = Document::load_from_file(&path)
+        let asset = Asset::load_from_file(&path)
             .unwrap_or_else(|err| panic!("failed to load {}: {err}", path.display()));
-        assert_eq!(document.version, FORMAT_VERSION, "{}", path.display());
 
-        let bones = document.bone_count();
-        for shape in &document.shapes {
+        let bones = asset.bone_count();
+        for shape in &asset.shapes {
             visit_shape(shape, bones, &path);
         }
-        for animation in &document.animations {
+        for animation in &asset.animations {
             for keyframe in &animation.keyframes {
                 if let KeyframeTarget::Bone { bone, .. } = keyframe.target {
                     assert!(
@@ -67,10 +66,10 @@ fn examples_load_as_the_current_format() {
         }
 
         // A loaded example must survive a round trip unchanged.
-        let json = serde_json::to_string(&document).expect("serialize");
+        let json = serde_json::to_string(&asset).expect("serialize");
         assert_eq!(
-            Document::from_json_str(&json).expect("deserialize"),
-            document,
+            Asset::from_json_str(&json).expect("deserialize"),
+            asset,
             "{}",
             path.display()
         );

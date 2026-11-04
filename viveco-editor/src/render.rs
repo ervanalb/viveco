@@ -1,4 +1,4 @@
-//! Converts a [`Document`] into a Vello [`Scene`].
+//! Converts an [`Asset`] into a Vello [`Scene`].
 
 use bevy_vello::vello::{
     Scene,
@@ -6,7 +6,7 @@ use bevy_vello::vello::{
     peniko::{Color, Fill},
 };
 
-use viveco::model::{Document, Path, Rgba8, Shape, Style};
+use viveco::{Asset, Path, Rgba8, Shape, Style};
 
 /// Builds a Vello scene in document coordinates.
 ///
@@ -16,7 +16,7 @@ use viveco::model::{Document, Path, Rgba8, Shape, Style};
 /// The fill is painted first, then the children inside a clip layer keyed to
 /// the same compound path, then the stroke on top. A shape with children but
 /// no paths acts as an unclipped group.
-pub fn build_scene(document: &Document) -> Scene {
+pub fn build_scene(document: &Asset) -> Scene {
     let mut scene = Scene::new();
     for index in document.shape_indices_in_paint_order() {
         draw_shape(&mut scene, &document.shapes[index]);

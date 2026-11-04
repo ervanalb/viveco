@@ -1,7 +1,7 @@
 //! Selection and control-point editing.
 //!
 //! The rendered document lives on the GPU as a Vello scene, so interaction is
-//! done against the CPU-side [`Document`]: clicks are mapped from screen pixels
+//! done against the CPU-side [`Asset`]: clicks are mapped from screen pixels
 //! into document space and tested against the path geometry in painting order.
 
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
@@ -15,14 +15,15 @@ use vello::kurbo::{
 };
 use vello::peniko::{Color, Fill};
 
+use crate::bounds::Bounds;
 use crate::menu_bar::MenuState;
 use crate::render::{
     build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
 };
 use crate::rig::{BoneRename, RigEditing};
-use viveco::model::{
-    BoneIndex, Bounds, DEFAULT_STROKE_WIDTH, Document, Path, PathEnds, Rgba8, Segment, Shape,
-    StrokeStyle, Style, Weights,
+use viveco::{
+    Asset, BoneIndex, DEFAULT_STROKE_WIDTH, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle,
+    Style, Weights,
 };
 
 /// Width of the layer sidebar on the right, in screen pixels.
@@ -242,7 +243,7 @@ impl TreeAddress {
 /// paths the point belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectedNode {
-    /// Index into the selected shape's [`viveco::model::Shape::paths`].
+    /// Index into the selected shape's [`viveco::Shape::paths`].
     pub path: usize,
     pub handle: Handle,
 }
@@ -361,7 +362,7 @@ impl PenDraft {
 /// Editor state: the mutable document plus the current selection.
 #[derive(Resource)]
 pub struct EditorState {
-    pub document: Document,
+    pub document: Asset,
     /// The selected node, either a whole shape or one of its paths.
     pub selected_node: Option<TreeAddress>,
     /// The selected control point of [`Self::selected`], if any.
@@ -389,7 +390,7 @@ pub struct EditorState {
     ///
     /// Poses are editor state, not document data: they are never saved, and
     /// they only deform what the rig page shows.
-    pub pose: viveco::pose::Pose,
+    pub pose: viveco::Pose,
     /// Transient rig-mode editing state (bone drag, pen chain, preview).
     ///
     /// Stored here rather than in its own resource so a document replacement or
@@ -404,8 +405,8 @@ pub struct EditorState {
 }
 
 impl EditorState {
-    pub fn new(document: Document) -> Self {
-        let pose = viveco::pose::Pose::new(document.bone_count());
+    pub fn new(document: Asset) -> Self {
+        let pose = viveco::Pose::new(document.bone_count());
         Self {
             document,
             selected_node: None,
@@ -468,7 +469,7 @@ impl EditorState {
     /// Used for new, load, and undo/redo. The structure revision is bumped so
     /// views that mirror the object tree rebuild even when the selection does
     /// not change.
-    pub fn replace_document(&mut self, document: Document) {
+    pub fn replace_document(&mut self, document: Asset) {
         self.document = document;
         self.selected_node = None;
         self.selected_handle = None;
@@ -478,7 +479,7 @@ impl EditorState {
         self.playhead = 0.0;
         self.animation_renaming = None;
         self.bone_renaming = None;
-        self.pose = viveco::pose::Pose::new(self.document.bone_count());
+        self.pose = viveco::Pose::new(self.document.bone_count());
         self.rig.cancel_editing();
         self.drag = None;
         self.pen = None;
@@ -510,7 +511,7 @@ impl EditorState {
             self.selected_handle = view.selected_handle;
         }
         if let Some(index) = view.selected_bone
-            && crate::rig::bone_name_at(&self.document, index).is_some()
+            && self.document.bone_name(index).is_some()
         {
             self.selected_bone = Some(index);
         }
@@ -580,7 +581,7 @@ pub fn fit_transform(bounds: Bounds, viewport_width: f32, viewport_height: f32) 
     let doc_height = bounds.height().max(f32::EPSILON);
     let scale = FIT_FRACTION * (available_width / doc_width).min(available_height / doc_height);
 
-    // Document Y points down, so shifting the document's centre to the content
+    // Asset Y points down, so shifting the document's centre to the content
     // area's centre means moving the entity *up* by `scale * centre.y`. That
     // centre sits between the toolbar and the sidebar, half of the top bars
     // below the top edge, and half a style panel above the bottom edge.
@@ -1105,7 +1106,7 @@ fn refresh_scene(
     let animation_pose = (*mode == EditorMode::Animate)
         .then(|| crate::animate::selected_animation(&editor))
         .flatten()
-        .map(|animation| crate::animate::sample_pose(&editor.document, animation, editor.playhead));
+        .map(|animation| animation.sample_pose(&editor.document, editor.playhead));
     let shown_pose = match *mode {
         EditorMode::Rig => Some(&editor.pose),
         EditorMode::Animate => animation_pose.as_ref(),
@@ -1113,7 +1114,7 @@ fn refresh_scene(
     };
     let posed = shown_pose
         .filter(|pose| !pose.is_identity())
-        .map(|pose| viveco::pose::deform_document(&editor.document, pose));
+        .map(|pose| editor.document.deformed(pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
     let mut scene = build_scene(displayed);
 
@@ -1177,7 +1178,7 @@ fn refresh_scene(
     } else if *mode == EditorMode::Animate && show_bones.0 {
         // The animate page shows the same skeleton as the rig page, posed by
         // the animation at the playhead. With no animation selected it rests.
-        let rest = viveco::pose::Pose::new(editor.document.bone_count());
+        let rest = viveco::Pose::new(editor.document.bone_count());
         let pose = animation_pose.as_ref().unwrap_or(&rest);
         crate::rig::draw_bone_overlay(
             &mut scene,
@@ -1215,10 +1216,7 @@ fn shapes_at_mut<'a>(mut shapes: &'a mut [Shape], indices: &[usize]) -> Option<&
 
 /// Resolves a chain of child indices to the mutable list that contains the last
 /// index, so the addressed child can be removed or inserted.
-fn shapes_vec_at_mut<'a>(
-    document: &'a mut Document,
-    indices: &[usize],
-) -> Option<&'a mut Vec<Shape>> {
+fn shapes_vec_at_mut<'a>(document: &'a mut Asset, indices: &[usize]) -> Option<&'a mut Vec<Shape>> {
     let mut shapes = &mut document.shapes;
     for &index in indices {
         shapes = &mut shapes.get_mut(index)?.children;
@@ -1227,12 +1225,12 @@ fn shapes_vec_at_mut<'a>(
 }
 
 /// Resolves a chain of shape indices to the shape it names.
-fn shape_at_chain<'a>(document: &'a Document, chain: &[usize]) -> Option<&'a Shape> {
+fn shape_at_chain<'a>(document: &'a Asset, chain: &[usize]) -> Option<&'a Shape> {
     let (last, parents) = chain.split_last()?;
     shapes_at(&document.shapes, parents)?.get(*last)
 }
 
-fn shape_at_chain_mut<'a>(document: &'a mut Document, chain: &[usize]) -> Option<&'a mut Shape> {
+fn shape_at_chain_mut<'a>(document: &'a mut Asset, chain: &[usize]) -> Option<&'a mut Shape> {
     let (last, parents) = chain.split_last()?;
     shapes_at_mut(&mut document.shapes, parents)?.get_mut(*last)
 }
@@ -1241,26 +1239,23 @@ fn shape_at_chain_mut<'a>(document: &'a mut Document, chain: &[usize]) -> Option
 ///
 /// Paths are owned by their enclosing shape, so both variants resolve to a
 /// [`Shape`].
-pub fn shape_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a Shape> {
+pub fn shape_at<'a>(document: &'a Asset, address: &TreeAddress) -> Option<&'a Shape> {
     shape_at_chain(document, address.shape_chain())
 }
 
-pub fn shape_at_mut<'a>(
-    document: &'a mut Document,
-    address: &TreeAddress,
-) -> Option<&'a mut Shape> {
+pub fn shape_at_mut<'a>(document: &'a mut Asset, address: &TreeAddress) -> Option<&'a mut Shape> {
     shape_at_chain_mut(document, address.shape_chain())
 }
 
 /// Resolves a path address to the path it names.
-fn path_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a Path> {
+fn path_at<'a>(document: &'a Asset, address: &TreeAddress) -> Option<&'a Path> {
     let TreeAddress::Path { shapes, path } = address else {
         return None;
     };
     shape_at_chain(document, shapes)?.paths.get(*path)
 }
 
-fn path_at_mut<'a>(document: &'a mut Document, address: &TreeAddress) -> Option<&'a mut Path> {
+fn path_at_mut<'a>(document: &'a mut Asset, address: &TreeAddress) -> Option<&'a mut Path> {
     let TreeAddress::Path { shapes, path } = address else {
         return None;
     };
@@ -1271,7 +1266,7 @@ fn path_at_mut<'a>(document: &'a mut Document, address: &TreeAddress) -> Option<
 ///
 /// A whole shape exposes all of its direct paths; a path address exposes just
 /// that one.
-fn selection_paths<'a>(document: &'a Document, address: &TreeAddress) -> Vec<(usize, &'a Path)> {
+fn selection_paths<'a>(document: &'a Asset, address: &TreeAddress) -> Vec<(usize, &'a Path)> {
     match address {
         TreeAddress::Shape { shapes } => shape_at_chain(document, shapes)
             .map(|shape| shape.paths.iter().enumerate().collect())
@@ -1290,15 +1285,12 @@ fn selection_paths<'a>(document: &'a Document, address: &TreeAddress) -> Vec<(us
 ///
 /// Paths paint with their owner's style, so a path address resolves to the
 /// style of its enclosing shape.
-pub fn style_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a Style> {
+pub fn style_at<'a>(document: &'a Asset, address: &TreeAddress) -> Option<&'a Style> {
     Some(&shape_at(document, address)?.style)
 }
 
 /// Resolves an address to the mutable style applied to the shape it names.
-pub fn style_at_mut<'a>(
-    document: &'a mut Document,
-    address: &TreeAddress,
-) -> Option<&'a mut Style> {
+pub fn style_at_mut<'a>(document: &'a mut Asset, address: &TreeAddress) -> Option<&'a mut Style> {
     Some(&mut shape_at_mut(document, address)?.style)
 }
 
@@ -1306,7 +1298,7 @@ pub fn style_at_mut<'a>(
 ///
 /// A whole shape reports whether all of its paths are closed, and `None` when
 /// it has no paths.
-pub fn path_closed_at(document: &Document, address: &TreeAddress) -> Option<bool> {
+pub fn path_closed_at(document: &Asset, address: &TreeAddress) -> Option<bool> {
     match address {
         TreeAddress::Path { .. } => path_at(document, address).map(Path::is_closed),
         TreeAddress::Shape { shapes } => {
@@ -1321,7 +1313,7 @@ pub fn path_closed_at(document: &Document, address: &TreeAddress) -> Option<bool
 /// A path address changes only that path; a shape address changes every one of
 /// its direct paths. Closing adds a straight segment back to the start and
 /// opening removes it. Returns whether anything was changed.
-pub fn set_path_closed(document: &mut Document, address: &TreeAddress, closed: bool) -> bool {
+pub fn set_path_closed(document: &mut Asset, address: &TreeAddress, closed: bool) -> bool {
     match address {
         TreeAddress::Path { .. } => match path_at_mut(document, address) {
             Some(path) => {
@@ -1370,7 +1362,7 @@ impl ShapeSlot {
 }
 
 /// Resolves a shape address to its position, validating every index.
-fn shape_slot(document: &Document, address: &TreeAddress) -> Option<ShapeSlot> {
+fn shape_slot(document: &Asset, address: &TreeAddress) -> Option<ShapeSlot> {
     let chain = match address {
         TreeAddress::Shape { shapes } => shapes,
         TreeAddress::Path { .. } => return None,
@@ -1413,7 +1405,7 @@ pub(crate) fn address_is_inside(outer: &TreeAddress, inner: &TreeAddress) -> boo
 }
 
 /// Removes the shape named by `address` from its container.
-fn take_shape(document: &mut Document, address: &TreeAddress) -> Option<Shape> {
+fn take_shape(document: &mut Asset, address: &TreeAddress) -> Option<Shape> {
     let slot = shape_slot(document, address)?;
     let siblings = shapes_vec_at_mut(document, slot.parents())?;
     if slot.index() >= siblings.len() {
@@ -1423,7 +1415,7 @@ fn take_shape(document: &mut Document, address: &TreeAddress) -> Option<Shape> {
 }
 
 /// Removes the path named by `address` from its owning shape.
-fn take_path(document: &mut Document, address: &TreeAddress) -> Option<Path> {
+fn take_path(document: &mut Asset, address: &TreeAddress) -> Option<Path> {
     let TreeAddress::Path { shapes, path } = address else {
         return None;
     };
@@ -1452,7 +1444,7 @@ fn renormalize_z(siblings: &mut [Shape]) {
 /// listed above it). Returns the shape's new address, or `None` when either
 /// address is invalid or the move would put a shape inside itself.
 pub fn move_shape_near(
-    document: &mut Document,
+    document: &mut Asset,
     source: &TreeAddress,
     target: &TreeAddress,
     higher: bool,
@@ -1478,7 +1470,7 @@ pub fn move_shape_near(
 
 /// Parents `source` to `target` as its last child.
 pub fn move_shape_into(
-    document: &mut Document,
+    document: &mut Asset,
     source: &TreeAddress,
     target: &TreeAddress,
 ) -> Option<TreeAddress> {
@@ -1507,7 +1499,7 @@ pub fn move_shape_into(
 /// target in the list and `false` inserts it above. Returns the path's new
 /// address, or `None` when either address is invalid or names the same path.
 pub fn move_path_near(
-    document: &mut Document,
+    document: &mut Asset,
     source: &TreeAddress,
     target: &TreeAddress,
     after: bool,
@@ -1553,7 +1545,7 @@ pub fn move_path_near(
 /// Moves a path from one shape into another, appending it to the target's
 /// paths. Returns the path's new address.
 pub fn move_path_into_shape(
-    document: &mut Document,
+    document: &mut Asset,
     source: &TreeAddress,
     target: &TreeAddress,
 ) -> Option<TreeAddress> {
@@ -1578,7 +1570,7 @@ pub fn move_path_into_shape(
 }
 
 /// The editable name of the node at `address`.
-pub fn node_name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option<&'a str> {
+pub fn node_name_at<'a>(document: &'a Asset, address: &TreeAddress) -> Option<&'a str> {
     match address {
         TreeAddress::Shape { .. } => Some(shape_at(document, address)?.name.as_str()),
         TreeAddress::Path { .. } => Some(path_at(document, address)?.name.as_str()),
@@ -1586,7 +1578,7 @@ pub fn node_name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option
 }
 
 /// Renames the node at `address`. Returns `false` when it does not exist.
-pub fn rename_node_at(document: &mut Document, address: &TreeAddress, name: String) -> bool {
+pub fn rename_node_at(document: &mut Asset, address: &TreeAddress, name: String) -> bool {
     match address {
         TreeAddress::Shape { .. } => match shape_at_mut(document, address) {
             // Names are descriptive only; animation targets refer to shapes by
@@ -1635,7 +1627,7 @@ pub fn cancel_node_rename(editor: &mut EditorState) {
 /// raises the selection above everything else. Every other shape is only
 /// pickable where it is actually visible.
 fn pick_shape(
-    document: &Document,
+    document: &Asset,
     selected: Option<&TreeAddress>,
     point: [f32; 2],
     slack: f32,
@@ -1943,7 +1935,7 @@ fn handles(path: &Path) -> Vec<(Handle, [f32; 2])> {
 /// the search spans all of them and returns the path-qualified address of the
 /// best match. A single-path selection only searches that path.
 fn node_under<'a>(
-    document: &'a Document,
+    document: &'a Asset,
     address: &TreeAddress,
     point: [f32; 2],
     radius: f32,
@@ -2479,7 +2471,7 @@ fn delete_handle(path: &mut Path, handle: Handle) -> bool {
 /// Removes the node named by `address` from the document.
 ///
 /// Removing a shape takes its paths and nested children with it.
-fn remove_object(document: &mut Document, address: &TreeAddress) -> bool {
+fn remove_object(document: &mut Asset, address: &TreeAddress) -> bool {
     match address {
         TreeAddress::Shape { .. } => take_shape(document, address).is_some(),
         TreeAddress::Path { .. } => take_path(document, address).is_some(),
@@ -2587,7 +2579,7 @@ fn stroke_segment(scene: &mut Scene, from: [f32; 2], to: [f32; 2], width: f64, c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::{FORMAT_VERSION, Rgba8, StrokeStyle, Style};
+    use viveco::{Rgba8, StrokeStyle, Style};
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Path {
         Path::new([x0, y0])
@@ -2622,9 +2614,8 @@ mod tests {
         }
     }
 
-    fn document_of(shapes: Vec<Shape>) -> Document {
-        Document {
-            version: FORMAT_VERSION,
+    fn document_of(shapes: Vec<Shape>) -> Asset {
+        Asset {
             animations: Vec::new(),
             bones: Vec::new(),
             shapes,

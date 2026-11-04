@@ -1,7 +1,7 @@
 //! Animation mode: selecting, creating, and deleting the document's animations.
 //!
 //! Animations are anonymous, so the editor addresses them by their index in
-//! [`viveco::model::Document::animations`]. Creating and deleting therefore
+//! [`viveco::Asset::animations`]. Creating and deleting therefore
 //! tracks the selection as indices shift.
 //!
 //! Everything else about an animation (its keyframes and how they are
@@ -9,14 +9,11 @@
 //! edits the properties exposed by the animate panel.
 
 use crate::editor::{AnimationRename, EditorState};
-use viveco::model::Animation;
+use viveco::Animation;
 
-// Curve sampling and keyframe editing are part of the format's shared
-// behaviour, so the editor re-exports them from the library for the UI modules.
-pub use viveco::animation::{
-    advance_playhead, curve_groups, effective_handle_in, effective_handle_out, sample_pose,
-    set_bone_keyframe,
-};
+// Effective Bézier handles are free helpers over a keyframe slice, so the
+// editor re-exports them for the timeline that draws them.
+pub use viveco::{effective_handle_in, effective_handle_out};
 
 /// Duration given to a newly created animation, in seconds.
 pub const DEFAULT_ANIMATION_DURATION: f32 = 5.0;
@@ -137,10 +134,10 @@ pub fn set_cyclic(editor: &mut EditorState, index: usize, cyclic: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::{BoneProperty, Document, Keyframe, KeyframeTarget};
+    use viveco::{Asset, BoneProperty, Keyframe, KeyframeTarget};
 
     fn editor_with_keyframes() -> EditorState {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         let index = add_animation(&mut editor);
         let animation = &mut editor.document.animations[index];
         animation.duration = 10.0;
@@ -159,7 +156,7 @@ mod tests {
 
     #[test]
     fn adding_an_animation_selects_it() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
 
         let first = add_animation(&mut editor);
         let second = add_animation(&mut editor);
@@ -172,7 +169,7 @@ mod tests {
 
     #[test]
     fn deleting_keeps_the_selection_on_a_neighbour() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         add_animation(&mut editor);
         add_animation(&mut editor);
         add_animation(&mut editor);
@@ -216,7 +213,7 @@ mod tests {
 
     #[test]
     fn unnamed_animations_are_labelled_by_position() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         add_animation(&mut editor);
         add_animation(&mut editor);
 
@@ -231,7 +228,7 @@ mod tests {
 
     #[test]
     fn renaming_an_animation_updates_its_name() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         let index = add_animation(&mut editor);
 
         begin_animation_rename(&mut editor, index);
@@ -256,7 +253,7 @@ mod tests {
 
     #[test]
     fn deleting_below_a_rename_shifts_its_index() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         add_animation(&mut editor);
         add_animation(&mut editor);
         add_animation(&mut editor);

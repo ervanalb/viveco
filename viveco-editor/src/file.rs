@@ -10,17 +10,11 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use crate::bounds::bounds_for;
 use crate::dialogs::FileDialogs;
 use crate::editor::{DocumentBounds, EditorState, Viewport};
 use crate::history::History;
-use viveco::model::{Bounds, Document};
-
-/// Document-space bounds used to map input before an empty document has any
-/// geometry to fit.
-const EMPTY_BOUNDS: Bounds = Bounds {
-    min: [0.0, 0.0],
-    max: [1000.0, 1000.0],
-};
+use viveco::Asset;
 
 /// Name used for a fresh document that has not been saved anywhere yet.
 const UNTITLED_FILE: &str = "untitled.json";
@@ -62,11 +56,6 @@ impl DocumentFile {
     }
 }
 
-/// Bounds used to fit and map input for `document`.
-pub fn bounds_for(document: &Document) -> Bounds {
-    document.bounds().unwrap_or(EMPTY_BOUNDS)
-}
-
 /// The directory a dialog for `file` should start in.
 pub fn start_directory(file: &DocumentFile) -> Option<PathBuf> {
     file.path
@@ -91,7 +80,7 @@ pub(crate) fn install_document(
     bounds: &mut DocumentBounds,
     viewport: &mut Viewport,
     history: &mut History,
-    document: Document,
+    document: Asset,
 ) {
     *bounds = DocumentBounds(bounds_for(&document));
     *viewport = Viewport::default();
@@ -108,7 +97,7 @@ pub fn new_document(
     file: &mut DocumentFile,
 ) {
     file.path = None;
-    install_document(editor, bounds, viewport, history, Document::new());
+    install_document(editor, bounds, viewport, history, Asset::new());
 }
 
 /// Loads `path` and adopts it as the current file.
@@ -122,7 +111,7 @@ pub fn open_document(
     file: &mut DocumentFile,
     path: &Path,
 ) -> bool {
-    match Document::load_from_file(path) {
+    match Asset::load_from_file(path) {
         Ok(document) => {
             install_document(editor, bounds, viewport, history, document);
             file.path = Some(path.to_path_buf());
@@ -238,24 +227,25 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::Shape;
+    use crate::bounds::EMPTY_BOUNDS;
+    use viveco::Shape;
 
     #[test]
     fn empty_documents_fall_back_to_the_default_bounds() {
-        assert_eq!(bounds_for(&Document::new()), EMPTY_BOUNDS);
+        assert_eq!(bounds_for(&Asset::new()), EMPTY_BOUNDS);
     }
 
     #[test]
     fn installed_documents_reset_view_and_history() {
-        let mut editor = EditorState::new(Document::new());
+        let mut editor = EditorState::new(Asset::new());
         let mut bounds = DocumentBounds(EMPTY_BOUNDS);
         let mut viewport = Viewport {
             zoom: 4.0,
             pan: Vec2::new(10.0, 20.0),
         };
-        let mut history = History::new(Document::new());
+        let mut history = History::new(Asset::new());
 
-        let mut document = Document::new();
+        let mut document = Asset::new();
         document.shapes.push(Shape {
             name: String::new(),
             z: 0.0,
@@ -281,7 +271,7 @@ mod tests {
             std::env::temp_dir().join(format!("viveco_editor_test_{}.json", std::process::id()));
         let mut file = DocumentFile::untitled();
 
-        let mut document = Document::new();
+        let mut document = Asset::new();
         document.shapes.push(Shape {
             name: "Saved".into(),
             z: 0.0,
@@ -291,7 +281,7 @@ mod tests {
 
         save_document_to(&editor, &mut file, &path).unwrap();
         assert_eq!(file.path.as_deref(), Some(path.as_path()));
-        let loaded = Document::load_from_file(&path).unwrap();
+        let loaded = Asset::load_from_file(&path).unwrap();
         assert_eq!(loaded, document);
 
         std::fs::remove_file(path).unwrap();
@@ -300,7 +290,7 @@ mod tests {
     #[test]
     fn untitled_documents_have_no_save_target() {
         let mut file = DocumentFile::untitled();
-        let editor = EditorState::new(Document::new());
+        let editor = EditorState::new(Asset::new());
 
         assert_eq!(file.display_name(), UNTITLED_TITLE);
         assert!(save_to_current(&editor, &mut file).is_none());

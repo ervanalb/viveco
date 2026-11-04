@@ -29,7 +29,7 @@ use crate::tree::{
     handle_rename_input, handle_row_press, label, paint_rows, rebuild_tree, spawn_panel,
     sync_row_labels, sync_visibility, update_drag_hover,
 };
-use viveco::model::{Document, Path, Shape, indices_in_paint_order};
+use viveco::{Asset, Path, Shape, indices_in_paint_order};
 
 pub struct SidebarPlugin;
 
@@ -67,7 +67,7 @@ impl TreeModel for TreeAddress {
         mode == EditorMode::Draw
     }
 
-    fn layout(document: &Document) -> Vec<TreeNode<Self>> {
+    fn layout(document: &Asset) -> Vec<TreeNode<Self>> {
         shape_nodes(
             &document.shapes,
             &indices_in_paint_order(&document.shapes),
@@ -75,7 +75,7 @@ impl TreeModel for TreeAddress {
         )
     }
 
-    fn name(document: &Document, address: &Self) -> String {
+    fn name(document: &Asset, address: &Self) -> String {
         let name = node_name_at(document, address).unwrap_or_default();
         match address {
             TreeAddress::Shape { .. } => label(name, "Shape"),
@@ -127,7 +127,7 @@ impl TreeModel for TreeAddress {
     /// move into a shape's row. A node can never be dropped on itself, into its
     /// own subtree, or into the shape that already owns it.
     fn resolve_drop(
-        _document: &Document,
+        _document: &Asset,
         source: &Self,
         target: &Self,
         kind: DropKind,
@@ -146,7 +146,7 @@ impl TreeModel for TreeAddress {
     }
 
     fn drop_move(
-        document: &mut Document,
+        document: &mut Asset,
         source: &Self,
         target: &Self,
         kind: DropKind,
@@ -226,7 +226,6 @@ fn path_label(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viveco::model::FORMAT_VERSION;
 
     fn named_shape(name: &str, z: f32) -> Shape {
         Shape {
@@ -260,8 +259,7 @@ mod tests {
     }
 
     fn state(shapes: Vec<Shape>) -> EditorState {
-        EditorState::new(Document {
-            version: FORMAT_VERSION,
+        EditorState::new(Asset {
             animations: Vec::new(),
             bones: Vec::new(),
             shapes,
@@ -309,7 +307,7 @@ mod tests {
         target: &TreeAddress,
         kind: DropKind,
     ) -> Option<(TreeAddress, DropKind)> {
-        TreeAddress::resolve_drop(&Document::new(), source, target, kind)
+        TreeAddress::resolve_drop(&Asset::new(), source, target, kind)
     }
 
     #[test]
