@@ -484,6 +484,58 @@ impl EditorState {
         self.last_click = None;
         self.structure_revision += 1;
     }
+
+    /// Captures what the user is looking at, for [`Self::restore_view_state`].
+    pub(crate) fn view_state(&self) -> ViewState {
+        ViewState {
+            selected_node: self.selected_node.clone(),
+            selected_handle: self.selected_handle,
+            selected_bone: self.selected_bone.clone(),
+            selected_animation: self.selected_animation,
+            playhead: self.playhead,
+        }
+    }
+
+    /// Re-applies a [`ViewState`] captured before the document was replaced.
+    ///
+    /// Undo and redo swap the whole document but should leave the view where it
+    /// was, so the selection and playhead are restored wherever the new
+    /// document still contains them.
+    pub(crate) fn restore_view_state(&mut self, view: &ViewState) {
+        if let Some(address) = &view.selected_node
+            && node_name_at(&self.document, address).is_some()
+        {
+            self.selected_node = Some(address.clone());
+            self.selected_handle = view.selected_handle;
+        }
+        if let Some(address) = &view.selected_bone
+            && crate::rig::bone_name_at(&self.document, address).is_some()
+        {
+            self.selected_bone = Some(address.clone());
+        }
+        if let Some(index) = view.selected_animation
+            && let Some(animation) = self.document.animations.get(index)
+        {
+            self.selected_animation = Some(index);
+            self.playhead = if animation.duration.is_finite() && animation.duration > 0.0 {
+                view.playhead.clamp(0.0, animation.duration)
+            } else {
+                0.0
+            };
+        }
+    }
+}
+
+/// The selection and playhead that make up the view onto the document.
+///
+/// See [`EditorState::view_state`] and [`EditorState::restore_view_state`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ViewState {
+    selected_node: Option<TreeAddress>,
+    selected_handle: Option<SelectedNode>,
+    selected_bone: Option<BoneAddress>,
+    selected_animation: Option<usize>,
+    playhead: f32,
 }
 
 /// System set for canvas pointer handling.

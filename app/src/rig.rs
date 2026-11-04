@@ -76,8 +76,9 @@ const KITE_SHOULDER_FRACTION: f32 = 0.18;
 const KITE_WIDTH_FRACTION: f32 = 0.14;
 
 /// Bone overlay colors.
-const BONE_FILL: Color = Color::from_rgba8(0x4a, 0x6b, 0x88, 0xcc);
-const BONE_STROKE: Color = Color::from_rgba8(0x9a, 0xb6, 0xcc, 0xff);
+///
+/// Unselected bones take their muted curve color; these are for the selected
+/// bone and the pen preview.
 const BONE_SELECTED_FILL: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xdd);
 const BONE_SELECTED_STROKE: Color = Color::from_rgba8(0xaf, 0xe9, 0xff, 0xff);
 const BONE_HANDLE_FILL: Color = Color::from_rgba8(0xf2, 0xf8, 0xff, 0xff);
@@ -2223,20 +2224,14 @@ fn draw_bone_list(
         let tail = world.apply(bone.tail);
         // The selected bone is drawn later, on top.
         if selected != Some(&address) {
-            draw_bone(
-                scene,
-                head,
-                tail,
-                scale,
-                &BONE_FILL,
-                &BONE_STROKE,
-                OVERLAY_BONE_WIDTH,
-            );
+            // Bones echo the muted color of their animation curves.
+            let (fill, stroke) = crate::theme::bone_overlay_colors(&bone.name);
+            draw_bone(scene, head, tail, scale, &fill, &stroke, OVERLAY_BONE_WIDTH);
             // A connected bone shares its head joint with the parent's tail,
             // so only a stored head gets a handle of its own.
-            draw_diamond(scene, tail, scale, OVERLAY_DIAMOND_RADIUS, &BONE_STROKE);
+            draw_diamond(scene, tail, scale, OVERLAY_DIAMOND_RADIUS, &stroke);
             if bone.head.is_some() && Some(rest_head) != parent_tail {
-                draw_diamond(scene, head, scale, OVERLAY_DIAMOND_RADIUS, &BONE_STROKE);
+                draw_diamond(scene, head, scale, OVERLAY_DIAMOND_RADIUS, &stroke);
             }
         }
         draw_bone_list(

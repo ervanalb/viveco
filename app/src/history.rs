@@ -69,12 +69,15 @@ impl History {
         };
         let current = std::mem::replace(&mut self.last, previous.clone());
         self.redo.push(current);
-        // Undo swaps document geometry, but the transient pose is editor state
-        // that lives outside the document. Preserve it so undo never silently
-        // returns a posed rig to rest.
+        // Undo swaps document geometry, but the transient pose and the view
+        // onto it are editor state that lives outside the document. Preserve
+        // them so undo never silently returns a posed rig to rest or resets
+        // the selection.
         let pose = editor.pose.clone();
+        let view = editor.view_state();
         editor.replace_document(previous);
         editor.pose = pose;
+        editor.restore_view_state(&view);
         true
     }
 
@@ -86,10 +89,12 @@ impl History {
         };
         let current = std::mem::replace(&mut self.last, next.clone());
         self.undo.push(current);
-        // Like undo, redo must not disturb the transient pose.
+        // Like undo, redo must not disturb the transient pose or the view.
         let pose = editor.pose.clone();
+        let view = editor.view_state();
         editor.replace_document(next);
         editor.pose = pose;
+        editor.restore_view_state(&view);
         true
     }
 }
@@ -139,7 +144,8 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FORMAT_VERSION, Path, Shape, Style};
+    use crate::editor::TreeAddress;
+    use crate::model::{Animation, FORMAT_VERSION, Path, Shape, Style};
     use crate::pose::BonePose;
 
     fn document_with_path(name: &str) -> Document {
@@ -197,6 +203,61 @@ mod tests {
         );
         assert!(history.redo(&mut editor));
         assert_eq!(editor.pose.get("Bone").rotation, 0.5);
+    }
+
+    fn document_with_animation(duration: f32) -> Document {
+        let mut document = document_with_path("animated");
+        document.animations = vec![Animation::new(duration)];
+        document
+    }
+
+    #[test]
+    fn undo_keeps_the_selection_and_playhead() {
+        let original = document_with_animation(2.0);
+        let mut editor = EditorState::new(original.clone());
+        let mut history = History::new(original);
+        editor.document = document_with_animation(3.0);
+        history.observe(&editor.document, false);
+
+        let selection = TreeAddress::Shape { shapes: vec![0] };
+        editor.selected_animation = Some(0);
+        editor.selected_node = Some(selection.clone());
+        editor.playhead = 1.5;
+
+        assert!(history.undo(&mut editor));
+        assert_eq!(editor.selected_animation, Some(0));
+        assert_eq!(editor.selected_node, Some(selection));
+        assert_eq!(editor.playhead, 1.5);
+    }
+
+    #[test]
+    fn undo_restores_a_playhead_clamped_to_the_restored_duration() {
+        let original = document_with_animation(2.0);
+        let mut editor = EditorState::new(original.clone());
+        let mut history = History::new(original);
+        editor.document = document_with_animation(3.0);
+        history.observe(&editor.document, false);
+        editor.selected_animation = Some(0);
+        editor.playhead = 2.8;
+
+        assert!(history.undo(&mut editor));
+        assert_eq!(editor.playhead, 2.0);
+    }
+
+    #[test]
+    fn undo_drops_a_selection_the_restored_document_lacks() {
+        let original = document_with_path("original");
+        let mut editor = EditorState::new(original.clone());
+        let mut history = History::new(original);
+        editor.document = document_with_path("edited");
+        history.observe(&editor.document, false);
+
+        editor.selected_node = Some(TreeAddress::Shape { shapes: vec![9] });
+        editor.selected_animation = Some(4);
+
+        assert!(history.undo(&mut editor));
+        assert_eq!(editor.selected_node, None);
+        assert_eq!(editor.selected_animation, None);
     }
 
     #[test]

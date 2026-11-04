@@ -152,17 +152,6 @@ fn brush(color: bevy::prelude::Color) -> Color {
     )
 }
 
-/// One color per animated channel, cycled when there are more channels than
-/// colors.
-const CHANNEL_COLORS: [Color; 6] = [
-    Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xff),
-    Color::from_rgba8(0xf0, 0xb4, 0x4c, 0xff),
-    Color::from_rgba8(0x8a, 0xe0, 0x8a, 0xff),
-    Color::from_rgba8(0xf0, 0x7a, 0x9c, 0xff),
-    Color::from_rgba8(0xb4, 0x8a, 0xf0, 0xff),
-    Color::from_rgba8(0x7a, 0xd8, 0xd0, 0xff),
-];
-
 pub struct TimelinePlugin;
 
 impl Plugin for TimelinePlugin {
@@ -213,21 +202,23 @@ enum HandleSide {
     Out,
 }
 
-/// A keyframe drag, including the selection it moves and the movement limits
-/// that keep keyframes from crossing their unselected same-curve neighbours.
+/// A keyframe drag.
+///
+/// The animation's keyframes are copied when the drag begins and rebuilt from
+/// that copy every frame. Rebuilding rather than mutating in place lets dragged
+/// keyframes cross their neighbours and wrap around a cyclic animation without
+/// the indices going stale.
 struct KeyframeDrag {
-    /// Indices into the animation's keyframe list, in document order.
+    /// The animation's keyframes when the drag began.
+    baseline: Vec<Keyframe>,
+    /// Indices into `baseline` that the drag moves.
     indices: Vec<usize>,
+    /// The keyframe the drag was pressed on, whose time the playhead follows.
+    anchor: usize,
     /// Pointer position, in track-local pixels, when the drag began.
     start: Vec2,
     /// The axis chosen after the pointer first moved far enough.
     axis: Option<DragAxis>,
-    /// Each selected keyframe's timestamp, value, and handles when the drag
-    /// began, so a value drag can carry the handles along.
-    origins: Vec<(f32, f32, Option<f32>, Option<f32>)>,
-    /// Allowed time translation, so keyframes stay in range and ordered.
-    min_dt: f32,
-    max_dt: f32,
 }
 
 /// A control-point drag. Handles store only a value, so they move vertically.
@@ -799,41 +790,115 @@ fn repeats_press(last: Option<(f64, usize, Vec2)>, now: f64, index: usize, local
     })
 }
 
-/// How far a group of selected keyframes may slide in time without leaving the
-/// animation or crossing an unselected keyframe on the same curve.
-fn keyframe_drag_bounds(animation: &Animation, selected: &[usize]) -> (f32, f32) {
-    let duration = animation.duration.max(0.0);
+/// Where a keyframe dragged by `delta` seconds lands.
+///
+/// A cyclic animation wraps around either end, so the stored time always stays
+/// in `0..duration` and the curve repeats seamlessly. Other animations clamp
+/// to `0..=duration`, since there is nothing to wrap onto.
+fn dragged_time(origin: f32, delta: f32, duration: f32, cyclic: bool) -> f32 {
+    let duration = if duration.is_finite() {
+        duration.max(0.0)
+    } else {
+        0.0
+    };
+    let time = origin + delta;
+    if cyclic && duration > 0.0 {
+        time.rem_euclid(duration)
+    } else {
+        time.clamp(0.0, duration)
+    }
+}
+
+/// The largest time shift that keeps every dragged keyframe inside the
+/// animation's `0..=duration` range.
+///
+/// Only non-cyclic drags need this: a cyclic drag wraps instead of stopping at
+/// the edge.
+fn clamp_drag_delta(baseline: &[Keyframe], selected: &[usize], delta: f32, duration: f32) -> f32 {
     let mut min_dt = f32::NEG_INFINITY;
     let mut max_dt = f32::INFINITY;
-
     for &index in selected {
-        let Some(keyframe) = animation.keyframes.get(index) else {
+        let Some(keyframe) = baseline.get(index) else {
             continue;
         };
-        let time = keyframe.timestamp;
-        min_dt = min_dt.max(-time);
-        max_dt = max_dt.min(duration - time);
-
-        let previous = (0..index).rev().find(|&other| {
-            animation.keyframes[other].target == keyframe.target && !selected.contains(&other)
-        });
-        if let Some(other) = previous {
-            min_dt = min_dt.max(animation.keyframes[other].timestamp - time);
-        }
-
-        let next = (index + 1..animation.keyframes.len()).find(|&other| {
-            animation.keyframes[other].target == keyframe.target && !selected.contains(&other)
-        });
-        if let Some(other) = next {
-            max_dt = max_dt.min(animation.keyframes[other].timestamp - time);
-        }
+        min_dt = min_dt.max(-keyframe.timestamp);
+        max_dt = max_dt.min(duration - keyframe.timestamp);
     }
-
-    if !min_dt.is_finite() || !max_dt.is_finite() || min_dt > max_dt {
-        (0.0, 0.0)
+    if min_dt.is_finite() && max_dt.is_finite() && min_dt <= max_dt {
+        delta.clamp(min_dt, max_dt)
     } else {
-        (min_dt, max_dt)
+        delta
     }
+}
+
+/// Rebuilds the keyframe list for a drag, returning the list and the dragged
+/// keyframes' positions in it.
+///
+/// Rebuilding from the drag's starting keyframes lets dragged points cross
+/// their neighbours in time. Two keyframes of the same curve cannot share a
+/// timestamp, so a dragged keyframe that lands exactly on another is omitted;
+/// if the drag ends there, the omission becomes the deletion.
+fn drag_keyframes(
+    baseline: &[Keyframe],
+    selected: &[usize],
+    axis: DragAxis,
+    delta: f32,
+    duration: f32,
+    cyclic: bool,
+) -> (Vec<Keyframe>, Vec<usize>) {
+    let dragged = |index: usize| selected.contains(&index);
+
+    let mut moved: Vec<(usize, Keyframe)> = baseline.iter().cloned().enumerate().collect();
+    for (index, keyframe) in &mut moved {
+        if !dragged(*index) {
+            continue;
+        }
+        match axis {
+            DragAxis::Time => {
+                keyframe.timestamp = dragged_time(keyframe.timestamp, delta, duration, cyclic);
+            }
+            DragAxis::Value => {
+                let (value, handle_in, handle_out) =
+                    (keyframe.value, keyframe.handle_in, keyframe.handle_out);
+                move_keyframe_value(keyframe, value, handle_in, handle_out, delta);
+            }
+        }
+    }
+
+    // A stationary keyframe always wins a collision. Between two dragged
+    // keyframes the one earlier in document order wins, so the outcome does not
+    // depend on iteration order.
+    let mut kept: Vec<(usize, Keyframe)> = Vec::with_capacity(moved.len());
+    for (position, (index, keyframe)) in moved.iter().enumerate() {
+        let collides = dragged(*index)
+            && moved
+                .iter()
+                .enumerate()
+                .any(|(other, (other_index, candidate))| {
+                    other != position
+                        && candidate.target == keyframe.target
+                        && candidate.timestamp == keyframe.timestamp
+                        && (!dragged(*other_index) || other < position)
+                });
+        if !collides {
+            kept.push((*index, keyframe.clone()));
+        }
+    }
+
+    kept.sort_by(|a, b| {
+        a.1.timestamp
+            .partial_cmp(&b.1.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let positions = kept
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (index, _))| dragged(*index).then_some(position))
+        .collect();
+    (
+        kept.into_iter().map(|(_, keyframe)| keyframe).collect(),
+        positions,
+    )
 }
 
 /// A keyframe's position in track-local pixels.
@@ -1187,26 +1252,12 @@ fn handle_timeline_input(
 
                     let indices = edit.selected.clone();
                     if let Some(animation) = selected_animation(&editor) {
-                        let origins = indices
-                            .iter()
-                            .filter_map(|&index| animation.keyframes.get(index))
-                            .map(|keyframe| {
-                                (
-                                    keyframe.timestamp,
-                                    keyframe.value,
-                                    keyframe.handle_in,
-                                    keyframe.handle_out,
-                                )
-                            })
-                            .collect();
-                        let (min_dt, max_dt) = keyframe_drag_bounds(animation, &indices);
                         edit.drag = Some(Drag::Keyframes(KeyframeDrag {
+                            baseline: animation.keyframes.clone(),
                             indices,
+                            anchor: index,
                             start: local,
                             axis: None,
-                            origins,
-                            min_dt,
-                            max_dt,
                         }));
                     }
                 }
@@ -1295,35 +1346,50 @@ fn handle_timeline_input(
                     if state.axis.is_none() {
                         state.axis = dominant_axis(local - state.start, DRAG_AXIS_THRESHOLD);
                     }
-                    if let Some(axis) = state.axis
-                        && let Some(animation) = selected_animation_mut(&mut editor)
-                    {
-                        moved_keyframes = true;
-                        match axis {
+                    if let Some(axis) = state.axis {
+                        let cyclic =
+                            selected_animation(&editor).is_some_and(|animation| animation.cyclic);
+                        let delta = match axis {
                             DragAxis::Time => {
-                                let dt = ((local.x - state.start.x) * view.time_per_pixel)
-                                    .clamp(state.min_dt, state.max_dt);
-                                for (&index, &(timestamp, _, _, _)) in
-                                    state.indices.iter().zip(state.origins.iter())
-                                {
-                                    if let Some(keyframe) = animation.keyframes.get_mut(index) {
-                                        keyframe.timestamp = timestamp + dt;
-                                    }
+                                let delta = (local.x - state.start.x) * view.time_per_pixel;
+                                if cyclic {
+                                    delta
+                                } else {
+                                    clamp_drag_delta(
+                                        &state.baseline,
+                                        &state.indices,
+                                        delta,
+                                        duration,
+                                    )
                                 }
                             }
-                            DragAxis::Value => {
-                                let dv = (state.start.y - local.y) * view.value_per_pixel;
-                                for (&index, &(_, value, handle_in, handle_out)) in
-                                    state.indices.iter().zip(state.origins.iter())
-                                {
-                                    if let Some(keyframe) = animation.keyframes.get_mut(index) {
-                                        move_keyframe_value(
-                                            keyframe, value, handle_in, handle_out, dv,
-                                        );
-                                    }
-                                }
-                            }
+                            DragAxis::Value => (state.start.y - local.y) * view.value_per_pixel,
+                        };
+                        if let Some(animation) = selected_animation_mut(&mut editor) {
+                            let (keyframes, positions) = drag_keyframes(
+                                &state.baseline,
+                                &state.indices,
+                                axis,
+                                delta,
+                                duration,
+                                cyclic,
+                            );
+                            animation.keyframes = keyframes;
+                            *selected = positions;
                         }
+
+                        // The playhead follows the grabbed point, so the pose
+                        // under it is the one being edited.
+                        if let Some(keyframe) = state.baseline.get(state.anchor) {
+                            let time = match axis {
+                                DragAxis::Time => {
+                                    dragged_time(keyframe.timestamp, delta, duration, cyclic)
+                                }
+                                DragAxis::Value => keyframe.timestamp,
+                            };
+                            editor.playhead = clamp_playhead(time, duration);
+                        }
+                        moved_keyframes = true;
                     }
                 }
             }
@@ -1550,10 +1616,15 @@ fn draw_frame(
         let groups = curve_groups(animation);
         for (index, group) in groups.iter().enumerate() {
             let dimmed = focus.is_some_and(|bone| !group_is_bone(group, bone));
+            // Curves take their bone's color so a bone looks the same in every
+            // animation, regardless of how its curves are ordered.
             let color = if dimmed {
                 DIMMED_CURVE
             } else {
-                CHANNEL_COLORS[index % CHANNEL_COLORS.len()]
+                group
+                    .first()
+                    .and_then(|keyframe| keyframe_bone(keyframe))
+                    .map_or_else(|| theme::curve_color_at(index), theme::curve_color)
             };
             if animation.cyclic && duration > 0.0 {
                 for cycle in visible_cycles(view, area, duration) {
@@ -2400,33 +2471,91 @@ mod tests {
     }
 
     #[test]
-    fn time_drags_stop_at_neighbouring_keyframes() {
+    fn time_drags_move_points_past_their_neighbours() {
         let animation = animation_with(&[0.0, 1.0, 2.0, 3.0], &[0.0, 1.0, 2.0, 3.0], 4.0);
 
-        // A lone keyframe can move until it meets a same-curve neighbour.
-        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[1]);
-        assert!((min_dt - -1.0).abs() < 1e-6);
-        assert!((max_dt - 1.0).abs() < 1e-6);
-
-        // Neighbours that move together only stop at the surrounding pairs.
-        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[1, 2]);
-        assert!((min_dt - -1.0).abs() < 1e-6);
-        assert!((max_dt - 1.0).abs() < 1e-6);
-
-        // A whole curve still has to stay inside the animation.
-        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[0, 1, 2, 3]);
-        assert_eq!((min_dt, max_dt), (0.0, 1.0));
+        // The keyframe at 1 s moves to 2.5 s, crossing the one at 2 s.
+        let (keyframes, selected) =
+            drag_keyframes(&animation.keyframes, &[1], DragAxis::Time, 1.5, 4.0, false);
+        let times: Vec<f32> = keyframes
+            .iter()
+            .map(|keyframe| keyframe.timestamp)
+            .collect();
+        assert_eq!(times, vec![0.0, 2.0, 2.5, 3.0]);
+        // The selection follows the dragged keyframe to its new position.
+        assert_eq!(selected, vec![2]);
     }
 
     #[test]
-    fn different_curves_do_not_constrain_each_other() {
+    fn non_cyclic_drags_stop_at_the_edges() {
+        assert_eq!(dragged_time(1.0, -5.0, 4.0, false), 0.0);
+        assert_eq!(dragged_time(1.0, 5.0, 4.0, false), 4.0);
+        assert_eq!(dragged_time(1.0, 1.5, 4.0, false), 2.5);
+    }
+
+    #[test]
+    fn non_cyclic_drag_delta_keeps_the_group_in_range() {
+        let animation = animation_with(&[1.0, 3.0], &[0.0, 1.0], 4.0);
+
+        assert_eq!(clamp_drag_delta(&animation.keyframes, &[0], 10.0, 4.0), 3.0);
+        assert_eq!(
+            clamp_drag_delta(&animation.keyframes, &[1], -10.0, 4.0),
+            -3.0
+        );
+        // The group stops when its furthest keyframe reaches the edge.
+        assert_eq!(
+            clamp_drag_delta(&animation.keyframes, &[0, 1], 10.0, 4.0),
+            1.0
+        );
+        assert_eq!(
+            clamp_drag_delta(&animation.keyframes, &[0, 1], 0.5, 4.0),
+            0.5
+        );
+    }
+
+    #[test]
+    fn cyclic_drags_wrap_around_the_animation() {
+        let animation = animation_with(&[0.5, 2.0], &[0.0, 1.0], 4.0);
+
+        // Dragging the keyframe at 0.5 s back by a second wraps it to 3.5 s.
+        let (keyframes, selected) =
+            drag_keyframes(&animation.keyframes, &[0], DragAxis::Time, -1.0, 4.0, true);
+        let times: Vec<f32> = keyframes
+            .iter()
+            .map(|keyframe| keyframe.timestamp)
+            .collect();
+        assert_eq!(times, vec![2.0, 3.5]);
+        assert_eq!(selected, vec![1]);
+
+        // Wrapping is also how a keyframe crosses the end of the window.
+        assert!((dragged_time(0.5, 5.0, 4.0, true) - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dragged_points_landing_on_a_shared_time_are_removed() {
+        let animation = animation_with(&[1.0, 2.0], &[0.0, 1.0], 4.0);
+
+        // The dragged keyframe lands exactly on the stationary one, so it
+        // vanishes while overlapping; releasing here deletes it.
+        let (keyframes, selected) =
+            drag_keyframes(&animation.keyframes, &[0], DragAxis::Time, 1.0, 4.0, false);
+        assert_eq!(keyframes.len(), 1);
+        assert_eq!(keyframes[0].timestamp, 2.0);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn different_curves_may_share_a_time() {
         let mut animation = Animation::new(10.0);
         animation.insert_keyframe(Keyframe::new(1.0, 0.0, target("Arm", BoneProperty::X)));
         animation.insert_keyframe(Keyframe::new(2.0, 0.0, target("Arm", BoneProperty::Y)));
 
-        // The Arm X keyframe may slide past the Arm Y keyframe.
-        let (min_dt, max_dt) = keyframe_drag_bounds(&animation, &[0]);
-        assert_eq!((min_dt, max_dt), (-1.0, 9.0));
+        // The Arm X keyframe may slide onto the Arm Y keyframe's time.
+        let (keyframes, _) =
+            drag_keyframes(&animation.keyframes, &[0], DragAxis::Time, 1.0, 10.0, false);
+        assert_eq!(keyframes.len(), 2);
+        assert_eq!(keyframes[0].timestamp, 2.0);
+        assert_eq!(keyframes[1].timestamp, 2.0);
     }
 
     fn document_with(animation: Animation) -> Document {
