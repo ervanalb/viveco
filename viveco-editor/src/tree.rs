@@ -27,8 +27,8 @@ use bevy::ui::{FocusPolicy, RelativeCursorPosition};
 use bevy::window::PrimaryWindow;
 
 use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH};
-use crate::model::Document;
 use crate::theme;
+use viveco::model::Document;
 
 /// Unselected rows are transparent.
 const ROW_BG: Color = Color::NONE;

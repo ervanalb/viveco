@@ -18,8 +18,8 @@ use crate::editor::{
     BOTTOM_BAR_HEIGHT, EditorMode, EditorState, SIDEBAR_WIDTH, TOOLBAR_WIDTH, TreeAddress,
     path_closed_at, set_path_closed, style_at, style_at_mut,
 };
-use crate::model::{DEFAULT_STROKE_WIDTH, Rgba8, StrokeStyle, Style};
 use crate::theme;
+use viveco::model::{DEFAULT_STROKE_WIDTH, Rgba8, StrokeStyle, Style};
 
 const TOGGLE_OFF: Color = Color::NONE;
 
@@ -800,7 +800,7 @@ fn update_visuals(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Document, FORMAT_VERSION, Path, Shape};
+    use viveco::model::{Document, FORMAT_VERSION, Path, Shape};
 
     #[test]
     fn slider_positions_map_to_values() {

@@ -13,7 +13,7 @@ use bevy::window::PrimaryWindow;
 use crate::dialogs::FileDialogs;
 use crate::editor::{DocumentBounds, EditorState, Viewport};
 use crate::history::History;
-use crate::model::{Bounds, Document};
+use viveco::model::{Bounds, Document};
 
 /// Document-space bounds used to map input before an empty document has any
 /// geometry to fit.
@@ -238,7 +238,7 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Shape;
+    use viveco::model::Shape;
 
     #[test]
     fn empty_documents_fall_back_to_the_default_bounds() {

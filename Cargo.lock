@@ -5362,20 +5362,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "viveco"
 version = "0.1.0"
 dependencies = [
- "thiserror 2.0.21",
- "vello",
-]
-
-[[package]]
-name = "viveco-bevy"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_vello",
- "thiserror 2.0.21",
- "vello",
- "viveco",
- "viveco-macros",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5385,19 +5373,8 @@ dependencies = [
  "bevy",
  "bevy_vello",
  "rfd",
- "serde",
  "serde_json",
-]
-
-[[package]]
-name = "viveco-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.119",
+ "viveco",
 ]
 
 [[package]]

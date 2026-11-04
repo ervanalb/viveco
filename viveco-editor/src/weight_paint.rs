@@ -24,9 +24,9 @@ use vello::peniko::{Color, Fill};
 
 use std::collections::HashMap;
 
-use crate::model::{Document, Path, PathEnds, Point, Shape, Weights};
-use crate::pose::{Pose, Similarity};
 use crate::render::to_kurbo_point;
+use viveco::model::{Document, Path, PathEnds, Point, Shape, Weights};
+use viveco::pose::{Pose, Similarity};
 
 /// Smallest brush radius, in screen pixels.
 pub const MIN_BRUSH_SIZE: f32 = 2.0;
@@ -100,7 +100,7 @@ pub fn paint_document(
 ) {
     // Points are painted where they appear on the posed rig page, so the brush
     // hit-tests posed positions while still editing the rest-pose weights.
-    let worlds = (!pose.is_identity()).then(|| crate::pose::worlds_by_name(document, pose));
+    let worlds = (!pose.is_identity()).then(|| viveco::pose::worlds_by_name(document, pose));
     let worlds = worlds.as_ref();
     for shape in &mut document.shapes {
         paint_shape(shape, center, radius, selected_bone, brush, worlds);
@@ -194,7 +194,7 @@ fn paint_weights(
     // The brush is measured against where the point appears on the posed rig
     // page, not its rest position.
     let posed = worlds
-        .map(|worlds| crate::pose::deform_point(position, weights, worlds))
+        .map(|worlds| viveco::pose::deform_point(position, weights, worlds))
         .unwrap_or(position);
     let distance = ((posed[0] - center[0]).powi(2) + (posed[1] - center[1]).powi(2)).sqrt();
     if distance > radius {
@@ -327,7 +327,7 @@ fn draw_brush(scene: &mut Scene, center: Point, brush: &WeightPaintBrush, scale:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Bone, FORMAT_VERSION, Path, Shape};
+    use viveco::model::{Bone, FORMAT_VERSION, Path, Shape};
 
     fn brush() -> WeightPaintBrush {
         WeightPaintBrush {
@@ -469,7 +469,7 @@ mod tests {
         let mut pose = Pose::default();
         pose.set(
             "Arm",
-            crate::pose::BonePose {
+            viveco::pose::BonePose {
                 scale: 2.0,
                 ..Default::default()
             },

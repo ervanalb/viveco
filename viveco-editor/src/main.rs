@@ -11,6 +11,7 @@ use bevy::window::PrimaryWindow;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
 
+use viveco::model::Document;
 use viveco_editor::animate_panel::AnimatePanelPlugin;
 use viveco_editor::animate_sidebar::AnimateSidebarPlugin;
 use viveco_editor::clipboard::ClipboardPlugin;
@@ -22,7 +23,6 @@ use viveco_editor::file::{DocumentFile, FilePlugin, bounds_for};
 use viveco_editor::history::{History, HistoryPlugin};
 use viveco_editor::menu_bar::MenuBarPlugin;
 use viveco_editor::mode_tabs::ModeTabsPlugin;
-use viveco_editor::model::Document;
 use viveco_editor::render::build_scene;
 use viveco_editor::rig::RigPlugin;
 use viveco_editor::rig_panel::RigPanelPlugin;

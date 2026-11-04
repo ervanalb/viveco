@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 
 use crate::editor::EditorState;
-use crate::model::Document;
+use viveco::model::Document;
 
 pub struct HistoryPlugin;
 
@@ -145,8 +145,8 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
 mod tests {
     use super::*;
     use crate::editor::TreeAddress;
-    use crate::model::{Animation, FORMAT_VERSION, Path, Shape, Style};
-    use crate::pose::BonePose;
+    use viveco::model::{Animation, FORMAT_VERSION, Path, Shape, Style};
+    use viveco::pose::BonePose;
 
     fn document_with_path(name: &str) -> Document {
         Document {

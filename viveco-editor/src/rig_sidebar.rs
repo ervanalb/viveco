@@ -14,7 +14,6 @@
 use bevy::prelude::*;
 
 use crate::editor::{CanvasInput, EditorMode, EditorState};
-use crate::model::{Bone, Document};
 use crate::rig::{
     BoneAddress, address_is_inside, begin_bone_rename, bone_name_at, cancel_bone_rename,
     commit_bone_rename, move_bone_into, move_bone_near,
@@ -24,6 +23,7 @@ use crate::tree::{
     handle_row_press, label, paint_rows, rebuild_tree, spawn_panel, sync_row_labels,
     sync_visibility, update_drag_hover,
 };
+use viveco::model::{Bone, Document};
 
 pub struct RigSidebarPlugin;
 
@@ -159,7 +159,7 @@ fn bone_label(bone: &Bone) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FORMAT_VERSION;
+    use viveco::model::FORMAT_VERSION;
 
     fn state(mut bones: Vec<Bone>) -> EditorState {
         let document = Document {

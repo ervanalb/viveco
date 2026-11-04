@@ -24,12 +24,12 @@ use crate::editor::{
     commit_node_rename, move_path_into_shape, move_path_near, move_shape_into, move_shape_near,
     node_name_at,
 };
-use crate::model::{Document, Path, Shape, indices_in_paint_order};
 use crate::tree::{
     DropKind, TreeDrag, TreeLeaf, TreeModel, TreeNode, deselect_on_empty_press, finish_drag,
     handle_rename_input, handle_row_press, label, paint_rows, rebuild_tree, spawn_panel,
     sync_row_labels, sync_visibility, update_drag_hover,
 };
+use viveco::model::{Document, Path, Shape, indices_in_paint_order};
 
 pub struct SidebarPlugin;
 
@@ -221,7 +221,7 @@ fn path_label(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FORMAT_VERSION;
+    use viveco::model::FORMAT_VERSION;
 
     fn named_shape(name: &str, z: f32) -> Shape {
         Shape {

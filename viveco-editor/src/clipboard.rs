@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 
 use crate::editor::{EditorMode, EditorState, TreeAddress, shape_at, translate_shape};
-use crate::model::Shape;
+use viveco::model::Shape;
 
 /// Distance, in document units, that each successive paste is offset by.
 const PASTE_OFFSET: f32 = 10.0;
@@ -124,7 +124,7 @@ fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Document, FORMAT_VERSION, Path, Rgba8, Style};
+    use viveco::model::{Document, FORMAT_VERSION, Path, Rgba8, Style};
 
     fn filled(color: Rgba8) -> Style {
         Style {

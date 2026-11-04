@@ -6,7 +6,7 @@ use bevy_vello::vello::{
     peniko::{Color, Fill},
 };
 
-use crate::model::{Document, Path, Rgba8, Shape, Style};
+use viveco::model::{Document, Path, Rgba8, Shape, Style};
 
 /// Builds a Vello scene in document coordinates.
 ///

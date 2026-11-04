@@ -47,9 +47,9 @@ use bevy_vello::vello::{
 use crate::animate::{curve_groups, effective_handle_in, effective_handle_out, selected_animation};
 use crate::animate_panel::{DurationEdit, SpeedEdit};
 use crate::editor::{EditorMode, EditorState};
-use crate::model::{Animation, Keyframe, KeyframeTarget};
 use crate::rig::bone_name_at;
 use crate::theme;
+use viveco::model::{Animation, Keyframe, KeyframeTarget};
 
 /// Amount one wheel notch multiplies the zoom by.
 const ZOOM_STEP: f32 = 1.1;
@@ -2166,7 +2166,7 @@ fn value_bounds(animation: &Animation, bone: Option<&str>) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BoneProperty, Document, FORMAT_VERSION, Keyframe, KeyframeTarget};
+    use viveco::model::{BoneProperty, Document, FORMAT_VERSION, Keyframe, KeyframeTarget};
 
     fn target(bone: &str, property: BoneProperty) -> KeyframeTarget {
         KeyframeTarget::Bone {

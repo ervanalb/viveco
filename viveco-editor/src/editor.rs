@@ -16,14 +16,14 @@ use vello::kurbo::{
 use vello::peniko::{Color, Fill};
 
 use crate::menu_bar::MenuState;
-use crate::model::{
-    Bounds, DEFAULT_STROKE_WIDTH, Document, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle,
-    Style, Weights,
-};
 use crate::render::{
     build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
 };
 use crate::rig::{BoneAddress, BoneRename, RigEditing};
+use viveco::model::{
+    Bounds, DEFAULT_STROKE_WIDTH, Document, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle,
+    Style, Weights,
+};
 
 /// Width of the layer sidebar on the right, in screen pixels.
 ///
@@ -242,7 +242,7 @@ impl TreeAddress {
 /// paths the point belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectedNode {
-    /// Index into the selected shape's [`crate::model::Shape::paths`].
+    /// Index into the selected shape's [`viveco::model::Shape::paths`].
     pub path: usize,
     pub handle: Handle,
 }
@@ -389,7 +389,7 @@ pub struct EditorState {
     ///
     /// Poses are editor state, not document data: they are never saved, and
     /// they only deform what the rig page shows.
-    pub pose: crate::pose::Pose,
+    pub pose: viveco::pose::Pose,
     /// Transient rig-mode editing state (bone drag, pen chain, preview).
     ///
     /// Stored here rather than in its own resource so a document replacement or
@@ -416,7 +416,7 @@ impl EditorState {
             playhead: 0.0,
             animation_renaming: None,
             bone_renaming: None,
-            pose: crate::pose::Pose::default(),
+            pose: viveco::pose::Pose::default(),
             rig: RigEditing::default(),
             drag: None,
             pen: None,
@@ -1112,7 +1112,7 @@ fn refresh_scene(
     };
     let posed = shown_pose
         .filter(|pose| !pose.is_identity())
-        .map(|pose| crate::pose::deform_document(&editor.document, pose));
+        .map(|pose| viveco::pose::deform_document(&editor.document, pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
     let mut scene = build_scene(displayed);
 
@@ -1179,7 +1179,7 @@ fn refresh_scene(
     } else if *mode == EditorMode::Animate && show_bones.0 {
         // The animate page shows the same skeleton as the rig page, posed by
         // the animation at the playhead. With no animation selected it rests.
-        let rest = crate::pose::Pose::default();
+        let rest = viveco::pose::Pose::default();
         let pose = animation_pose.as_ref().unwrap_or(&rest);
         crate::rig::draw_bone_overlay(
             &mut scene,
@@ -2590,7 +2590,7 @@ fn stroke_segment(scene: &mut Scene, from: [f32; 2], to: [f32; 2], width: f64, c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FORMAT_VERSION, Rgba8, StrokeStyle, Style};
+    use viveco::model::{FORMAT_VERSION, Rgba8, StrokeStyle, Style};
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Path {
         Path::new([x0, y0])

@@ -9,11 +9,13 @@ edition = "2024"
 dynamic_linking = ["bevy/dynamic_linking"]
 
 [dependencies]
+viveco.workspace = true
 bevy = "0.19"
 bevy_vello = "0.14"
 # Native file dialogs. On Linux the XDG portal backend is used; it needs no
 # GTK development headers and falls back to zenity when no portal is running.
 # The `wayland` default feature is dropped to avoid extra Wayland dependencies.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
-serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
 serde_json = "1"

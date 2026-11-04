@@ -1,4 +1,7 @@
-//! Vector-art document model and Vello rendering for the editor app.
+//! Vello rendering and the editor UI for Viveco documents.
+//!
+//! The document format itself lives in the `viveco` crate; this crate adds the
+//! interactive editor around it.
 
 pub mod animate;
 pub mod animate_panel;
@@ -10,8 +13,6 @@ pub mod file;
 pub mod history;
 pub mod menu_bar;
 pub mod mode_tabs;
-pub mod model;
-pub mod pose;
 pub mod render;
 pub mod rig;
 pub mod rig_panel;
