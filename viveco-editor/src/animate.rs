@@ -149,7 +149,7 @@ mod tests {
                 timestamp,
                 0.0,
                 KeyframeTarget::Bone {
-                    bone: "Arm".into(),
+                    bone: 0,
                     property: BoneProperty::X,
                 },
             ));

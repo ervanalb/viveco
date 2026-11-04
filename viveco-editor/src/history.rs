@@ -185,7 +185,7 @@ mod tests {
         let mut editor = EditorState::new(original.clone());
         let mut history = History::new(original);
         editor.pose.set(
-            "Bone",
+            0,
             BonePose {
                 rotation: 0.5,
                 ..Default::default()
@@ -197,12 +197,12 @@ mod tests {
 
         assert!(history.undo(&mut editor));
         assert_eq!(
-            editor.pose.get("Bone").rotation,
+            editor.pose.get(0).rotation,
             0.5,
             "undo must not return the rig to rest"
         );
         assert!(history.redo(&mut editor));
-        assert_eq!(editor.pose.get("Bone").rotation, 0.5);
+        assert_eq!(editor.pose.get(0).rotation, 0.5);
     }
 
     fn document_with_animation(duration: f32) -> Document {

@@ -15,9 +15,7 @@
 //! several bones moves to the blend of where each bone's world transform puts
 //! it, with the point's unused weight `1 - sum` keeping it in place.
 
-use std::collections::HashMap;
-
-use crate::model::{Bone, Document, Path, PathEnds, Point, Shape, Weights};
+use crate::model::{Bone, BoneIndex, Document, Path, PathEnds, Point, Shape, Weights};
 
 /// A uniform scale, rotation, and translation.
 ///
@@ -174,103 +172,119 @@ impl BonePose {
     }
 }
 
-/// Every bone's transient pose, keyed by bone name.
+/// Every bone's transient pose, ordered by [`BoneIndex`].
 ///
-/// Bone names are unique within a rig and survive reordering, so they are a
-/// stable key. Bones without an entry are at rest.
+/// The vector always has one entry per bone in the matching [`Document`];
+/// bones without a pose entry in a freshly built `Pose` are at rest. Because
+/// indices shift whenever the rig is edited, whoever keeps a `Pose` alongside a
+/// document must apply the same index remap to it; [`Self::apply_bone_map`]
+/// does that.
 #[derive(Clone, Debug, Default)]
 pub struct Pose {
-    bones: HashMap<String, BonePose>,
+    bones: Vec<BonePose>,
 }
 
 impl Pose {
-    /// The pose of the named bone, or the identity when it has none.
-    pub fn get(&self, name: &str) -> BonePose {
-        self.bones.get(name).copied().unwrap_or_default()
-    }
-
-    /// Stores a bone's pose. An identity pose is dropped, so the map only
-    /// holds bones that actually move.
-    pub fn set(&mut self, name: impl Into<String>, pose: BonePose) {
-        let name = name.into();
-        if pose.is_identity() {
-            self.bones.remove(&name);
-        } else {
-            self.bones.insert(name, pose);
+    /// An all-rest pose with one entry per bone.
+    pub fn new(bone_count: usize) -> Self {
+        Self {
+            bones: vec![BonePose::default(); bone_count],
         }
     }
 
-    /// Moves a bone's pose from its old name to its new one.
-    pub fn rename(&mut self, from: &str, to: &str) {
-        if from == to {
-            return;
+    /// The pose of the indexed bone, or the identity when it has none.
+    pub fn get(&self, index: BoneIndex) -> BonePose {
+        self.bones.get(index).copied().unwrap_or_default()
+    }
+
+    /// Stores a bone's pose.
+    ///
+    /// A pose set beyond the current length grows the vector so the entry is
+    /// never silently lost.
+    pub fn set(&mut self, index: BoneIndex, pose: BonePose) {
+        if index >= self.bones.len() {
+            self.bones.resize(index + 1, BonePose::default());
         }
-        if let Some(pose) = self.bones.remove(from) {
-            self.bones.insert(to.to_owned(), pose);
+        self.bones[index] = pose;
+    }
+
+    /// Rewrites every entry through `map`, dropping entries for bones the map
+    /// deletes.
+    pub fn apply_bone_map(&mut self, map: &[Option<BoneIndex>]) {
+        let mut remapped = vec![BonePose::default(); map.iter().flatten().count()];
+        for (old, new) in map.iter().enumerate() {
+            if let Some(new) = *new
+                && let Some(pose) = self.bones.get(old)
+            {
+                remapped[new] = *pose;
+            }
         }
+        self.bones = remapped;
     }
 
     /// Whether every bone is at rest.
     pub fn is_identity(&self) -> bool {
-        self.bones.is_empty()
+        self.bones.iter().all(|pose| pose.is_identity())
     }
 
-    /// Returns every bone to rest.
+    /// Returns every bone to rest, keeping one entry per bone.
     pub fn clear(&mut self) {
-        self.bones.clear();
+        self.bones.fill(BonePose::default());
     }
 }
 
-/// The world transform of every named bone, keyed by bone name.
-pub fn worlds_by_name(document: &Document, pose: &Pose) -> HashMap<String, Similarity> {
+/// The world transform of every bone, ordered by [`BoneIndex`].
+pub fn worlds(document: &Document, pose: &Pose) -> Vec<Similarity> {
     fn walk(
         bones: &[Bone],
         parent_world: Similarity,
         parent_tail: Option<Point>,
         pose: &Pose,
-        worlds: &mut HashMap<String, Similarity>,
+        cursor: &mut usize,
+        worlds: &mut [Similarity],
     ) {
         for bone in bones {
+            let index = *cursor;
+            *cursor += 1;
             let rest_head = bone.head_with_parent(parent_tail);
-            let local = pose.get(&bone.name).local(rest_head, bone.head.is_none());
+            let local = pose.get(index).local(rest_head, bone.head.is_none());
             let world = Similarity::compose(parent_world, local);
-            if !bone.name.is_empty() {
-                worlds.insert(bone.name.clone(), world);
-            }
-            walk(&bone.children, world, Some(bone.tail), pose, worlds);
+            worlds[index] = world;
+            walk(&bone.children, world, Some(bone.tail), pose, cursor, worlds);
         }
     }
 
-    let mut worlds = HashMap::new();
+    let mut worlds = vec![Similarity::IDENTITY; document.bone_count()];
+    let mut cursor = 0;
     walk(
         &document.bones,
         Similarity::IDENTITY,
         None,
         pose,
+        &mut cursor,
         &mut worlds,
     );
     worlds
 }
 
-/// The rest head of every named bone, keyed by bone name.
+/// The rest head of every bone, ordered by [`BoneIndex`].
 ///
 /// A connected bone has no stored head, so its head is its parent's tail. The
 /// animation sampler needs this to pivot a posed bone about the same joint the
-/// rig page uses. Unnamed bones are skipped because animations address bones by
-/// name.
-pub fn rest_heads(document: &Document) -> HashMap<String, Point> {
-    fn walk(bones: &[Bone], parent_tail: Option<Point>, heads: &mut HashMap<String, Point>) {
+/// rig page uses.
+pub fn rest_heads(document: &Document) -> Vec<Point> {
+    fn walk(bones: &[Bone], parent_tail: Option<Point>, cursor: &mut usize, heads: &mut [Point]) {
         for bone in bones {
-            let head = bone.head_with_parent(parent_tail);
-            if !bone.name.is_empty() {
-                heads.insert(bone.name.clone(), head);
-            }
-            walk(&bone.children, Some(bone.tail), heads);
+            let index = *cursor;
+            *cursor += 1;
+            heads[index] = bone.head_with_parent(parent_tail);
+            walk(&bone.children, Some(bone.tail), cursor, heads);
         }
     }
 
-    let mut heads = HashMap::new();
-    walk(&document.bones, None, &mut heads);
+    let mut heads = vec![[0.0, 0.0]; document.bone_count()];
+    let mut cursor = 0;
+    walk(&document.bones, None, &mut cursor, &mut heads);
     heads
 }
 
@@ -279,10 +293,10 @@ pub fn rest_heads(document: &Document) -> HashMap<String, Point> {
 /// This is what the rig page paints. The document itself is never modified, so
 /// the rest pose stays the single source of truth for editing and saving.
 pub fn deform_document(document: &Document, pose: &Pose) -> Document {
-    let worlds = worlds_by_name(document, pose);
-    if worlds.is_empty() {
+    if pose.is_identity() {
         return document.clone();
     }
+    let worlds = worlds(document, pose);
     let mut deformed = document.clone();
     for shape in &mut deformed.shapes {
         deform_shape(shape, &worlds);
@@ -290,7 +304,7 @@ pub fn deform_document(document: &Document, pose: &Pose) -> Document {
     deformed
 }
 
-fn deform_shape(shape: &mut Shape, worlds: &HashMap<String, Similarity>) {
+fn deform_shape(shape: &mut Shape, worlds: &[Similarity]) {
     for path in &mut shape.paths {
         deform_path(path, worlds);
     }
@@ -299,7 +313,7 @@ fn deform_shape(shape: &mut Shape, worlds: &HashMap<String, Similarity>) {
     }
 }
 
-fn deform_path(path: &mut Path, worlds: &HashMap<String, Similarity>) {
+fn deform_path(path: &mut Path, worlds: &[Similarity]) {
     if let PathEnds::Open(start) = path.ends {
         path.ends = PathEnds::Open(deform_point(start, &path.start_weights, worlds));
     }
@@ -316,15 +330,11 @@ fn deform_path(path: &mut Path, worlds: &HashMap<String, Similarity>) {
 
 /// Skins one point: a weighted blend of each bone's world transform, with the
 /// unused share `1 - sum` left in place.
-pub fn deform_point(
-    position: Point,
-    weights: &Weights,
-    worlds: &HashMap<String, Similarity>,
-) -> Point {
+pub fn deform_point(position: Point, weights: &Weights, worlds: &[Similarity]) -> Point {
     let mut blended = [0.0, 0.0];
     let mut matched = 0.0;
     for weight in weights.iter() {
-        let Some(world) = worlds.get(&weight.bone) else {
+        let Some(world) = worlds.get(weight.bone) else {
             continue;
         };
         let posed = world.apply(position);
@@ -364,8 +374,11 @@ mod tests {
     }
 
     /// A parent bone from the origin to [10, 0] with a child continuing to
-    /// [10, 10]. Both are named.
-    fn rigged_document(start_weights: &[(&str, f32)], anchor_weights: &[(&str, f32)]) -> Document {
+    /// [10, 10]. The parent has index 0 and the child index 1.
+    fn rigged_document(
+        start_weights: &[(BoneIndex, f32)],
+        anchor_weights: &[(BoneIndex, f32)],
+    ) -> Document {
         let child = Bone {
             name: "Child".into(),
             head: None,
@@ -398,7 +411,7 @@ mod tests {
 
     #[test]
     fn identity_pose_leaves_geometry_alone() {
-        let document = rigged_document(&[("Parent", 1.0)], &[("Child", 1.0)]);
+        let document = rigged_document(&[(0, 1.0)], &[(1, 1.0)]);
         let deformed = deform_document(&document, &Pose::default());
         assert_eq!(deformed.shapes, document.shapes);
     }
@@ -408,17 +421,17 @@ mod tests {
         let document = rigged_document(&[], &[]);
         let heads = rest_heads(&document);
 
-        assert_eq!(heads.get("Parent"), Some(&[0.0, 0.0]));
+        assert_eq!(heads[0], [0.0, 0.0]);
         // The child omits its head, so it sits at the parent's tail.
-        assert_eq!(heads.get("Child"), Some(&[10.0, 0.0]));
+        assert_eq!(heads[1], [10.0, 0.0]);
     }
 
     #[test]
     fn a_root_rotation_turns_points_about_the_head() {
-        let document = rigged_document(&[("Parent", 1.0)], &[("Parent", 1.0)]);
+        let document = rigged_document(&[(0, 1.0)], &[(0, 1.0)]);
         let mut pose = Pose::default();
         pose.set(
-            "Parent",
+            0,
             BonePose {
                 rotation: std::f32::consts::FRAC_PI_2,
                 ..Default::default()
@@ -434,10 +447,10 @@ mod tests {
 
     #[test]
     fn a_child_inherits_its_parents_transform() {
-        let document = rigged_document(&[], &[("Child", 1.0)]);
+        let document = rigged_document(&[], &[(1, 1.0)]);
         let mut pose = Pose::default();
         pose.set(
-            "Parent",
+            0,
             BonePose {
                 rotation: std::f32::consts::FRAC_PI_2,
                 ..Default::default()
@@ -453,10 +466,10 @@ mod tests {
 
     #[test]
     fn weights_blend_between_bones() {
-        let document = rigged_document(&[("Parent", 0.5), ("Child", 0.5)], &[]);
+        let document = rigged_document(&[(0, 0.5), (1, 0.5)], &[]);
         let mut pose = Pose::default();
         pose.set(
-            "Parent",
+            0,
             BonePose {
                 translation: [0.0, 0.0],
                 rotation: std::f32::consts::FRAC_PI_2,
@@ -474,10 +487,10 @@ mod tests {
 
     #[test]
     fn an_unweighted_point_stays_in_place() {
-        let document = rigged_document(&[], &[("Parent", 1.0)]);
+        let document = rigged_document(&[], &[(0, 1.0)]);
         let mut pose = Pose::default();
         pose.set(
-            "Parent",
+            0,
             BonePose {
                 translation: [5.0, 0.0],
                 ..Default::default()
@@ -517,7 +530,7 @@ mod tests {
     fn setting_an_identity_pose_drops_it() {
         let mut pose = Pose::default();
         pose.set(
-            "Bone",
+            0,
             BonePose {
                 rotation: 0.3,
                 ..Default::default()
@@ -525,18 +538,32 @@ mod tests {
         );
         assert!(!pose.is_identity());
 
-        pose.set("Bone", BonePose::default());
+        pose.set(0, BonePose::default());
         assert!(pose.is_identity());
+    }
 
+    #[test]
+    fn applying_a_bone_map_shifts_and_drops_poses() {
+        let mut pose = Pose::default();
         pose.set(
-            "Bone",
+            0,
             BonePose {
                 rotation: 0.3,
                 ..Default::default()
             },
         );
-        pose.rename("Bone", "Limb");
-        assert_eq!(pose.get("Bone"), BonePose::default());
-        assert!((pose.get("Limb").rotation - 0.3).abs() < 1e-6);
+        pose.set(
+            2,
+            BonePose {
+                rotation: 0.5,
+                ..Default::default()
+            },
+        );
+
+        // Remove bone 0; bone 2 shifts down to index 1.
+        pose.apply_bone_map(&crate::model::removal_map(3, 0, 1));
+
+        assert_eq!(pose.get(0), BonePose::default());
+        assert!((pose.get(1).rotation - 0.5).abs() < 1e-6);
     }
 }

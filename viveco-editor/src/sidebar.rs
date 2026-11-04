@@ -126,7 +126,12 @@ impl TreeModel for TreeAddress {
     /// Paths reorder within a shape, move next to a path in another shape, or
     /// move into a shape's row. A node can never be dropped on itself, into its
     /// own subtree, or into the shape that already owns it.
-    fn resolve_drop(source: &Self, target: &Self, kind: DropKind) -> Option<(Self, DropKind)> {
+    fn resolve_drop(
+        _document: &Document,
+        source: &Self,
+        target: &Self,
+        kind: DropKind,
+    ) -> Option<(Self, DropKind)> {
         let allowed = match (source, target) {
             (TreeAddress::Shape { .. }, TreeAddress::Shape { .. }) => {
                 !address_is_inside(source, target)
@@ -304,7 +309,7 @@ mod tests {
         target: &TreeAddress,
         kind: DropKind,
     ) -> Option<(TreeAddress, DropKind)> {
-        TreeAddress::resolve_drop(source, target, kind)
+        TreeAddress::resolve_drop(&Document::new(), source, target, kind)
     }
 
     #[test]

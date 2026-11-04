@@ -19,10 +19,10 @@ use crate::menu_bar::MenuState;
 use crate::render::{
     build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
 };
-use crate::rig::{BoneAddress, BoneRename, RigEditing};
+use crate::rig::{BoneRename, RigEditing};
 use viveco::model::{
-    Bounds, DEFAULT_STROKE_WIDTH, Document, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle,
-    Style, Weights,
+    BoneIndex, Bounds, DEFAULT_STROKE_WIDTH, Document, Path, PathEnds, Rgba8, Segment, Shape,
+    StrokeStyle, Style, Weights,
 };
 
 /// Width of the layer sidebar on the right, in screen pixels.
@@ -372,7 +372,7 @@ pub struct EditorState {
     /// The tree node whose name is being edited inline, if any.
     pub renaming: Option<RenameState>,
     /// The selected bone in rig mode, if any.
-    pub selected_bone: Option<BoneAddress>,
+    pub selected_bone: Option<BoneIndex>,
     /// Index of the selected animation in animate mode, if any.
     pub selected_animation: Option<usize>,
     /// Time shown by the animate timeline, in seconds.
@@ -405,6 +405,7 @@ pub struct EditorState {
 
 impl EditorState {
     pub fn new(document: Document) -> Self {
+        let pose = viveco::pose::Pose::new(document.bone_count());
         Self {
             document,
             selected_node: None,
@@ -416,7 +417,7 @@ impl EditorState {
             playhead: 0.0,
             animation_renaming: None,
             bone_renaming: None,
-            pose: viveco::pose::Pose::default(),
+            pose,
             rig: RigEditing::default(),
             drag: None,
             pen: None,
@@ -439,8 +440,8 @@ impl EditorState {
     ///
     /// Like [`Self::select_node`], this drops any in-progress rig gesture and
     /// rename so the selection always starts clean.
-    pub fn select_bone(&mut self, address: Option<BoneAddress>) {
-        self.selected_bone = address;
+    pub fn select_bone(&mut self, index: Option<BoneIndex>) {
+        self.selected_bone = index;
         self.bone_renaming = None;
         self.rig.cancel_editing();
     }
@@ -477,7 +478,7 @@ impl EditorState {
         self.playhead = 0.0;
         self.animation_renaming = None;
         self.bone_renaming = None;
-        self.pose.clear();
+        self.pose = viveco::pose::Pose::new(self.document.bone_count());
         self.rig.cancel_editing();
         self.drag = None;
         self.pen = None;
@@ -490,7 +491,7 @@ impl EditorState {
         ViewState {
             selected_node: self.selected_node.clone(),
             selected_handle: self.selected_handle,
-            selected_bone: self.selected_bone.clone(),
+            selected_bone: self.selected_bone,
             selected_animation: self.selected_animation,
             playhead: self.playhead,
         }
@@ -508,10 +509,10 @@ impl EditorState {
             self.selected_node = Some(address.clone());
             self.selected_handle = view.selected_handle;
         }
-        if let Some(address) = &view.selected_bone
-            && crate::rig::bone_name_at(&self.document, address).is_some()
+        if let Some(index) = view.selected_bone
+            && crate::rig::bone_name_at(&self.document, index).is_some()
         {
-            self.selected_bone = Some(address.clone());
+            self.selected_bone = Some(index);
         }
         if let Some(index) = view.selected_animation
             && let Some(animation) = self.document.animations.get(index)
@@ -533,7 +534,7 @@ impl EditorState {
 pub(crate) struct ViewState {
     selected_node: Option<TreeAddress>,
     selected_handle: Option<SelectedNode>,
-    selected_bone: Option<BoneAddress>,
+    selected_bone: Option<BoneIndex>,
     selected_animation: Option<usize>,
     playhead: f32,
 }
@@ -1153,7 +1154,7 @@ fn refresh_scene(
             &mut scene,
             &editor.document,
             &editor.pose,
-            editor.selected_bone.as_ref(),
+            editor.selected_bone,
             editor.rig.preview(),
             scale,
         );
@@ -1161,10 +1162,7 @@ fn refresh_scene(
         // The weight brush overlays every point and shows the brush ring where
         // the cursor is over the canvas.
         if tool.0 == Tool::WeightPaint {
-            let selected = editor
-                .selected_bone
-                .as_ref()
-                .and_then(|address| crate::rig::bone_name_at(&editor.document, address));
+            let selected = editor.selected_bone;
             let cursor = view
                 .zip(window)
                 .and_then(|(view, window)| window.cursor_position().map(|at| (view, window, at)))
@@ -1179,13 +1177,13 @@ fn refresh_scene(
     } else if *mode == EditorMode::Animate && show_bones.0 {
         // The animate page shows the same skeleton as the rig page, posed by
         // the animation at the playhead. With no animation selected it rests.
-        let rest = viveco::pose::Pose::default();
+        let rest = viveco::pose::Pose::new(editor.document.bone_count());
         let pose = animation_pose.as_ref().unwrap_or(&rest);
         crate::rig::draw_bone_overlay(
             &mut scene,
             &editor.document,
             pose,
-            editor.selected_bone.as_ref(),
+            editor.selected_bone,
             None,
             scale,
         );
@@ -1590,16 +1588,15 @@ pub fn node_name_at<'a>(document: &'a Document, address: &TreeAddress) -> Option
 /// Renames the node at `address`. Returns `false` when it does not exist.
 pub fn rename_node_at(document: &mut Document, address: &TreeAddress, name: String) -> bool {
     match address {
-        TreeAddress::Shape { .. } => {
-            let old = match shape_at_mut(document, address) {
-                Some(shape) => std::mem::replace(&mut shape.name, name.clone()),
-                None => return false,
-            };
-            if old != name {
-                document.rename_shape_in_animations(&old, &name);
+        TreeAddress::Shape { .. } => match shape_at_mut(document, address) {
+            // Names are descriptive only; animation targets refer to shapes by
+            // index, so a rename does not disturb them.
+            Some(shape) => {
+                shape.name = name;
+                true
             }
-            true
-        }
+            None => false,
+        },
         TreeAddress::Path { .. } => match path_at_mut(document, address) {
             Some(path) => {
                 path.name = name;
@@ -3373,43 +3370,43 @@ mod tests {
     #[test]
     fn splitting_a_segment_blends_the_anchor_weights() {
         let mut path = Path::new([0.0, 0.0]).line_to([100.0, 0.0]);
-        path.start_weights.set("Root", 1.0);
-        path.segments[0].to_weights.set("Tip", 1.0);
+        path.start_weights.set(0, 1.0);
+        path.segments[0].to_weights.set(1, 1.0);
 
         assert_eq!(split_segment(&mut path, 0, 0.25), Some(0));
 
         // The new anchor sits a quarter of the way along, so it takes a
         // quarter of the far anchor's influence.
         let new_weights = &path.segments[0].to_weights;
-        assert!((new_weights.get("Root").unwrap() - 0.75).abs() < 1e-6);
-        assert!((new_weights.get("Tip").unwrap() - 0.25).abs() < 1e-6);
+        assert!((new_weights.get(0).unwrap() - 0.75).abs() < 1e-6);
+        assert!((new_weights.get(1).unwrap() - 0.25).abs() < 1e-6);
         // The original endpoints keep their own weights.
-        assert_eq!(path.start_weights.get("Root"), Some(1.0));
-        assert_eq!(path.segments[1].to_weights.get("Tip"), Some(1.0));
+        assert_eq!(path.start_weights.get(0), Some(1.0));
+        assert_eq!(path.segments[1].to_weights.get(1), Some(1.0));
     }
 
     #[test]
     fn splitting_a_curve_gives_the_new_controls_the_blended_weights() {
         let mut path = Path::new([0.0, 0.0]).cubic_to([0.0, 100.0], [100.0, 100.0], [100.0, 0.0]);
-        path.start_weights.set("A", 1.0);
-        path.segments[0].ctrl1_weights.set("A", 1.0);
-        path.segments[0].ctrl2_weights.set("B", 1.0);
-        path.segments[0].to_weights.set("B", 1.0);
+        path.start_weights.set(0, 1.0);
+        path.segments[0].ctrl1_weights.set(0, 1.0);
+        path.segments[0].ctrl2_weights.set(1, 1.0);
+        path.segments[0].to_weights.set(1, 1.0);
 
         assert_eq!(split_segment(&mut path, 0, 0.5), Some(0));
 
         // The controls created at the new anchor share its half-and-half
         // weights; the pre-existing controls keep their original anchors'.
         let left = &path.segments[0];
-        assert_eq!(left.ctrl1_weights.get("A"), Some(1.0));
-        assert!((left.ctrl2_weights.get("A").unwrap() - 0.5).abs() < 1e-6);
-        assert!((left.ctrl2_weights.get("B").unwrap() - 0.5).abs() < 1e-6);
-        assert!((left.to_weights.get("A").unwrap() - 0.5).abs() < 1e-6);
+        assert_eq!(left.ctrl1_weights.get(0), Some(1.0));
+        assert!((left.ctrl2_weights.get(0).unwrap() - 0.5).abs() < 1e-6);
+        assert!((left.ctrl2_weights.get(1).unwrap() - 0.5).abs() < 1e-6);
+        assert!((left.to_weights.get(0).unwrap() - 0.5).abs() < 1e-6);
 
         let right = &path.segments[1];
-        assert!((right.ctrl1_weights.get("B").unwrap() - 0.5).abs() < 1e-6);
-        assert_eq!(right.ctrl2_weights.get("B"), Some(1.0));
-        assert_eq!(right.to_weights.get("B"), Some(1.0));
+        assert!((right.ctrl1_weights.get(1).unwrap() - 0.5).abs() < 1e-6);
+        assert_eq!(right.ctrl2_weights.get(1), Some(1.0));
+        assert_eq!(right.to_weights.get(1), Some(1.0));
     }
 
     #[test]
@@ -3417,16 +3414,16 @@ mod tests {
         let mut path = Path::new([0.0, 0.0])
             .line_to([10.0, 0.0])
             .line_to([10.0, 10.0]);
-        path.start_weights.set("Root", 1.0);
-        path.segments[0].to_weights.set("Joint", 1.0);
+        path.start_weights.set(0, 1.0);
+        path.segments[0].to_weights.set(1, 1.0);
 
         // The second segment starts at the first joint.
         assert!(apply_bend(&mut path, BendTarget::Outgoing(1), [14.0, 2.0]));
-        assert_eq!(path.segments[1].ctrl1_weights.get("Joint"), Some(1.0));
+        assert_eq!(path.segments[1].ctrl1_weights.get(1), Some(1.0));
 
         // The first segment starts at the open start anchor.
         assert!(apply_bend(&mut path, BendTarget::Outgoing(0), [2.0, -2.0]));
-        assert_eq!(path.segments[0].ctrl1_weights.get("Root"), Some(1.0));
+        assert_eq!(path.segments[0].ctrl1_weights.get(0), Some(1.0));
     }
 
     #[test]

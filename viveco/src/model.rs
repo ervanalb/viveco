@@ -33,13 +33,27 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub const FORMAT_TYPE: &str = "viveco";
 
 /// Oldest document version this build can load.
-pub const MIN_FORMAT_VERSION: u32 = 1;
+pub const MIN_FORMAT_VERSION: u32 = 5;
 
 /// Version written to and expected by this build of the format.
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 
 /// A 2D point/vector in document space.
 pub type Point = [f32; 2];
+
+/// Flat index of a bone, in depth-first pre-order.
+///
+/// `0` is the first top-level bone, followed by its whole subtree, then the
+/// next top-level bone, and so on. A bone's subtree therefore occupies a
+/// contiguous range of indices. Every reference to a bone (weights and
+/// animation targets) stores this index; inserting, removing, or reparenting a
+/// bone rewrites the references of the whole document.
+pub type BoneIndex = usize;
+
+/// Flat index of a shape, in depth-first pre-order.
+///
+/// Works like [`BoneIndex`] over [`Document::shapes`].
+pub type ShapeIndex = usize;
 
 // ---------------------------------------------------------------------------
 // Weights
@@ -47,12 +61,11 @@ pub type Point = [f32; 2];
 
 /// One bone's influence on a single path point.
 ///
-/// `bone` names the bone it binds to. Bone names are unique within a rig, so a
-/// name identifies a bone across the whole skeleton.
+/// `bone` is the flat [`BoneIndex`] of the bone it binds to.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Weight {
-    /// Name of the bone this weight binds to.
-    pub bone: String,
+    /// Flat index of the bone this weight binds to.
+    pub bone: BoneIndex,
     /// How strongly the bone moves the point.
     pub weight: f32,
 }
@@ -60,8 +73,8 @@ pub struct Weight {
 /// The bones influencing one path point: zero or more `(bone, weight)` pairs.
 ///
 /// Anchors and control points carry their own list. Every operation that
-/// removes or renames a bone keeps these lists consistent, and splitting a
-/// segment blends the two neighbouring anchors' lists.
+/// inserts, removes, or moves a bone keeps these lists consistent, and
+/// splitting a segment blends the two neighbouring anchors' lists.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Weights(Vec<Weight>);
@@ -81,7 +94,7 @@ impl Weights {
 
     /// The weight bound to `bone`, or `None` when the point is not influenced
     /// by it.
-    pub fn get(&self, bone: &str) -> Option<f32> {
+    pub fn get(&self, bone: BoneIndex) -> Option<f32> {
         self.0
             .iter()
             .find(|weight| weight.bone == bone)
@@ -94,8 +107,7 @@ impl Weights {
     }
 
     /// Adds or replaces the weight for `bone`.
-    pub fn set(&mut self, bone: impl Into<String>, weight: f32) {
-        let bone = bone.into();
+    pub fn set(&mut self, bone: BoneIndex, weight: f32) {
         if let Some(existing) = self.0.iter_mut().find(|entry| entry.bone == bone) {
             existing.weight = weight;
         } else {
@@ -112,40 +124,45 @@ impl Weights {
     pub fn blend(from: &Self, to: &Self, t: f32) -> Self {
         let mut blended = Self::new();
         for weight in &from.0 {
-            let other = to.get(&weight.bone).unwrap_or(0.0);
-            blended.set(weight.bone.clone(), weight.weight * (1.0 - t) + other * t);
+            let other = to.get(weight.bone).unwrap_or(0.0);
+            blended.set(weight.bone, weight.weight * (1.0 - t) + other * t);
         }
         for weight in &to.0 {
-            if from.get(&weight.bone).is_none() {
-                blended.set(weight.bone.clone(), weight.weight * t);
+            if from.get(weight.bone).is_none() {
+                blended.set(weight.bone, weight.weight * t);
             }
         }
         blended.0.retain(|weight| weight.weight != 0.0);
         blended
     }
 
-    /// Removes every listed bone, then rescales the remaining weights so the
-    /// list totals what it did before.
+    /// Rewrites every weight through `map`, dropping bones the map deletes and
+    /// rescaling the survivors so the list still totals what it did before.
     ///
-    /// If nothing remains there is no total to preserve, so the list simply
+    /// `map[old]` is the bone's new index, or `None` when the bone is gone.
+    /// If no bone remains there is no total to preserve, so the list simply
     /// becomes empty.
-    pub fn remove_bones(&mut self, bones: &[String]) {
+    pub fn apply_bone_map(&mut self, map: &[Option<BoneIndex>]) {
         let before = self.sum();
-        self.0.retain(|weight| !bones.contains(&weight.bone));
-        let after = self.sum();
-        if after > f32::EPSILON {
-            let scale = before / after;
-            for weight in &mut self.0 {
-                weight.weight *= scale;
-            }
-        }
-    }
-
-    /// Renames `from` to `to` wherever it appears.
-    pub fn rename_bone(&mut self, from: &str, to: &str) {
-        for weight in &mut self.0 {
-            if weight.bone == from {
-                weight.bone = to.to_owned();
+        let mut dropped = false;
+        self.0
+            .retain_mut(|weight| match map.get(weight.bone).copied().flatten() {
+                Some(index) => {
+                    weight.bone = index;
+                    true
+                }
+                None => {
+                    dropped = true;
+                    false
+                }
+            });
+        if dropped {
+            let after = self.sum();
+            if after > f32::EPSILON {
+                let scale = before / after;
+                for weight in &mut self.0 {
+                    weight.weight *= scale;
+                }
             }
         }
     }
@@ -157,7 +174,7 @@ impl Weights {
     /// This is the "over" operation of a weight-paint brush: the painted bone
     /// moves toward `value` by `alpha`, and whatever influence it gains is
     /// taken from the others. Weights that fade to zero are dropped.
-    pub fn paint_bone(&mut self, bone: &str, value: f32, alpha: f32) {
+    pub fn paint_bone(&mut self, bone: BoneIndex, value: f32, alpha: f32) {
         let alpha = alpha.clamp(0.0, 1.0);
         if alpha <= f32::EPSILON {
             return;
@@ -450,42 +467,202 @@ impl Document {
         }
     }
 
-    /// Drops the named bones from every point's weight list, rescaling each
-    /// list so it still totals what it did before.
-    pub fn remove_bones_from_weights(&mut self, bones: &[String]) {
-        self.for_each_weights_mut(&mut |weights| weights.remove_bones(bones));
-    }
-
-    /// Renames a bone throughout every point's weight list.
-    pub fn rename_bone_in_weights(&mut self, from: &str, to: &str) {
-        self.for_each_weights_mut(&mut |weights| weights.rename_bone(from, to));
-    }
-
-    /// Renames a bone in every animation keyframe that targets it.
-    pub fn rename_bone_in_animations(&mut self, from: &str, to: &str) {
+    /// Rewrites every reference to a bone through `map`.
+    ///
+    /// Applies the map to every point's weight list (dropping bones the map
+    /// deletes, rescaling each list so it still totals what it did before) and
+    /// to every animation keyframe that targets a bone. Keyframes targeting a
+    /// deleted bone are dropped.
+    pub fn apply_bone_map(&mut self, map: &[Option<BoneIndex>]) {
+        self.for_each_weights_mut(&mut |weights| weights.apply_bone_map(map));
         for animation in &mut self.animations {
-            for keyframe in &mut animation.keyframes {
-                if let KeyframeTarget::Bone { bone, .. } = &mut keyframe.target
-                    && bone == from
-                {
-                    *bone = to.to_owned();
+            animation.keyframes.retain_mut(|keyframe| {
+                let KeyframeTarget::Bone { bone, .. } = &mut keyframe.target else {
+                    return true;
+                };
+                match map.get(*bone).copied().flatten() {
+                    Some(index) => {
+                        *bone = index;
+                        true
+                    }
+                    None => false,
                 }
-            }
+            });
         }
     }
 
-    /// Renames a shape in every animation keyframe that targets it.
-    pub fn rename_shape_in_animations(&mut self, from: &str, to: &str) {
+    /// Rewrites every reference to a shape through `map`, dropping keyframes
+    /// that target a deleted shape.
+    pub fn apply_shape_map(&mut self, map: &[Option<ShapeIndex>]) {
         for animation in &mut self.animations {
-            for keyframe in &mut animation.keyframes {
-                if let KeyframeTarget::Shape { shape, .. } = &mut keyframe.target
-                    && shape == from
-                {
-                    *shape = to.to_owned();
+            animation.keyframes.retain_mut(|keyframe| {
+                let KeyframeTarget::Shape { shape, .. } = &mut keyframe.target else {
+                    return true;
+                };
+                match map.get(*shape).copied().flatten() {
+                    Some(index) => {
+                        *shape = index;
+                        true
+                    }
+                    None => false,
                 }
-            }
+            });
         }
     }
+
+    /// The number of bones in the rig, counting descendants.
+    pub fn bone_count(&self) -> usize {
+        self.bones.iter().map(Bone::subtree_len).sum()
+    }
+
+    /// The bone with the given pre-order index, if any.
+    pub fn bone_by_index(&self, index: BoneIndex) -> Option<&Bone> {
+        fn find<'a>(bones: &'a [Bone], cursor: &mut usize, target: usize) -> Option<&'a Bone> {
+            for bone in bones {
+                let current = *cursor;
+                *cursor += 1;
+                if current == target {
+                    return Some(bone);
+                }
+                if let Some(found) = find(&bone.children, cursor, target) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let mut cursor = 0;
+        find(&self.bones, &mut cursor, index)
+    }
+
+    /// The bone with the given pre-order index, if any.
+    pub fn bone_by_index_mut(&mut self, index: BoneIndex) -> Option<&mut Bone> {
+        fn find<'a>(
+            bones: &'a mut [Bone],
+            cursor: &mut usize,
+            target: usize,
+        ) -> Option<&'a mut Bone> {
+            bones.iter_mut().find_map(|bone| {
+                let current = *cursor;
+                *cursor += 1;
+                if current == target {
+                    Some(bone)
+                } else {
+                    find(&mut bone.children, cursor, target)
+                }
+            })
+        }
+        let mut cursor = 0;
+        find(&mut self.bones, &mut cursor, index)
+    }
+
+    /// The number of bones in the subtree rooted at `index`, including the
+    /// bone itself.
+    pub fn bone_subtree_len(&self, index: BoneIndex) -> Option<usize> {
+        self.bone_by_index(index).map(Bone::subtree_len)
+    }
+
+    /// The number of shapes in the document, counting descendants.
+    pub fn shape_count(&self) -> usize {
+        self.shapes.iter().map(Shape::subtree_len).sum()
+    }
+
+    /// The shape with the given pre-order index, if any.
+    pub fn shape_by_index(&self, index: ShapeIndex) -> Option<&Shape> {
+        fn find<'a>(shapes: &'a [Shape], cursor: &mut usize, target: usize) -> Option<&'a Shape> {
+            for shape in shapes {
+                let current = *cursor;
+                *cursor += 1;
+                if current == target {
+                    return Some(shape);
+                }
+                if let Some(found) = find(&shape.children, cursor, target) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let mut cursor = 0;
+        find(&self.shapes, &mut cursor, index)
+    }
+
+    /// The shape with the given pre-order index, if any.
+    pub fn shape_by_index_mut(&mut self, index: ShapeIndex) -> Option<&mut Shape> {
+        fn find<'a>(
+            shapes: &'a mut [Shape],
+            cursor: &mut usize,
+            target: usize,
+        ) -> Option<&'a mut Shape> {
+            shapes.iter_mut().find_map(|shape| {
+                let current = *cursor;
+                *cursor += 1;
+                if current == target {
+                    Some(shape)
+                } else {
+                    find(&mut shape.children, cursor, target)
+                }
+            })
+        }
+        let mut cursor = 0;
+        find(&mut self.shapes, &mut cursor, index)
+    }
+
+    /// The number of shapes in the subtree rooted at `index`, including the
+    /// shape itself.
+    pub fn shape_subtree_len(&self, index: ShapeIndex) -> Option<usize> {
+        self.shape_by_index(index).map(Shape::subtree_len)
+    }
+}
+
+/// The bone index remap produced by inserting `len` new bones at flat index
+/// `start`.
+///
+/// `count` is the number of bones before the insertion.
+pub fn insertion_map(count: usize, start: BoneIndex, len: usize) -> Vec<Option<BoneIndex>> {
+    (0..count)
+        .map(|index| Some(if index < start { index } else { index + len }))
+        .collect()
+}
+
+/// The bone index remap produced by deleting the `len` bones occupying flat
+/// indices `start..start + len`.
+///
+/// `count` is the number of bones before the removal.
+pub fn removal_map(count: usize, start: BoneIndex, len: usize) -> Vec<Option<BoneIndex>> {
+    (0..count)
+        .map(|index| {
+            if index < start {
+                Some(index)
+            } else if index < start + len {
+                None
+            } else {
+                Some(index - len)
+            }
+        })
+        .collect()
+}
+
+/// The bone index remap produced by moving the `len` bones occupying flat
+/// indices `start..start + len` to `target`.
+///
+/// `target` is the block's new index once it has been lifted out of the tree,
+/// i.e. it is measured without the moved bones. `count` is the number of bones
+/// before the move.
+pub fn move_map(
+    count: usize,
+    start: BoneIndex,
+    len: usize,
+    target: BoneIndex,
+) -> Vec<Option<BoneIndex>> {
+    (0..count)
+        .map(|index| {
+            if index >= start && index < start + len {
+                Some(target + (index - start))
+            } else {
+                let rest = if index < start { index } else { index - len };
+                Some(if rest < target { rest } else { rest + len })
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +723,11 @@ impl Bone {
     pub fn head_with_parent(&self, parent_tail: Option<Point>) -> Point {
         self.head.or(parent_tail).unwrap_or(self.tail)
     }
+
+    /// The number of bones in this subtree, including the bone itself.
+    pub fn subtree_len(&self) -> usize {
+        1 + self.children.iter().map(Bone::subtree_len).sum::<usize>()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -577,22 +759,22 @@ pub enum ShapeProperty {}
 
 /// What a [`Keyframe`] drives.
 ///
-/// Bone and shape targets store the target's name, which is how the rest of the
-/// document identifies both. Renaming a bone or shape therefore also renames
-/// the target of every keyframe that refers to it.
+/// Bone and shape targets store the target's flat index, which is how the rest
+/// of the document identifies both. Inserting, removing, or moving a bone or
+/// shape therefore rewrites the target of every keyframe that refers to it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum KeyframeTarget {
     /// Drives one property of a bone.
     Bone {
-        /// Name of the bone.
-        bone: String,
+        /// Flat index of the bone.
+        bone: BoneIndex,
         property: BoneProperty,
     },
     /// Drives one property of a shape.
     Shape {
-        /// Name of the shape.
-        shape: String,
+        /// Flat index of the shape.
+        shape: ShapeIndex,
         property: ShapeProperty,
     },
 }
@@ -793,6 +975,11 @@ impl Shape {
     /// True when the shape has neither paths nor children.
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.children.is_empty()
+    }
+
+    /// The number of shapes in this subtree, including the shape itself.
+    pub fn subtree_len(&self) -> usize {
+        1 + self.children.iter().map(Shape::subtree_len).sum::<usize>()
     }
 
     /// Applies `f` to every point weight in this shape and its descendants.
@@ -1289,16 +1476,16 @@ mod tests {
     #[test]
     fn weights_blend_by_parameter() {
         let mut from = Weights::new();
-        from.set("A", 1.0);
-        from.set("B", 0.5);
+        from.set(0, 1.0);
+        from.set(1, 0.5);
         let mut to = Weights::new();
-        to.set("B", 1.0);
-        to.set("C", 1.0);
+        to.set(1, 1.0);
+        to.set(2, 1.0);
 
         let blended = Weights::blend(&from, &to, 0.25);
-        assert_eq!(blended.get("A"), Some(0.75));
-        assert!((blended.get("B").unwrap() - 0.625).abs() < 1e-6);
-        assert_eq!(blended.get("C"), Some(0.25));
+        assert_eq!(blended.get(0), Some(0.75));
+        assert!((blended.get(1).unwrap() - 0.625).abs() < 1e-6);
+        assert_eq!(blended.get(2), Some(0.25));
 
         // The endpoints reproduce the inputs exactly.
         assert_eq!(Weights::blend(&from, &to, 0.0).iter().count(), 2);
@@ -1308,34 +1495,38 @@ mod tests {
     #[test]
     fn removing_a_bone_keeps_the_weight_total() {
         let mut weights = Weights::new();
-        weights.set("A", 0.5);
-        weights.set("B", 0.5);
+        weights.set(0, 0.5);
+        weights.set(1, 0.5);
 
-        weights.remove_bones(&["B".to_owned()]);
+        // Bone 1 is gone; bone 0 stays where it was.
+        weights.apply_bone_map(&removal_map(2, 1, 1));
 
-        assert_eq!(weights.get("B"), None);
+        assert_eq!(weights.get(1), None);
         assert!((weights.sum() - 1.0).abs() < 1e-6);
-        assert!((weights.get("A").unwrap() - 1.0).abs() < 1e-6);
+        assert!((weights.get(0).unwrap() - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn renaming_a_bone_updates_weights() {
+    fn applying_a_bone_map_shifts_indices() {
         let mut weights = Weights::new();
-        weights.set("Old", 1.0);
+        weights.set(0, 0.25);
+        weights.set(1, 0.75);
 
-        weights.rename_bone("Old", "New");
+        // A new bone appears at index 0, pushing both along.
+        weights.apply_bone_map(&insertion_map(2, 0, 1));
 
-        assert_eq!(weights.get("Old"), None);
-        assert_eq!(weights.get("New"), Some(1.0));
+        assert_eq!(weights.get(0), None);
+        assert_eq!(weights.get(1), Some(0.25));
+        assert_eq!(weights.get(2), Some(0.75));
     }
 
     #[test]
     fn weights_round_trip_through_json() {
         let mut path = Path::new([0.0, 0.0]).cubic_to([1.0, 2.0], [3.0, 4.0], [5.0, 6.0]);
-        path.start_weights.set("Root", 0.25);
-        path.segments[0].ctrl1_weights.set("Root", 0.5);
-        path.segments[0].ctrl2_weights.set("Root", 0.75);
-        path.segments[0].to_weights.set("Root", 1.0);
+        path.start_weights.set(0, 0.25);
+        path.segments[0].ctrl1_weights.set(0, 0.5);
+        path.segments[0].ctrl2_weights.set(0, 0.75);
+        path.segments[0].to_weights.set(0, 1.0);
         let doc = Document {
             version: FORMAT_VERSION,
             bones: Vec::new(),
@@ -1354,45 +1545,45 @@ mod tests {
     #[test]
     fn painting_a_bone_scales_the_others_back() {
         let mut weights = Weights::new();
-        weights.set("Arm", 0.2);
-        weights.set("Leg", 0.8);
+        weights.set(0, 0.2);
+        weights.set(1, 0.8);
 
-        // A full-strength dab sets Arm to 0.7 and shrinks the rest to fit.
-        weights.paint_bone("Arm", 0.7, 1.0);
+        // A full-strength dab sets bone 0 to 0.7 and shrinks the rest to fit.
+        weights.paint_bone(0, 0.7, 1.0);
 
-        assert!((weights.get("Arm").unwrap() - 0.7).abs() < 1e-6);
-        assert!((weights.get("Leg").unwrap() - 0.3).abs() < 1e-6);
+        assert!((weights.get(0).unwrap() - 0.7).abs() < 1e-6);
+        assert!((weights.get(1).unwrap() - 0.3).abs() < 1e-6);
         assert!((weights.sum() - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn painting_a_bone_partially_blends_towards_the_value() {
         let mut weights = Weights::new();
-        weights.set("Arm", 0.0);
+        weights.set(0, 0.0);
 
-        weights.paint_bone("Arm", 1.0, 0.25);
+        weights.paint_bone(0, 1.0, 0.25);
 
-        assert!((weights.get("Arm").unwrap() - 0.25).abs() < 1e-6);
+        assert!((weights.get(0).unwrap() - 0.25).abs() < 1e-6);
     }
 
     #[test]
     fn painting_a_bone_to_zero_drops_it() {
         let mut weights = Weights::new();
-        weights.set("Arm", 0.5);
-        weights.set("Leg", 0.5);
+        weights.set(0, 0.5);
+        weights.set(1, 0.5);
 
-        weights.paint_bone("Arm", 0.0, 1.0);
+        weights.paint_bone(0, 0.0, 1.0);
 
-        assert_eq!(weights.get("Arm"), None);
+        assert_eq!(weights.get(0), None);
         // Erasing one bone does not inflate the others.
-        assert!((weights.get("Leg").unwrap() - 0.5).abs() < 1e-6);
+        assert!((weights.get(1).unwrap() - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn painting_without_a_bone_reduces_the_total() {
         let mut weights = Weights::new();
-        weights.set("Arm", 0.5);
-        weights.set("Leg", 0.5);
+        weights.set(0, 0.5);
+        weights.set(1, 0.5);
 
         // The displayed value is `1 - sum`, so a value of one removes all
         // influence.
@@ -1411,15 +1602,13 @@ mod tests {
         assert!(weights.is_empty());
     }
 
-    fn bone_keyframe(timestamp: f32, value: f32, bone: &str, property: BoneProperty) -> Keyframe {
-        Keyframe::new(
-            timestamp,
-            value,
-            KeyframeTarget::Bone {
-                bone: bone.to_owned(),
-                property,
-            },
-        )
+    fn bone_keyframe(
+        timestamp: f32,
+        value: f32,
+        bone: BoneIndex,
+        property: BoneProperty,
+    ) -> Keyframe {
+        Keyframe::new(timestamp, value, KeyframeTarget::Bone { bone, property })
     }
 
     fn keyframe_times(animation: &Animation) -> Vec<f32> {
@@ -1434,7 +1623,7 @@ mod tests {
     fn animations_round_trip_through_json() {
         let mut animation = Animation::new(5.0);
         animation.cyclic = true;
-        let mut keyframe = bone_keyframe(1.5, 10.0, "Arm", BoneProperty::Angle);
+        let mut keyframe = bone_keyframe(1.5, 10.0, 0, BoneProperty::Angle);
         keyframe.handle_in = Some(0.25);
         keyframe.handle_out = Some(0.75);
         animation.insert_keyframe(keyframe);
@@ -1481,31 +1670,31 @@ mod tests {
     #[test]
     fn inserting_keyframes_keeps_them_ordered_and_in_range() {
         let mut animation = Animation::new(10.0);
-        animation.insert_keyframe(bone_keyframe(5.0, 0.0, "B", BoneProperty::X));
-        animation.insert_keyframe(bone_keyframe(1.0, 0.0, "A", BoneProperty::X));
-        animation.insert_keyframe(bone_keyframe(5.0, 0.0, "C", BoneProperty::Y));
-        animation.insert_keyframe(bone_keyframe(-1.0, 0.0, "D", BoneProperty::X));
-        animation.insert_keyframe(bone_keyframe(11.0, 0.0, "E", BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(5.0, 0.0, 1, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(1.0, 0.0, 0, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(5.0, 0.0, 2, BoneProperty::Y));
+        animation.insert_keyframe(bone_keyframe(-1.0, 0.0, 3, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(11.0, 0.0, 4, BoneProperty::X));
 
         assert_eq!(keyframe_times(&animation), vec![1.0, 5.0, 5.0]);
 
         // Equal timestamps keep insertion order.
-        let bones: Vec<&str> = animation
+        let bones: Vec<BoneIndex> = animation
             .keyframes
             .iter()
             .map(|keyframe| match &keyframe.target {
-                KeyframeTarget::Bone { bone, .. } => bone.as_str(),
+                KeyframeTarget::Bone { bone, .. } => *bone,
                 KeyframeTarget::Shape { .. } => unreachable!(),
             })
             .collect();
-        assert_eq!(bones, vec!["A", "B", "C"]);
+        assert_eq!(bones, vec![0, 1, 2]);
     }
 
     #[test]
     fn changing_duration_drops_outlying_keyframes() {
         let mut animation = Animation::new(10.0);
         for timestamp in [0.0, 2.0, 8.0, 10.0] {
-            animation.insert_keyframe(bone_keyframe(timestamp, timestamp, "Bone", BoneProperty::X));
+            animation.insert_keyframe(bone_keyframe(timestamp, timestamp, 0, BoneProperty::X));
         }
 
         animation.set_duration(5.0);
@@ -1518,19 +1707,19 @@ mod tests {
     fn loading_animations_normalizes_their_keyframes() {
         let json = r#"{
             "type": "viveco",
-            "version": 3,
+            "version": 5,
             "animations": [{
                 "duration": 4.0,
                 "cyclic": true,
                 "keyframes": [
                     {"timestamp": 3.0, "value": 3.0,
-                     "target": {"kind": "bone", "bone": "A", "property": "x"}},
+                     "target": {"kind": "bone", "bone": 0, "property": "x"}},
                     {"timestamp": -1.0, "value": 0.0,
-                     "target": {"kind": "bone", "bone": "B", "property": "y"}},
+                     "target": {"kind": "bone", "bone": 1, "property": "y"}},
                     {"timestamp": 1.0, "value": 1.0,
-                     "target": {"kind": "bone", "bone": "C", "property": "angle"}},
+                     "target": {"kind": "bone", "bone": 2, "property": "angle"}},
                     {"timestamp": 9.0, "value": 9.0,
-                     "target": {"kind": "bone", "bone": "D", "property": "scale"}}
+                     "target": {"kind": "bone", "bone": 3, "property": "scale"}}
                 ]
             }]
         }"#;
@@ -1542,26 +1731,46 @@ mod tests {
     }
 
     #[test]
-    fn renaming_a_bone_updates_animation_targets() {
+    fn applying_a_bone_map_updates_animation_targets() {
         let mut animation = Animation::new(1.0);
-        animation.insert_keyframe(bone_keyframe(0.0, 0.0, "Old", BoneProperty::X));
-        animation.insert_keyframe(bone_keyframe(1.0, 0.0, "Other", BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(0.0, 0.0, 0, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(1.0, 0.0, 1, BoneProperty::X));
         let mut document = Document {
             animations: vec![animation],
             ..Default::default()
         };
 
-        document.rename_bone_in_animations("Old", "New");
+        // Insert a bone at index 0, pushing both targets along.
+        document.apply_bone_map(&insertion_map(2, 0, 1));
 
-        let bones: Vec<&str> = document.animations[0]
+        let bones: Vec<BoneIndex> = document.animations[0]
             .keyframes
             .iter()
             .map(|keyframe| match &keyframe.target {
-                KeyframeTarget::Bone { bone, .. } => bone.as_str(),
+                KeyframeTarget::Bone { bone, .. } => *bone,
                 KeyframeTarget::Shape { .. } => unreachable!(),
             })
             .collect();
-        assert_eq!(bones, vec!["New", "Other"]);
+        assert_eq!(bones, vec![1, 2]);
+    }
+
+    #[test]
+    fn applying_a_bone_map_drops_targets_of_removed_bones() {
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(bone_keyframe(0.0, 0.0, 0, BoneProperty::X));
+        animation.insert_keyframe(bone_keyframe(1.0, 0.0, 1, BoneProperty::X));
+        let mut document = Document {
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        document.apply_bone_map(&removal_map(2, 0, 1));
+
+        assert_eq!(document.animations[0].keyframes.len(), 1);
+        assert!(matches!(
+            document.animations[0].keyframes[0].target,
+            KeyframeTarget::Bone { bone: 0, .. }
+        ));
     }
 
     #[test]
@@ -1570,15 +1779,69 @@ mod tests {
         // be constructed or deserialized.
         let json = r#"{
             "type": "viveco",
-            "version": 3,
+            "version": 5,
             "animations": [{
                 "duration": 1.0,
                 "keyframes": [
                     {"timestamp": 0.0, "value": 0.0,
-                     "target": {"kind": "shape", "shape": "Star", "property": "x"}}
+                     "target": {"kind": "shape", "shape": 0, "property": "x"}}
                 ]
             }]
         }"#;
         assert!(Document::from_json_str(json).is_err());
+    }
+
+    #[test]
+    fn pre_order_bone_indices_match_a_depth_first_walk() {
+        let document = Document {
+            bones: vec![
+                Bone {
+                    name: "A".into(),
+                    children: vec![
+                        Bone {
+                            name: "A1".into(),
+                            ..Default::default()
+                        },
+                        Bone {
+                            name: "A2".into(),
+                            children: vec![Bone {
+                                name: "A2a".into(),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Bone {
+                    name: "B".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let names: Vec<&str> = (0..document.bone_count())
+            .map(|index| document.bone_by_index(index).unwrap().name.as_str())
+            .collect();
+        assert_eq!(names, vec!["A", "A1", "A2", "A2a", "B"]);
+        assert_eq!(document.bone_subtree_len(0), Some(4));
+        assert_eq!(document.bone_subtree_len(2), Some(2));
+        assert_eq!(document.bone_subtree_len(4), Some(1));
+        assert_eq!(document.bone_by_index(5), None);
+    }
+
+    #[test]
+    fn bone_index_maps_reposition_the_expected_bones() {
+        // Moving bones 1..3 to the front of a five-bone rig.
+        assert_eq!(
+            move_map(5, 1, 2, 0),
+            vec![Some(2), Some(0), Some(1), Some(3), Some(4)]
+        );
+        // Moving bones 0..2 to the end.
+        assert_eq!(
+            move_map(5, 0, 2, 3),
+            vec![Some(3), Some(4), Some(0), Some(1), Some(2)]
+        );
     }
 }

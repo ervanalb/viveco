@@ -22,10 +22,8 @@ use vello::Scene;
 use vello::kurbo::{Affine, Circle, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
-use std::collections::HashMap;
-
 use crate::render::to_kurbo_point;
-use viveco::model::{Document, Path, PathEnds, Point, Shape, Weights};
+use viveco::model::{BoneIndex, Document, Path, PathEnds, Point, Shape, Weights};
 use viveco::pose::{Pose, Similarity};
 
 /// Smallest brush radius, in screen pixels.
@@ -94,14 +92,14 @@ pub fn paint_document(
     document: &mut Document,
     center: Point,
     radius: f32,
-    selected_bone: Option<&str>,
+    selected_bone: Option<BoneIndex>,
     brush: &WeightPaintBrush,
     pose: &Pose,
 ) {
     // Points are painted where they appear on the posed rig page, so the brush
     // hit-tests posed positions while still editing the rest-pose weights.
-    let worlds = (!pose.is_identity()).then(|| viveco::pose::worlds_by_name(document, pose));
-    let worlds = worlds.as_ref();
+    let worlds = (!pose.is_identity()).then(|| viveco::pose::worlds(document, pose));
+    let worlds = worlds.as_deref();
     for shape in &mut document.shapes {
         paint_shape(shape, center, radius, selected_bone, brush, worlds);
     }
@@ -111,9 +109,9 @@ fn paint_shape(
     shape: &mut Shape,
     center: Point,
     radius: f32,
-    selected_bone: Option<&str>,
+    selected_bone: Option<BoneIndex>,
     brush: &WeightPaintBrush,
-    worlds: Option<&HashMap<String, Similarity>>,
+    worlds: Option<&[Similarity]>,
 ) {
     for path in &mut shape.paths {
         paint_path(path, center, radius, selected_bone, brush, worlds);
@@ -127,9 +125,9 @@ fn paint_path(
     path: &mut Path,
     center: Point,
     radius: f32,
-    selected_bone: Option<&str>,
+    selected_bone: Option<BoneIndex>,
     brush: &WeightPaintBrush,
-    worlds: Option<&HashMap<String, Similarity>>,
+    worlds: Option<&[Similarity]>,
 ) {
     // A closed loop has no separate start anchor: its first anchor is the last
     // segment's end point, whose weights that segment carries.
@@ -184,9 +182,9 @@ fn paint_weights(
     position: Point,
     center: Point,
     radius: f32,
-    selected_bone: Option<&str>,
+    selected_bone: Option<BoneIndex>,
     brush: &WeightPaintBrush,
-    worlds: Option<&HashMap<String, Similarity>>,
+    worlds: Option<&[Similarity]>,
 ) {
     if radius <= f32::EPSILON {
         return;
@@ -223,7 +221,7 @@ pub fn weight_color(value: f32) -> Color {
 
 /// The value a point displays, which is its weight on the selected bone, or
 /// its unused share when no bone is selected.
-fn point_value(weights: &Weights, selected_bone: Option<&str>) -> f32 {
+fn point_value(weights: &Weights, selected_bone: Option<BoneIndex>) -> f32 {
     match selected_bone {
         Some(bone) => weights.get(bone).unwrap_or(0.0),
         None => (1.0 - weights.sum()).clamp(0.0, 1.0),
@@ -235,7 +233,7 @@ fn point_value(weights: &Weights, selected_bone: Option<&str>) -> f32 {
 pub fn draw_overlay(
     scene: &mut Scene,
     document: &Document,
-    selected_bone: Option<&str>,
+    selected_bone: Option<BoneIndex>,
     brush: &WeightPaintBrush,
     view_scale: f32,
     cursor: Option<Point>,
@@ -249,7 +247,7 @@ pub fn draw_overlay(
     }
 }
 
-fn draw_shape(scene: &mut Scene, shape: &Shape, selected_bone: Option<&str>, scale: f32) {
+fn draw_shape(scene: &mut Scene, shape: &Shape, selected_bone: Option<BoneIndex>, scale: f32) {
     for path in &shape.paths {
         draw_path(scene, path, selected_bone, scale);
     }
@@ -258,7 +256,7 @@ fn draw_shape(scene: &mut Scene, shape: &Shape, selected_bone: Option<&str>, sca
     }
 }
 
-fn draw_path(scene: &mut Scene, path: &Path, selected_bone: Option<&str>, scale: f32) {
+fn draw_path(scene: &mut Scene, path: &Path, selected_bone: Option<BoneIndex>, scale: f32) {
     // The curve outline and its bezier arms stay visible in this mode, so the
     // point colors can be read against the geometry they belong to.
     crate::editor::draw_path_guides(scene, path, scale);
@@ -281,7 +279,7 @@ fn draw_point(
     scene: &mut Scene,
     position: Point,
     weights: &Weights,
-    selected_bone: Option<&str>,
+    selected_bone: Option<BoneIndex>,
     scale: f32,
 ) {
     let color = weight_color(point_value(weights, selected_bone));
@@ -379,7 +377,7 @@ mod tests {
             &mut document,
             [0.0, 0.0],
             10.0,
-            Some("Arm"),
+            Some(0),
             &brush(),
             &Pose::default(),
         );
@@ -387,9 +385,9 @@ mod tests {
         // The start point and the nearby end point were painted; the far one
         // was not.
         let path = &document.shapes[0].paths[0];
-        assert_eq!(path.start_weights.get("Arm"), Some(1.0));
-        assert_eq!(weights_at(&document, 0).get("Arm"), None);
-        assert_eq!(weights_at(&document, 1).get("Arm"), Some(1.0));
+        assert_eq!(path.start_weights.get(0), Some(1.0));
+        assert_eq!(weights_at(&document, 0).get(0), None);
+        assert_eq!(weights_at(&document, 1).get(0), Some(1.0));
     }
 
     #[test]
@@ -397,21 +395,21 @@ mod tests {
         let mut document = document_with(&[[0.0, 0.0], [10.0, 0.0]]);
         document.shapes[0].paths[0].segments[0]
             .to_weights
-            .set("Leg", 1.0);
+            .set(1, 1.0);
 
         paint_document(
             &mut document,
             [10.0, 0.0],
             10.0,
-            Some("Arm"),
+            Some(0),
             &brush(),
             &Pose::default(),
         );
 
         let weights = weights_at(&document, 0);
-        assert_eq!(weights.get("Arm"), Some(1.0));
+        assert_eq!(weights.get(0), Some(1.0));
         // Painting the whole budget onto Arm leaves nothing for Leg.
-        assert_eq!(weights.get("Leg"), None);
+        assert_eq!(weights.get(1), None);
     }
 
     #[test]
@@ -427,13 +425,13 @@ mod tests {
             &mut document,
             [0.0, 0.0],
             10.0,
-            Some("Arm"),
+            Some(0),
             &brush,
             &Pose::default(),
         );
 
         let weights = &document.shapes[0].paths[0].start_weights;
-        assert!((weights.get("Arm").unwrap() - 0.1).abs() < 1e-6);
+        assert!((weights.get(0).unwrap() - 0.1).abs() < 1e-6);
     }
 
     #[test]
@@ -441,7 +439,7 @@ mod tests {
         let mut document = document_with(&[[0.0, 0.0], [10.0, 0.0]]);
         document.shapes[0].paths[0].segments[0]
             .to_weights
-            .set("Leg", 0.5);
+            .set(1, 0.5);
 
         paint_document(
             &mut document,
@@ -465,10 +463,10 @@ mod tests {
             tail: [10.0, 0.0],
             children: Vec::new(),
         });
-        document.shapes[0].paths[0].start_weights.set("Arm", 1.0);
+        document.shapes[0].paths[0].start_weights.set(0, 1.0);
         let mut pose = Pose::default();
         pose.set(
-            "Arm",
+            0,
             viveco::pose::BonePose {
                 scale: 2.0,
                 ..Default::default()
@@ -477,33 +475,13 @@ mod tests {
 
         // The point is drawn at [20, 0] under the scale, so a brush there
         // paints it even though its rest position is [10, 0].
-        paint_document(
-            &mut document,
-            [20.0, 0.0],
-            2.0,
-            Some("Arm"),
-            &brush(),
-            &pose,
-        );
-        assert_eq!(
-            document.shapes[0].paths[0].start_weights.get("Arm"),
-            Some(1.0)
-        );
+        paint_document(&mut document, [20.0, 0.0], 2.0, Some(0), &brush(), &pose);
+        assert_eq!(document.shapes[0].paths[0].start_weights.get(0), Some(1.0));
 
         // A brush at the rest position misses it.
-        document.shapes[0].paths[0].start_weights.set("Arm", 0.5);
-        paint_document(
-            &mut document,
-            [10.0, 0.0],
-            2.0,
-            Some("Arm"),
-            &brush(),
-            &pose,
-        );
-        assert_eq!(
-            document.shapes[0].paths[0].start_weights.get("Arm"),
-            Some(0.5)
-        );
+        document.shapes[0].paths[0].start_weights.set(0, 0.5);
+        paint_document(&mut document, [10.0, 0.0], 2.0, Some(0), &brush(), &pose);
+        assert_eq!(document.shapes[0].paths[0].start_weights.get(0), Some(0.5));
     }
 
     #[test]

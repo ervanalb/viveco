@@ -158,7 +158,15 @@ pub trait TreeModel: Clone + PartialEq + Send + Sync + 'static {
 
     /// Checks that dropping `source` on `target` is allowed, returning the
     /// resolved target.
-    fn resolve_drop(source: &Self, target: &Self, kind: DropKind) -> Option<(Self, DropKind)>;
+    ///
+    /// The document is available so hierarchies addressed by flat index can
+    /// test ancestry.
+    fn resolve_drop(
+        document: &Document,
+        source: &Self,
+        target: &Self,
+        kind: DropKind,
+    ) -> Option<(Self, DropKind)>;
 
     /// Moves `source` to `target` and returns the node's new address.
     fn drop_move(
@@ -635,6 +643,7 @@ pub fn update_drag_hover<M: TreeModel>(
     mode: Res<EditorMode>,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    editor: Res<EditorState>,
     mut drag: ResMut<TreeDrag<M>>,
     slots: Query<(&TreeDropSlot<M>, &RelativeCursorPosition)>,
     rows: Query<(&TreeRow<M>, &RelativeCursorPosition)>,
@@ -674,7 +683,7 @@ pub fn update_drag_hover<M: TreeModel>(
     let resolved = slots
         .iter()
         .filter(|(_, relative)| relative.cursor_over())
-        .find_map(|(slot, _)| M::resolve_drop(&source, &slot.target, slot.kind));
+        .find_map(|(slot, _)| M::resolve_drop(&editor.document, &source, &slot.target, slot.kind));
     if let Some(resolved) = resolved {
         drag.hovered = Some(resolved);
         return;
@@ -683,7 +692,8 @@ pub fn update_drag_hover<M: TreeModel>(
     // Outside a slot, the row under the pointer means "inside it".
     for (row, relative) in &rows {
         if relative.cursor_over()
-            && let Some(resolved) = M::resolve_drop(&source, &row.address, DropKind::Into)
+            && let Some(resolved) =
+                M::resolve_drop(&editor.document, &source, &row.address, DropKind::Into)
         {
             drag.hovered = Some(resolved);
             return;

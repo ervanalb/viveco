@@ -1,6 +1,6 @@
 {
   "type": "viveco",
-  "version": 2,
+  "version": 5,
   "shapes": [
     {
       "name": "Triangle",
@@ -23,7 +23,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Leg",
+                  "bone": 0,
                   "weight": 0.40951
                 }
               ]
@@ -35,7 +35,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Leg",
+                  "bone": 0,
                   "weight": 1.0
                 }
               ]
@@ -47,7 +47,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Leg",
+                  "bone": 0,
                   "weight": 1.0
                 }
               ]
@@ -131,19 +131,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 0.49152195
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 0.47334996
                 }
               ]
@@ -163,19 +163,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 0.4118235
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ]
@@ -195,19 +195,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ]
@@ -227,19 +227,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ]

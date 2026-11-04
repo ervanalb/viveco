@@ -47,9 +47,8 @@ use bevy_vello::vello::{
 use crate::animate::{curve_groups, effective_handle_in, effective_handle_out, selected_animation};
 use crate::animate_panel::{DurationEdit, SpeedEdit};
 use crate::editor::{EditorMode, EditorState};
-use crate::rig::bone_name_at;
 use crate::theme;
-use viveco::model::{Animation, Keyframe, KeyframeTarget};
+use viveco::model::{Animation, BoneIndex, Keyframe, KeyframeTarget};
 
 /// Amount one wheel notch multiplies the zoom by.
 const ZOOM_STEP: f32 = 1.1;
@@ -388,7 +387,7 @@ impl TimelineView {
 
     /// Frames the animation's duration and values with a small margin,
     /// optionally limiting the value range to one bone's curves.
-    fn fit(&mut self, animation: &Animation, size: Vec2, bone: Option<&str>) {
+    fn fit(&mut self, animation: &Animation, size: Vec2, bone: Option<BoneIndex>) {
         if size.x <= 0.0 || size.y <= 0.0 {
             return;
         }
@@ -414,7 +413,7 @@ impl TimelineView {
     }
 
     /// Frames only the value axis, leaving the time axis untouched.
-    fn fit_value(&mut self, animation: &Animation, size: Vec2, bone: Option<&str>) {
+    fn fit_value(&mut self, animation: &Animation, size: Vec2, bone: Option<BoneIndex>) {
         if size.y <= 0.0 {
             return;
         }
@@ -481,32 +480,30 @@ struct FitKey {
 #[derive(Clone, PartialEq)]
 struct ValueFitKey {
     /// The focused bone, if any.
-    bone: Option<String>,
+    bone: Option<BoneIndex>,
     /// Number of keyframes whose values the fit covers.
     keyframes: usize,
 }
 
-/// The name of the selected bone, when it still resolves to a named bone.
+/// The index of the selected bone, when it still resolves.
 ///
 /// The timeline focuses on this bone's curves, dimming the rest.
-fn selected_bone_name(editor: &EditorState) -> Option<&str> {
+fn selected_bone_index(editor: &EditorState) -> Option<BoneIndex> {
     editor
         .selected_bone
-        .as_ref()
-        .and_then(|address| bone_name_at(&editor.document, address))
-        .filter(|name| !name.is_empty())
+        .filter(|&index| editor.document.bone_by_index(index).is_some())
 }
 
 /// The bone a keyframe drives, if it drives a bone at all.
-fn keyframe_bone(keyframe: &Keyframe) -> Option<&str> {
+fn keyframe_bone(keyframe: &Keyframe) -> Option<BoneIndex> {
     match &keyframe.target {
-        KeyframeTarget::Bone { bone, .. } => Some(bone),
+        KeyframeTarget::Bone { bone, .. } => Some(*bone),
         KeyframeTarget::Shape { .. } => None,
     }
 }
 
 /// Whether a grouped curve drives `bone`.
-fn group_is_bone(group: &[&Keyframe], bone: &str) -> bool {
+fn group_is_bone(group: &[&Keyframe], bone: BoneIndex) -> bool {
     group
         .first()
         .is_some_and(|keyframe| keyframe_bone(keyframe) == Some(bone))
@@ -554,7 +551,7 @@ fn fit_timeline(
         view.fitted_values = None;
         return;
     };
-    let bone = selected_bone_name(&editor).map(str::to_owned);
+    let bone = selected_bone_index(&editor);
     let key = FitKey {
         selected: editor.selected_animation,
         duration: animation.duration,
@@ -564,7 +561,7 @@ fn fit_timeline(
         scale: node.inverse_scale_factor,
     };
     let values = ValueFitKey {
-        keyframes: match bone.as_deref() {
+        keyframes: match bone {
             Some(bone) => animation
                 .keyframes
                 .iter()
@@ -572,17 +569,17 @@ fn fit_timeline(
                 .count(),
             None => animation.keyframes.len(),
         },
-        bone: bone.clone(),
+        bone,
     };
 
     // Re-framing both axes when the animation or view changes; otherwise only
     // the values are refitted, so selecting a bone never rescales time.
     if view.fitted.as_ref() != Some(&key) {
-        view.fit(animation, area, bone.as_deref());
+        view.fit(animation, area, bone);
         view.fitted = Some(key);
         view.fitted_values = Some(values);
     } else if view.fitted_values.as_ref() != Some(&values) {
-        view.fit_value(animation, area, bone.as_deref());
+        view.fit_value(animation, area, bone);
         view.fitted_values = Some(values);
     }
 }
@@ -1563,7 +1560,7 @@ fn draw_timeline(
             size,
             editor.playhead,
             &edit,
-            selected_bone_name(&editor),
+            selected_bone_index(&editor),
         );
     }
     *component = UiVelloScene::from(scene);
@@ -1577,7 +1574,7 @@ fn draw_frame(
     size: Vec2,
     playhead: f32,
     edit: &TimelineEdit,
-    focus: Option<&str>,
+    focus: Option<BoneIndex>,
 ) {
     // The panel and track backgrounds live in the scene because Bevy UI is
     // composited over Vello UI scenes.
@@ -2139,7 +2136,7 @@ fn draw_handle(
 
 /// Lowest and highest value reached by the keyframes and their handles,
 /// optionally limited to one bone's curves.
-fn value_bounds(animation: &Animation, bone: Option<&str>) -> (f32, f32) {
+fn value_bounds(animation: &Animation, bone: Option<BoneIndex>) -> (f32, f32) {
     let mut low = f32::INFINITY;
     let mut high = f32::NEG_INFINITY;
     for keyframe in &animation.keyframes {
@@ -2168,21 +2165,14 @@ mod tests {
     use super::*;
     use viveco::model::{BoneProperty, Document, FORMAT_VERSION, Keyframe, KeyframeTarget};
 
-    fn target(bone: &str, property: BoneProperty) -> KeyframeTarget {
-        KeyframeTarget::Bone {
-            bone: bone.into(),
-            property,
-        }
+    fn target(bone: BoneIndex, property: BoneProperty) -> KeyframeTarget {
+        KeyframeTarget::Bone { bone, property }
     }
 
     fn animation_with(timestamps: &[f32], values: &[f32], duration: f32) -> Animation {
         let mut animation = Animation::new(duration);
         for (&timestamp, &value) in timestamps.iter().zip(values) {
-            animation.insert_keyframe(Keyframe::new(
-                timestamp,
-                value,
-                target("Arm", BoneProperty::X),
-            ));
+            animation.insert_keyframe(Keyframe::new(timestamp, value, target(0, BoneProperty::X)));
         }
         animation
     }
@@ -2195,10 +2185,10 @@ mod tests {
 
     fn two_bone_animation() -> Animation {
         let mut animation = Animation::new(4.0);
-        animation.insert_keyframe(Keyframe::new(0.0, 0.0, target("Arm", BoneProperty::X)));
-        animation.insert_keyframe(Keyframe::new(4.0, 100.0, target("Arm", BoneProperty::X)));
-        animation.insert_keyframe(Keyframe::new(0.0, -500.0, target("Leg", BoneProperty::Y)));
-        animation.insert_keyframe(Keyframe::new(4.0, 500.0, target("Leg", BoneProperty::Y)));
+        animation.insert_keyframe(Keyframe::new(0.0, 0.0, target(0, BoneProperty::X)));
+        animation.insert_keyframe(Keyframe::new(4.0, 100.0, target(0, BoneProperty::X)));
+        animation.insert_keyframe(Keyframe::new(0.0, -500.0, target(1, BoneProperty::Y)));
+        animation.insert_keyframe(Keyframe::new(4.0, 500.0, target(1, BoneProperty::Y)));
         animation
     }
 
@@ -2207,9 +2197,9 @@ mod tests {
         let animation = two_bone_animation();
 
         assert_eq!(value_bounds(&animation, None), (-500.0, 500.0));
-        assert_eq!(value_bounds(&animation, Some("Arm")), (0.0, 100.0));
+        assert_eq!(value_bounds(&animation, Some(0)), (0.0, 100.0));
         // A bone with no curves has no range to frame.
-        assert_eq!(value_bounds(&animation, Some("Tail")), (-1.0, 1.0));
+        assert_eq!(value_bounds(&animation, Some(2)), (-1.0, 1.0));
     }
 
     #[test]
@@ -2221,7 +2211,7 @@ mod tests {
         let time_per_pixel = view.time_per_pixel;
         let whole = view.value_per_pixel;
 
-        view.fit_value(&animation, size, Some("Arm"));
+        view.fit_value(&animation, size, Some(0));
 
         // The time axis is untouched, while the values frame Arm's range.
         assert_eq!(view.time0, time0);
@@ -2236,11 +2226,11 @@ mod tests {
         let animation = two_bone_animation();
         let groups = curve_groups(&animation);
 
-        assert!(group_is_bone(&groups[0], "Arm"));
-        assert!(!group_is_bone(&groups[0], "Leg"));
-        assert!(!group_is_bone(&groups[1], "Arm"));
-        assert!(group_is_bone(&groups[1], "Leg"));
-        assert!(!group_is_bone(&[], "Arm"));
+        assert!(group_is_bone(&groups[0], 0));
+        assert!(!group_is_bone(&groups[0], 1));
+        assert!(!group_is_bone(&groups[1], 0));
+        assert!(group_is_bone(&groups[1], 1));
+        assert!(!group_is_bone(&[], 0));
     }
 
     #[test]
@@ -2338,8 +2328,8 @@ mod tests {
     #[test]
     fn curve_groups_split_by_target() {
         let mut animation = Animation::new(4.0);
-        let x = target("Arm", BoneProperty::X);
-        let angle = target("Arm", BoneProperty::Angle);
+        let x = target(0, BoneProperty::X);
+        let angle = target(0, BoneProperty::Angle);
         animation.insert_keyframe(Keyframe::new(0.0, 0.0, x.clone()));
         animation.insert_keyframe(Keyframe::new(1.0, 1.0, angle.clone()));
         animation.insert_keyframe(Keyframe::new(2.0, 2.0, x));
@@ -2547,8 +2537,8 @@ mod tests {
     #[test]
     fn different_curves_may_share_a_time() {
         let mut animation = Animation::new(10.0);
-        animation.insert_keyframe(Keyframe::new(1.0, 0.0, target("Arm", BoneProperty::X)));
-        animation.insert_keyframe(Keyframe::new(2.0, 0.0, target("Arm", BoneProperty::Y)));
+        animation.insert_keyframe(Keyframe::new(1.0, 0.0, target(0, BoneProperty::X)));
+        animation.insert_keyframe(Keyframe::new(2.0, 0.0, target(0, BoneProperty::Y)));
 
         // The Arm X keyframe may slide onto the Arm Y keyframe's time.
         let (keyframes, _) =
@@ -2658,7 +2648,7 @@ mod tests {
 
     #[test]
     fn value_drags_carry_handles_along() {
-        let mut keyframe = Keyframe::new(1.0, 10.0, target("Arm", BoneProperty::X));
+        let mut keyframe = Keyframe::new(1.0, 10.0, target(0, BoneProperty::X));
         keyframe.handle_in = Some(8.0);
         keyframe.handle_out = Some(12.0);
 
@@ -2673,7 +2663,7 @@ mod tests {
 
     #[test]
     fn value_drags_leave_omitted_handles_omitted() {
-        let mut keyframe = Keyframe::new(1.0, 10.0, target("Arm", BoneProperty::X));
+        let mut keyframe = Keyframe::new(1.0, 10.0, target(0, BoneProperty::X));
 
         move_keyframe_value(&mut keyframe, 10.0, None, None, -2.0);
 
@@ -2685,10 +2675,10 @@ mod tests {
     #[test]
     fn aligning_merges_same_curve_keyframes_at_the_target_time() {
         let mut animation = Animation::new(4.0);
-        let x = target("Arm", BoneProperty::X);
+        let x = target(0, BoneProperty::X);
         animation.insert_keyframe(Keyframe::new(1.0, 0.0, x.clone()));
         animation.insert_keyframe(Keyframe::new(1.4, 1.0, x.clone()));
-        animation.insert_keyframe(Keyframe::new(2.5, 2.0, target("Arm", BoneProperty::Y)));
+        animation.insert_keyframe(Keyframe::new(2.5, 2.0, target(0, BoneProperty::Y)));
         animation.insert_keyframe(Keyframe::new(3.5, 3.0, x.clone()));
 
         // Align the two Arm X points and the Arm Y point to t = 1, anchored on
@@ -2716,8 +2706,8 @@ mod tests {
     #[test]
     fn alignment_keeps_the_keyframe_nearest_the_target_on_other_curves() {
         let mut animation = Animation::new(6.0);
-        let x = target("Arm", BoneProperty::X);
-        let y = target("Arm", BoneProperty::Y);
+        let x = target(0, BoneProperty::X);
+        let y = target(0, BoneProperty::Y);
         animation.insert_keyframe(Keyframe::new(0.0, 0.0, x.clone()));
         animation.insert_keyframe(Keyframe::new(1.2, 1.0, y.clone()));
         animation.insert_keyframe(Keyframe::new(2.6, 2.0, y.clone()));

@@ -1,6 +1,6 @@
 {
   "type": "viveco",
-  "version": 4,
+  "version": 5,
   "shapes": [
     {
       "name": "Legs",
@@ -27,7 +27,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Leg L",
+                  "bone": 4,
                   "weight": 1.0
                 }
               ]
@@ -35,7 +35,7 @@
           ],
           "start_weights": [
             {
-              "bone": "Leg L",
+              "bone": 4,
               "weight": 1.0
             }
           ]
@@ -55,7 +55,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Leg R",
+                  "bone": 5,
                   "weight": 1.0
                 }
               ]
@@ -63,7 +63,7 @@
           ],
           "start_weights": [
             {
-              "bone": "Leg R",
+              "bone": 5,
               "weight": 1.0
             }
           ]
@@ -95,7 +95,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Arm L",
+                  "bone": 2,
                   "weight": 1.0
                 }
               ]
@@ -103,7 +103,7 @@
           ],
           "start_weights": [
             {
-              "bone": "Arm L",
+              "bone": 2,
               "weight": 1.0
             }
           ]
@@ -123,7 +123,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Arm R",
+                  "bone": 3,
                   "weight": 1.0
                 }
               ]
@@ -131,7 +131,7 @@
           ],
           "start_weights": [
             {
-              "bone": "Arm R",
+              "bone": 3,
               "weight": 1.0
             }
           ]
@@ -159,7 +159,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 1.0
                 }
               ]
@@ -171,7 +171,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 1.0
                 }
               ]
@@ -183,7 +183,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 1.0
                 }
               ]
@@ -195,7 +195,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 1.0
                 }
               ]
@@ -207,7 +207,7 @@
               ],
               "to_weights": [
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 1.0
                 }
               ]
@@ -241,19 +241,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ]
@@ -273,19 +273,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ]
@@ -305,19 +305,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ]
@@ -337,19 +337,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 1,
                   "weight": 1.0
                 }
               ]
@@ -440,7 +440,7 @@
           "value": -0.6,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           },
           "handle_in": -0.6,
@@ -451,7 +451,7 @@
           "value": 0.7,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           },
           "handle_in": 0.3,
@@ -462,7 +462,7 @@
           "value": -0.6,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           },
           "handle_in": -0.6,
@@ -473,7 +473,7 @@
           "value": 0.7,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           },
           "handle_in": 0.3,
@@ -484,7 +484,7 @@
           "value": 0.7,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           },
           "handle_in": 0.3,
@@ -495,7 +495,7 @@
           "value": -0.6,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           },
           "handle_in": -0.6,
@@ -506,7 +506,7 @@
           "value": 0.7,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           },
           "handle_in": 0.3,
@@ -517,7 +517,7 @@
           "value": -0.6,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           },
           "handle_in": -0.6,
@@ -528,7 +528,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -537,7 +537,7 @@
           "value": 0.09,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -546,7 +546,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -555,7 +555,7 @@
           "value": -0.09,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         }
@@ -571,7 +571,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -580,7 +580,7 @@
           "value": -25.0,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -589,7 +589,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -598,7 +598,7 @@
           "value": 12.0,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -607,7 +607,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -616,7 +616,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -625,7 +625,7 @@
           "value": -18.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -634,7 +634,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -643,7 +643,7 @@
           "value": 8.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -652,7 +652,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -661,7 +661,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -670,7 +670,7 @@
           "value": -0.5,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -679,7 +679,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -688,7 +688,7 @@
           "value": 0.4,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -697,7 +697,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Arm L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -706,7 +706,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -715,7 +715,7 @@
           "value": 0.5,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -724,7 +724,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -733,7 +733,7 @@
           "value": -0.4,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -742,7 +742,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Arm R",
+            "bone": 3,
             "property": "angle"
           }
         }
@@ -758,7 +758,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -767,7 +767,7 @@
           "value": 0.35,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -776,7 +776,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -785,7 +785,7 @@
           "value": -0.25,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -794,7 +794,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -803,7 +803,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -812,7 +812,7 @@
           "value": 8.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -821,7 +821,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -830,7 +830,7 @@
           "value": -6.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -839,7 +839,7 @@
           "value": 0.0,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 1,
             "property": "y"
           }
         }

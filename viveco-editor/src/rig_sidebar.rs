@@ -15,15 +15,15 @@ use bevy::prelude::*;
 
 use crate::editor::{CanvasInput, EditorMode, EditorState};
 use crate::rig::{
-    BoneAddress, address_is_inside, begin_bone_rename, bone_name_at, cancel_bone_rename,
-    commit_bone_rename, move_bone_into, move_bone_near,
+    begin_bone_rename, bone_name_at, cancel_bone_rename, commit_bone_rename, is_ancestor_or_self,
+    move_bone_into, move_bone_near,
 };
 use crate::tree::{
     DropKind, TreeDrag, TreeModel, TreeNode, deselect_on_empty_press, finish_drag,
     handle_row_press, label, paint_rows, rebuild_tree, spawn_panel, sync_row_labels,
     sync_visibility, update_drag_hover,
 };
-use viveco::model::{Bone, Document};
+use viveco::model::{Bone, BoneIndex, Document};
 
 pub struct RigSidebarPlugin;
 
@@ -31,19 +31,19 @@ impl Plugin for RigSidebarPlugin {
     fn build(&self, app: &mut App) {
         // Rename input is registered by `RigPlugin`, after bone input, so that
         // the keyboard still behaves as the bone editor expects.
-        app.init_resource::<TreeDrag<BoneAddress>>()
-            .add_systems(Startup, spawn_panel::<BoneAddress>)
+        app.init_resource::<TreeDrag<BoneIndex>>()
+            .add_systems(Startup, spawn_panel::<BoneIndex>)
             .add_systems(
                 Update,
                 (
-                    handle_row_press::<BoneAddress>,
-                    deselect_on_empty_press::<BoneAddress>,
-                    update_drag_hover::<BoneAddress>,
-                    finish_drag::<BoneAddress>,
-                    rebuild_tree::<BoneAddress>,
-                    sync_row_labels::<BoneAddress>,
-                    paint_rows::<BoneAddress>,
-                    sync_visibility::<BoneAddress>,
+                    handle_row_press::<BoneIndex>,
+                    deselect_on_empty_press::<BoneIndex>,
+                    update_drag_hover::<BoneIndex>,
+                    finish_drag::<BoneIndex>,
+                    rebuild_tree::<BoneIndex>,
+                    sync_row_labels::<BoneIndex>,
+                    paint_rows::<BoneIndex>,
+                    sync_visibility::<BoneIndex>,
                 )
                     .chain()
                     .after(CanvasInput),
@@ -51,7 +51,7 @@ impl Plugin for RigSidebarPlugin {
     }
 }
 
-impl TreeModel for BoneAddress {
+impl TreeModel for BoneIndex {
     fn heading() -> &'static str {
         "Skeleton"
     }
@@ -61,11 +61,12 @@ impl TreeModel for BoneAddress {
     }
 
     fn layout(document: &Document) -> Vec<TreeNode<Self>> {
-        bone_nodes(&document.bones, &[])
+        let mut cursor = 0;
+        bone_nodes(&document.bones, &mut cursor)
     }
 
     fn name(document: &Document, address: &Self) -> String {
-        let name = bone_name_at(document, address).unwrap_or_default();
+        let name = bone_name_at(document, *address).unwrap_or_default();
         label(name, "Bone")
     }
 
@@ -86,7 +87,7 @@ impl TreeModel for BoneAddress {
     }
 
     fn rename_target(editor: &EditorState) -> Option<&Self> {
-        editor.bone_renaming.as_ref().map(|rename| &rename.address)
+        editor.bone_renaming.as_ref().map(|rename| &rename.index)
     }
 
     fn rename_buffer(editor: &EditorState) -> Option<&str> {
@@ -113,9 +114,14 @@ impl TreeModel for BoneAddress {
 
     /// Any bone can be moved next to or inside another bone, as long as it is
     /// not dropped on itself or into its own subtree.
-    fn resolve_drop(source: &Self, target: &Self, kind: DropKind) -> Option<(Self, DropKind)> {
-        let allowed = !address_is_inside(source, target);
-        (allowed && source != target).then(|| (target.clone(), kind))
+    fn resolve_drop(
+        document: &Document,
+        source: &Self,
+        target: &Self,
+        kind: DropKind,
+    ) -> Option<(Self, DropKind)> {
+        let allowed = !is_ancestor_or_self(document, *source, *target);
+        (allowed && source != target).then_some((*target, kind))
     }
 
     fn drop_move(
@@ -125,28 +131,26 @@ impl TreeModel for BoneAddress {
         kind: DropKind,
     ) -> Option<Self> {
         match kind {
-            DropKind::Before => move_bone_near(document, source, target, false),
-            DropKind::After => move_bone_near(document, source, target, true),
-            DropKind::Into => move_bone_into(document, source, target),
+            DropKind::Before => move_bone_near(document, *source, *target, false),
+            DropKind::After => move_bone_near(document, *source, *target, true),
+            DropKind::Into => move_bone_into(document, *source, *target),
         }
     }
 }
 
-/// Builds the render layout for a sibling list of bones.
-fn bone_nodes(bones: &[Bone], parents: &[usize]) -> Vec<TreeNode<BoneAddress>> {
+/// Builds the render layout for a sibling list of bones, numbering them in
+/// pre-order so each address is the bone's flat index.
+fn bone_nodes(bones: &[Bone], cursor: &mut BoneIndex) -> Vec<TreeNode<BoneIndex>> {
     bones
         .iter()
-        .enumerate()
-        .map(|(index, bone)| {
-            let mut chain = parents.to_vec();
-            chain.push(index);
+        .map(|bone| {
+            let index = *cursor;
+            *cursor += 1;
             TreeNode {
-                address: BoneAddress {
-                    bones: chain.clone(),
-                },
+                address: index,
                 label: bone_label(bone),
                 leaves: Vec::new(),
-                children: bone_nodes(&bone.children, &chain),
+                children: bone_nodes(&bone.children, cursor),
             }
         })
         .collect()
@@ -184,20 +188,16 @@ mod tests {
         bones.iter().map(|bone| bone.name.clone()).collect()
     }
 
-    fn address(chain: &[usize]) -> BoneAddress {
-        BoneAddress {
-            bones: chain.to_vec(),
-        }
-    }
-
     /// Applies a drop the way [`finish_drag`] does.
     fn apply_drop(
         editor: &mut EditorState,
-        source: &BoneAddress,
-        target: &BoneAddress,
+        source: &BoneIndex,
+        target: &BoneIndex,
         kind: DropKind,
     ) {
-        if let Some(address) = BoneAddress::drop_move(&mut editor.document, source, target, kind) {
+        if let Some(address) =
+            <BoneIndex as TreeModel>::drop_move(&mut editor.document, source, target, kind)
+        {
             editor.select_bone(Some(address));
             editor.structure_revision += 1;
         }
@@ -207,27 +207,28 @@ mod tests {
     fn an_after_slot_reorders_siblings() {
         let mut editor = state(vec![named("A"), named("B"), named("C")]);
 
-        apply_drop(&mut editor, &address(&[0]), &address(&[2]), DropKind::After);
+        apply_drop(&mut editor, &0, &2, DropKind::After);
 
         assert_eq!(names(&editor.document.bones), ["B", "C", "A"]);
-        assert_eq!(editor.selected_bone, Some(address(&[2])));
+        assert_eq!(editor.selected_bone, Some(2));
     }
 
     #[test]
     fn dropping_on_a_row_parents_the_bone() {
         let mut editor = state(vec![named("Parent"), named("Child")]);
 
-        apply_drop(&mut editor, &address(&[1]), &address(&[0]), DropKind::Into);
+        apply_drop(&mut editor, &1, &0, DropKind::Into);
 
         assert_eq!(names(&editor.document.bones), ["Parent"]);
         assert_eq!(names(&editor.document.bones[0].children), ["Child"]);
-        assert_eq!(editor.selected_bone, Some(address(&[0, 0])));
+        // The child is now the second bone in pre-order.
+        assert_eq!(editor.selected_bone, Some(1));
     }
 
     #[test]
     fn a_bone_cannot_be_dropped_into_itself() {
         let mut editor = state(vec![named("Parent")]);
-        apply_drop(&mut editor, &address(&[0]), &address(&[0]), DropKind::Into);
+        apply_drop(&mut editor, &0, &0, DropKind::Into);
         assert_eq!(editor.document.bones.len(), 1);
     }
 }

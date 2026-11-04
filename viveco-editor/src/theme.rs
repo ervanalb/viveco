@@ -7,6 +7,8 @@
 use bevy::prelude::Color;
 use bevy_vello::prelude::vello::peniko::Color as InkColor;
 
+use viveco::model::BoneIndex;
+
 /// Translucent background used by every floating panel.
 pub const PANEL_BG: Color = Color::srgba_u8(0x12, 0x15, 0x1c, 0xf2);
 
@@ -68,11 +70,11 @@ const CURVE_COLORS: [InkColor; 10] = [
 
 /// The color of the curves that animate `bone`.
 ///
-/// The color comes from the bone's name rather than its position among the
+/// The color comes from the bone's index rather than its position among the
 /// animation's curves, so it stays the same when curves are added, removed, or
 /// reordered, and a bone has the same color in every animation.
-pub fn curve_color(bone: &str) -> InkColor {
-    CURVE_COLORS[name_hash(bone) % CURVE_COLORS.len()]
+pub fn curve_color(bone: BoneIndex) -> InkColor {
+    CURVE_COLORS[bone % CURVE_COLORS.len()]
 }
 
 /// The palette entry for a curve at `index`, used for targets that name no
@@ -91,20 +93,10 @@ pub fn muted(color: InkColor) -> InkColor {
 }
 
 /// The fill and stroke colors of `bone` in the skeleton overlay.
-pub fn bone_overlay_colors(bone: &str) -> (InkColor, InkColor) {
+pub fn bone_overlay_colors(bone: BoneIndex) -> (InkColor, InkColor) {
     let rgba = muted(curve_color(bone)).to_rgba8();
     (
         InkColor::from_rgba8(rgba.r, rgba.g, rgba.b, 0xcc),
         InkColor::from_rgba8(rgba.r, rgba.g, rgba.b, 0xff),
     )
-}
-
-/// FNV-1a, so a name always maps to the same palette entry.
-fn name_hash(name: &str) -> usize {
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in name.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash as usize
 }

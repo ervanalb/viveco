@@ -5,7 +5,7 @@
 //! into per-target curves, samples a [`Pose`] at a point in time, writes
 //! keyframes, and advances a playhead during playback.
 
-use crate::model::{Animation, BoneProperty, Document, Keyframe, KeyframeTarget};
+use crate::model::{Animation, BoneIndex, BoneProperty, Document, Keyframe, KeyframeTarget};
 use crate::pose::Pose;
 
 /// Keyframes grouped by animated target, preserving timestamp order.
@@ -31,7 +31,7 @@ pub fn curve_groups(animation: &Animation) -> Vec<Vec<&Keyframe>> {
 /// duration, so a sample near either end can interpolate across the seam using
 /// the keyframe at the other end.
 pub fn sample_pose(document: &Document, animation: &Animation, time: f32) -> Pose {
-    let mut pose = Pose::default();
+    let mut pose = Pose::new(document.bone_count());
     let heads = crate::pose::rest_heads(document);
     let time = clamped_time(animation, time);
 
@@ -45,6 +45,7 @@ pub fn sample_pose(document: &Document, animation: &Animation, time: f32) -> Pos
         let KeyframeTarget::Bone { bone, property } = &first.target else {
             continue;
         };
+        let bone = *bone;
         let mut bone_pose = pose.get(bone);
         if let Some(head) = heads.get(bone) {
             bone_pose.pivot = *head;
@@ -55,7 +56,7 @@ pub fn sample_pose(document: &Document, animation: &Animation, time: f32) -> Pos
             BoneProperty::Angle => bone_pose.rotation = value,
             BoneProperty::Scale => bone_pose.scale = value,
         }
-        pose.set(bone.clone(), bone_pose);
+        pose.set(bone, bone_pose);
     }
     pose
 }
@@ -68,16 +69,13 @@ pub fn sample_pose(document: &Document, animation: &Animation, time: f32) -> Pos
 /// than stacks keyframes.
 pub fn set_bone_keyframe(
     animation: &mut Animation,
-    bone: &str,
+    bone: BoneIndex,
     property: BoneProperty,
     time: f32,
     value: f32,
 ) {
     let time = clamped_time(animation, time);
-    let target = KeyframeTarget::Bone {
-        bone: bone.into(),
-        property,
-    };
+    let target = KeyframeTarget::Bone { bone, property };
     if let Some(existing) = animation
         .keyframes
         .iter_mut()
@@ -311,7 +309,7 @@ mod tests {
             timestamp,
             value,
             KeyframeTarget::Bone {
-                bone: "Arm".into(),
+                bone: 0,
                 property: BoneProperty::X,
             },
         )
@@ -402,15 +400,12 @@ mod tests {
             animation.insert_keyframe(Keyframe::new(
                 0.0,
                 value,
-                KeyframeTarget::Bone {
-                    bone: "Arm".into(),
-                    property,
-                },
+                KeyframeTarget::Bone { bone: 0, property },
             ));
         }
 
         let pose = sample_pose(&document, &animation, 0.5);
-        let arm = pose.get("Arm");
+        let arm = pose.get(0);
 
         assert_eq!(arm.translation, [3.0, -4.0]);
         assert_eq!(arm.rotation, 0.5);
@@ -423,22 +418,22 @@ mod tests {
     fn setting_a_bone_keyframe_inserts_or_replaces() {
         let mut animation = Animation::new(4.0);
 
-        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Angle, 1.0, 0.5);
+        set_bone_keyframe(&mut animation, 0, BoneProperty::Angle, 1.0, 0.5);
         assert_eq!(animation.keyframes.len(), 1);
         assert_eq!(animation.keyframes[0].timestamp, 1.0);
         assert_eq!(animation.keyframes[0].value, 0.5);
 
         // The same target at the same time updates in place, keeping handles.
         animation.keyframes[0].handle_out = Some(0.9);
-        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Angle, 1.0, 0.75);
+        set_bone_keyframe(&mut animation, 0, BoneProperty::Angle, 1.0, 0.75);
         assert_eq!(animation.keyframes.len(), 1);
         assert_eq!(animation.keyframes[0].value, 0.75);
         assert_eq!(animation.keyframes[0].handle_out, Some(0.9));
 
         // A different bone, property, or time is its own keyframe.
-        set_bone_keyframe(&mut animation, "Leg", BoneProperty::Angle, 1.0, 0.1);
-        set_bone_keyframe(&mut animation, "Arm", BoneProperty::X, 1.0, 2.0);
-        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Angle, 2.0, 0.2);
+        set_bone_keyframe(&mut animation, 1, BoneProperty::Angle, 1.0, 0.1);
+        set_bone_keyframe(&mut animation, 0, BoneProperty::X, 1.0, 2.0);
+        set_bone_keyframe(&mut animation, 0, BoneProperty::Angle, 2.0, 0.2);
         assert_eq!(animation.keyframes.len(), 4);
     }
 
@@ -446,7 +441,7 @@ mod tests {
     fn setting_a_bone_keyframe_clamps_to_the_duration() {
         let mut animation = Animation::new(2.0);
 
-        set_bone_keyframe(&mut animation, "Arm", BoneProperty::Scale, 9.0, 3.0);
+        set_bone_keyframe(&mut animation, 0, BoneProperty::Scale, 9.0, 3.0);
 
         assert_eq!(animation.keyframes.len(), 1);
         assert_eq!(animation.keyframes[0].timestamp, 2.0);
@@ -506,7 +501,7 @@ mod tests {
 
         let pose = sample_pose(&document, &animation, 1.0);
 
-        assert_eq!(pose.get("Arm").translation, [5.0, 0.0]);
-        assert!(pose.get("Leg").is_identity());
+        assert_eq!(pose.get(0).translation, [5.0, 0.0]);
+        assert!(pose.get(1).is_identity());
     }
 }

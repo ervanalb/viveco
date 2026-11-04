@@ -1,31 +1,21 @@
-//! Skeleton tree addressing and bone manipulation.
+//! Skeleton tree editing and bone manipulation.
 //!
-//! A [`BoneAddress`] names a bone by the chain of child indices leading to it.
-//! Bones form a tree of absolute start/end points; moving a bone rewrites the
-//! points of its whole subtree, so the hierarchy stays rigid.
+//! Bones are addressed by their flat pre-order [`BoneIndex`], the same index
+//! that weights and animation keyframes store. Bones form a tree of absolute
+//! start/end points; moving a bone rewrites the points of its whole subtree, so
+//! the hierarchy stays rigid.
+//!
+//! Because add, remove, and reorder shift the flat indices of later bones, those
+//! operations rewrite the document's weights and animation targets with the
+//! remap helpers from [`crate::model`]. Anything else that keeps bone-indexed
+//! data alongside a document (such as a [`Pose`]) must apply the same remap.
 //!
 //! These operations only touch the document object model. Transient poses come
 //! from [`crate::pose`], and interactive editing gesture state belongs to the
 //! application using this crate.
 
-use crate::model::{Bone, Document, Point};
+use crate::model::{Bone, BoneIndex, Document, Point, insertion_map, move_map, removal_map};
 use crate::pose::{Pose, Similarity};
-
-/// A node in the skeleton tree, addressed by a chain of bone indices.
-///
-/// `[i]` addresses `document.bones[i]`, `[i, j]` addresses its `children[j]`,
-/// and so on.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoneAddress {
-    pub bones: Vec<usize>,
-}
-
-impl BoneAddress {
-    /// The chain of indices leading to this bone.
-    pub fn chain(&self) -> &[usize] {
-        &self.bones
-    }
-}
 
 /// One of a bone's two draggable endpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,125 +30,108 @@ pub enum BoneEnd {
 // Tree addressing
 // ---------------------------------------------------------------------------
 
-fn bones_at<'a>(mut bones: &'a [Bone], indices: &[usize]) -> Option<&'a [Bone]> {
-    for &index in indices {
-        bones = &bones.get(index)?.children;
-    }
-    Some(bones)
-}
-
-/// The mutable list containing the bones at the end of `parents`.
-fn bone_list_at_mut<'a>(
-    document: &'a mut Document,
-    parents: &[usize],
-) -> Option<&'a mut Vec<Bone>> {
-    let mut bones = &mut document.bones;
-    for &index in parents {
-        bones = &mut bones.get_mut(index)?.children;
-    }
-    Some(bones)
-}
-
-/// Resolves a chain of bone indices to the bone it names.
-pub fn bone_at<'a>(document: &'a Document, address: &BoneAddress) -> Option<&'a Bone> {
-    let (last, parents) = address.chain().split_last()?;
-    bones_at(&document.bones, parents)?.get(*last)
-}
-
-pub fn bone_at_mut<'a>(document: &'a mut Document, address: &BoneAddress) -> Option<&'a mut Bone> {
-    let (last, parents) = address.chain().split_last()?;
-    let mut bones = &mut document.bones;
-    for &index in parents {
-        bones = &mut bones.get_mut(index)?.children;
-    }
-    bones.get_mut(*last)
-}
-
-/// A bone's position in the tree: the chain of indices down to the bone.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BoneSlot {
-    chain: Vec<usize>,
-}
-
-impl BoneSlot {
-    fn parents(&self) -> &[usize] {
-        &self.chain[..self.chain.len() - 1]
+/// The parent and sibling position of the bone at `index`.
+///
+/// `None` when no bone has that index; a root bone yields `(None, position)`.
+fn locate(document: &Document, index: BoneIndex) -> Option<(Option<BoneIndex>, usize)> {
+    fn walk(
+        bones: &[Bone],
+        parent: Option<BoneIndex>,
+        cursor: &mut usize,
+        target: BoneIndex,
+    ) -> Option<(Option<BoneIndex>, usize)> {
+        for (position, bone) in bones.iter().enumerate() {
+            let current = *cursor;
+            *cursor += 1;
+            if current == target {
+                return Some((parent, position));
+            }
+            if let Some(found) = walk(&bone.children, Some(current), cursor, target) {
+                return Some(found);
+            }
+        }
+        None
     }
 
-    fn index(&self) -> usize {
-        *self.chain.last().expect("a bone slot is never empty")
-    }
+    let mut cursor = 0;
+    walk(&document.bones, None, &mut cursor, index)
 }
 
-fn bone_slot(document: &Document, address: &BoneAddress) -> Option<BoneSlot> {
-    let (last, parents) = address.chain().split_last()?;
-    let siblings = bones_at(&document.bones, parents)?;
-    if *last >= siblings.len() {
-        return None;
-    }
-    Some(BoneSlot {
-        chain: address.chain().to_vec(),
-    })
+/// The parent of the bone at `index`, or `None` for a root or missing bone.
+pub fn parent_of(document: &Document, index: BoneIndex) -> Option<BoneIndex> {
+    locate(document, index)?.0
 }
 
-fn shift_slot_after_removal(mut slot: BoneSlot, removed: &BoneSlot) -> BoneSlot {
-    let depth = removed.parents().len();
-    if slot.chain.len() > depth
-        && slot.chain[..depth] == removed.parents()[..]
-        && slot.chain[depth] > removed.index()
-    {
-        slot.chain[depth] -= 1;
-    }
-    slot
+/// Whether `ancestor` is `index` itself or one of its ancestors.
+///
+/// A bone's subtree occupies the flat indices
+/// `ancestor..ancestor + subtree_len`, so this is a range test.
+pub fn is_ancestor_or_self(document: &Document, ancestor: BoneIndex, index: BoneIndex) -> bool {
+    document
+        .bone_subtree_len(ancestor)
+        .is_some_and(|len| (ancestor..ancestor + len).contains(&index))
 }
 
-/// Whether `outer` names a bone that is `inner` itself or one of its
-/// ancestors.
-pub fn address_is_inside(outer: &BoneAddress, inner: &BoneAddress) -> bool {
-    let outer = outer.chain();
-    let inner = inner.chain();
-    inner.len() >= outer.len() && inner[..outer.len()] == outer[..]
-}
-
-fn take_bone(document: &mut Document, address: &BoneAddress) -> Option<Bone> {
-    let slot = bone_slot(document, address)?;
-    let siblings = bone_list_at_mut(document, slot.parents())?;
-    if slot.index() >= siblings.len() {
-        return None;
-    }
-    Some(siblings.remove(slot.index()))
+fn take_bone(document: &mut Document, index: BoneIndex) -> Option<Bone> {
+    let (parent, position) = locate(document, index)?;
+    let siblings = match parent {
+        Some(parent) => &mut document.bone_by_index_mut(parent)?.children,
+        None => &mut document.bones,
+    };
+    (position < siblings.len()).then(|| siblings.remove(position))
 }
 
 /// Removes a bone, materializing an omitted head so its absolute geometry is
 /// preserved once it is detached from its parent.
-fn take_bone_materialized(document: &mut Document, address: &BoneAddress) -> Option<Bone> {
-    let parent = parent_tail(document, address);
-    let mut bone = take_bone(document, address)?;
+fn take_bone_materialized(document: &mut Document, index: BoneIndex) -> Option<Bone> {
+    let parent = parent_tail(document, index);
+    let mut bone = take_bone(document, index)?;
     if bone.head.is_none() {
         bone.head = Some(bone.head_with_parent(parent));
     }
     Some(bone)
 }
 
-/// The tail of the bone's parent, which an omitted head follows.
-pub fn parent_tail(document: &Document, address: &BoneAddress) -> Option<Point> {
-    let (last, parents) = address.chain().split_last()?;
-    let mut bones = &document.bones;
-    let mut tail = None;
-    for &index in parents {
-        let bone = bones.get(index)?;
-        tail = Some(bone.tail);
-        bones = &bone.children;
+/// The flat index of the bone at `position` among the children of `parent`
+/// (`None` for the top level) in the document's current tree.
+///
+/// Used after an insertion to learn where the moved block landed, which is what
+/// [`move_map`] expects as its target.
+fn flat_index_at(
+    document: &Document,
+    parent: Option<BoneIndex>,
+    position: usize,
+) -> Option<BoneIndex> {
+    match parent {
+        None => {
+            document.bones.get(position)?;
+            Some(
+                document.bones[..position]
+                    .iter()
+                    .map(Bone::subtree_len)
+                    .sum(),
+            )
+        }
+        Some(parent) => {
+            let children = &document.bone_by_index(parent)?.children;
+            children.get(position)?;
+            let before: usize = children[..position].iter().map(Bone::subtree_len).sum();
+            Some(parent + 1 + before)
+        }
     }
-    bones.get(*last)?;
-    tail
+}
+
+/// The tail of the bone's parent, which an omitted head follows.
+pub fn parent_tail(document: &Document, index: BoneIndex) -> Option<Point> {
+    let parent = parent_of(document, index)?;
+    Some(document.bone_by_index(parent)?.tail)
 }
 
 /// The document-space positions of a bone's head and tail, resolving an
 /// omitted head to the parent's tail.
-pub fn bone_endpoints(document: &Document, address: &BoneAddress) -> Option<(Point, Point)> {
-    let bone = bone_at(document, address)?;
-    let head = bone.head_with_parent(parent_tail(document, address));
+pub fn bone_endpoints(document: &Document, index: BoneIndex) -> Option<(Point, Point)> {
+    let bone = document.bone_by_index(index)?;
+    let head = bone.head_with_parent(parent_tail(document, index));
     Some((head, bone.tail))
 }
 
@@ -166,31 +139,51 @@ pub fn bone_endpoints(document: &Document, address: &BoneAddress) -> Option<(Poi
 // Pose transforms
 // ---------------------------------------------------------------------------
 
-/// The world transform accumulated down the chain of bone indices `chain`
-/// under `pose`.
+/// The world transform of the bone at `target` under `pose`.
 ///
-/// Each bone contributes its local pose about its rest head, composed on top
-/// of its parent's world transform, so a child inherits everything above it.
-fn world_at(document: &Document, pose: &Pose, chain: &[usize]) -> Similarity {
-    let mut world = Similarity::IDENTITY;
-    let mut parent_tail = None;
-    let mut bones = &document.bones;
-    for &index in chain {
-        let Some(bone) = bones.get(index) else {
-            break;
-        };
-        let rest_head = bone.head_with_parent(parent_tail);
-        let local = pose.get(&bone.name).local(rest_head, bone.head.is_none());
-        world = Similarity::compose(world, local);
-        parent_tail = Some(bone.tail);
-        bones = &bone.children;
+/// Each bone contributes its local pose about its rest head, composed on top of
+/// its parent's world transform, so a child inherits everything above it.
+fn world_at(document: &Document, pose: &Pose, target: BoneIndex) -> Similarity {
+    fn walk(
+        bones: &[Bone],
+        parent_world: Similarity,
+        parent_tail: Option<Point>,
+        pose: &Pose,
+        cursor: &mut usize,
+        target: BoneIndex,
+    ) -> Option<Similarity> {
+        for bone in bones {
+            let index = *cursor;
+            *cursor += 1;
+            let rest_head = bone.head_with_parent(parent_tail);
+            let local = pose.get(index).local(rest_head, bone.head.is_none());
+            let world = Similarity::compose(parent_world, local);
+            if index == target {
+                return Some(world);
+            }
+            if let Some(found) = walk(&bone.children, world, Some(bone.tail), pose, cursor, target)
+            {
+                return Some(found);
+            }
+        }
+        None
     }
-    world
+
+    let mut cursor = 0;
+    walk(
+        &document.bones,
+        Similarity::IDENTITY,
+        None,
+        pose,
+        &mut cursor,
+        target,
+    )
+    .unwrap_or(Similarity::IDENTITY)
 }
 
 /// A bone's world transform under `pose`.
-pub fn bone_world(document: &Document, pose: &Pose, address: &BoneAddress) -> Similarity {
-    world_at(document, pose, address.chain())
+pub fn bone_world(document: &Document, pose: &Pose, index: BoneIndex) -> Similarity {
+    world_at(document, pose, index)
 }
 
 /// The world transform of a bone's parent under `pose`, or the identity for a
@@ -198,10 +191,10 @@ pub fn bone_world(document: &Document, pose: &Pose, address: &BoneAddress) -> Si
 ///
 /// Document edits move rest geometry within the parent's frame, so this is the
 /// transform that maps those rest-space changes into world space.
-pub fn parent_world(document: &Document, pose: &Pose, address: &BoneAddress) -> Similarity {
-    match address.chain().split_last() {
-        Some((_, parents)) if !parents.is_empty() => world_at(document, pose, parents),
-        _ => Similarity::IDENTITY,
+pub fn parent_world(document: &Document, pose: &Pose, index: BoneIndex) -> Similarity {
+    match parent_of(document, index) {
+        Some(parent) => world_at(document, pose, parent),
+        None => Similarity::IDENTITY,
     }
 }
 
@@ -236,16 +229,16 @@ fn omit_coincident_head(bone: &mut Bone, parent_tail: Option<Point>) {
 }
 
 /// Translates a bone's own endpoints. Connected children stay where they are.
-/// Returns `false` when the address is stale.
-pub fn translate_bone(document: &mut Document, address: &BoneAddress, delta: Point) -> bool {
+/// Returns `false` when the index is stale.
+pub fn translate_bone(document: &mut Document, index: BoneIndex, delta: Point) -> bool {
     // A press that has not moved yet must not detach anything: the initial
     // frame of a body drag has zero movement, and materializing connected
     // children's heads there would silently split every shared joint.
     if delta == [0.0, 0.0] {
-        return bone_at(document, address).is_some();
+        return document.bone_by_index(index).is_some();
     }
-    let parent = parent_tail(document, address);
-    let Some(bone) = bone_at_mut(document, address) else {
+    let parent = parent_tail(document, index);
+    let Some(bone) = document.bone_by_index_mut(index) else {
         return false;
     };
     // Detach a connected head so the bone keeps its shape as it moves instead
@@ -267,9 +260,6 @@ pub fn translate_bone(document: &mut Document, address: &BoneAddress, delta: Poi
 // ---------------------------------------------------------------------------
 
 /// A bone name not used anywhere in the rig, such as `Bone` or `Bone 2`.
-///
-/// Weight lists refer to bones by name, so names must stay unique across the
-/// whole skeleton, not just among siblings.
 pub fn unique_bone_name(document: &Document) -> String {
     fn collect(bones: &[Bone], used: &mut std::collections::HashSet<String>) {
         for bone in bones {
@@ -293,30 +283,38 @@ pub fn unique_bone_name(document: &Document) -> String {
     }
 }
 
-/// Adds a new top-level bone and returns its address.
+/// Adds a new top-level bone at the end of the rig and returns its index.
 pub fn add_bone(
     document: &mut Document,
     head: Point,
     tail: Point,
     name: impl Into<String>,
-) -> BoneAddress {
-    let index = document.bones.len();
+) -> BoneIndex {
+    let index = document.bone_count();
     let mut bone = Bone::from_endpoints(head, tail);
     bone.name = name.into();
     document.bones.push(bone);
-    BoneAddress { bones: vec![index] }
+    index
 }
 
-/// Adds a bone as the last child of `parent` and returns its address.
+/// Adds a bone as the last child of `parent` and returns its index.
+///
+/// The new bone lands inside the parent's subtree, so every later bone shifts
+/// up by one; this rewrites the document's weights and animation targets to
+/// match. A [`Pose`] kept alongside the document must be remapped with the same
+/// [`insertion_map`], whose insertion point is the position right after the
+/// parent's subtree.
 pub fn add_child_bone(
     document: &mut Document,
-    parent: &BoneAddress,
+    parent: BoneIndex,
     head: Point,
     tail: Point,
     name: impl Into<String>,
-) -> Option<BoneAddress> {
-    let parent_tail = bone_at_mut(document, parent)?.tail;
-    let index = bone_at_mut(document, parent)?.children.len();
+) -> Option<BoneIndex> {
+    let start = parent + document.bone_subtree_len(parent)?;
+    let count = document.bone_count();
+
+    let parent_tail = document.bone_by_index(parent)?.tail;
     let mut bone = Bone::from_endpoints(head, tail);
     // A bone that starts where its parent ends stays connected without
     // storing its own head.
@@ -324,70 +322,65 @@ pub fn add_child_bone(
         bone.head = None;
     }
     bone.name = name.into();
-    bone_at_mut(document, parent)?.children.push(bone);
-    let mut chain = parent.chain().to_vec();
-    chain.push(index);
-    Some(BoneAddress { bones: chain })
+    document.bone_by_index_mut(parent)?.children.push(bone);
+
+    document.apply_bone_map(&insertion_map(count, start, 1));
+    Some(start)
 }
 
-/// Removes the bone named by `address`, together with its children.
+/// Removes the bone at `index`, together with its children.
 ///
 /// Every removed bone is also dropped from the point weight lists, which are
-/// rescaled so each still totals what it did before.
-pub fn remove_bone(document: &mut Document, address: &BoneAddress) -> bool {
-    let Some(bone) = take_bone(document, address) else {
+/// rescaled so each still totals what it did before, and its animation
+/// keyframes are dropped. Bones after the removed subtree shift down; the
+/// document's references are rewritten to match. A [`Pose`] kept alongside the
+/// document must be remapped with the same [`removal_map`].
+pub fn remove_bone(document: &mut Document, index: BoneIndex) -> bool {
+    let Some(len) = document.bone_subtree_len(index) else {
         return false;
     };
-    let mut names = Vec::new();
-    collect_bone_names(&bone, &mut names);
-    document.remove_bones_from_weights(&names);
+    let count = document.bone_count();
+    if take_bone(document, index).is_none() {
+        return false;
+    }
+    document.apply_bone_map(&removal_map(count, index, len));
     true
-}
-
-fn collect_bone_names(bone: &Bone, names: &mut Vec<String>) {
-    if !bone.name.is_empty() {
-        names.push(bone.name.clone());
-    }
-    for child in &bone.children {
-        collect_bone_names(child, names);
-    }
 }
 
 /// Moves `source` next to `target` in the target's sibling list.
 ///
 /// Points are absolute, so reordering never moves the rig. `after` inserts the
-/// source below the target in the list. Returns the bone's new address, or
-/// `None` when either address is invalid or the move would put a bone inside
-/// itself.
+/// source below the target in the list. Returns the bone's new index, or `None`
+/// when either index is invalid or the move would put a bone inside itself.
 pub fn move_bone_near(
     document: &mut Document,
-    source: &BoneAddress,
-    target: &BoneAddress,
+    source: BoneIndex,
+    target: BoneIndex,
     after: bool,
-) -> Option<BoneAddress> {
-    if source == target || address_is_inside(source, target) {
+) -> Option<BoneIndex> {
+    if source == target || is_ancestor_or_self(document, source, target) {
         return None;
     }
-    let source_slot = bone_slot(document, source)?;
-    let target_slot = bone_slot(document, target)?;
+    let count = document.bone_count();
+    let len = document.bone_subtree_len(source)?;
+    document.bone_subtree_len(target)?;
+    // Where the target sits once the source has been lifted out.
+    let target_after_removal = removal_map(count, source, len)
+        .get(target)
+        .copied()
+        .flatten()?;
 
     let bone = take_bone_materialized(document, source)?;
-    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
+    let (parent, position) = locate(document, target_after_removal)?;
 
-    let parent_chain = target_slot.parents().to_vec();
-    let parent_tail = if parent_chain.is_empty() {
-        None
-    } else {
-        bone_at(
-            document,
-            &BoneAddress {
-                bones: parent_chain.clone(),
-            },
-        )
-        .map(|bone| bone.tail)
+    let parent_tail = parent
+        .and_then(|parent| document.bone_by_index(parent))
+        .map(|bone| bone.tail);
+    let siblings = match parent {
+        Some(parent) => &mut document.bone_by_index_mut(parent)?.children,
+        None => &mut document.bones,
     };
-    let siblings = bone_list_at_mut(document, &parent_chain)?;
-    let index = (target_slot.index() + usize::from(after)).min(siblings.len());
+    let index = (position + usize::from(after)).min(siblings.len());
     siblings.insert(index, bone);
     // Reordering a connected child materializes its head; drop it again so the
     // bone keeps sharing the parent's tail joint.
@@ -395,67 +388,61 @@ pub fn move_bone_near(
         omit_coincident_head(bone, parent_tail);
     }
 
-    let mut chain = parent_chain;
-    chain.push(index);
-    Some(BoneAddress { bones: chain })
+    // The block's index in the post-removal tree is what `move_map` expects.
+    let landed = flat_index_at(document, parent, index)?;
+    document.apply_bone_map(&move_map(count, source, len, landed));
+    Some(landed)
 }
 
 /// Parents `source` to `target` as its last child.
 pub fn move_bone_into(
     document: &mut Document,
-    source: &BoneAddress,
-    target: &BoneAddress,
-) -> Option<BoneAddress> {
-    if source == target || address_is_inside(source, target) {
+    source: BoneIndex,
+    target: BoneIndex,
+) -> Option<BoneIndex> {
+    if source == target || is_ancestor_or_self(document, source, target) {
         return None;
     }
-    let source_slot = bone_slot(document, source)?;
-    let target_slot = bone_slot(document, target)?;
+    let count = document.bone_count();
+    let len = document.bone_subtree_len(source)?;
+    document.bone_subtree_len(target)?;
+    let target_after_removal = removal_map(count, source, len)
+        .get(target)
+        .copied()
+        .flatten()?;
 
     let bone = take_bone_materialized(document, source)?;
-    let target_slot = shift_slot_after_removal(target_slot, &source_slot);
 
-    let parent_chain = target_slot.chain.clone();
-    let parent_tail = bone_at(
-        document,
-        &BoneAddress {
-            bones: parent_chain.clone(),
-        },
-    )
-    .map(|bone| bone.tail);
-    let children = bone_list_at_mut(document, &parent_chain)?;
+    let parent_tail = document.bone_by_index(target_after_removal)?.tail;
+    let children = &mut document.bone_by_index_mut(target_after_removal)?.children;
     let index = children.len();
     children.push(bone);
     // Dropping a connected child onto its own parent must not turn the shared
     // joint into a stored head that later drifts away.
     if let Some(child) = children.get_mut(index) {
-        omit_coincident_head(child, parent_tail);
+        omit_coincident_head(child, Some(parent_tail));
     }
 
-    let mut chain = parent_chain;
-    chain.push(index);
-    Some(BoneAddress { bones: chain })
+    let landed = flat_index_at(document, Some(target_after_removal), index)?;
+    document.apply_bone_map(&move_map(count, source, len, landed));
+    Some(landed)
 }
 
 /// The editable name of a bone.
-pub fn bone_name_at<'a>(document: &'a Document, address: &BoneAddress) -> Option<&'a str> {
-    Some(bone_at(document, address)?.name.as_str())
+pub fn bone_name_at(document: &Document, index: BoneIndex) -> Option<&str> {
+    Some(document.bone_by_index(index)?.name.as_str())
 }
 
-/// Renames a bone, updating any weights and animation targets bound to it.
+/// Renames a bone.
 ///
-/// Returns `false` when the bone does not exist.
-pub fn rename_bone_at(document: &mut Document, address: &BoneAddress, name: String) -> bool {
-    let old = {
-        let Some(bone) = bone_at_mut(document, address) else {
-            return false;
-        };
-        std::mem::replace(&mut bone.name, name.clone())
+/// Names are descriptive only: weights and animation targets refer to bones by
+/// index, so renaming does not touch them. Returns `false` when the bone does
+/// not exist.
+pub fn rename_bone_at(document: &mut Document, index: BoneIndex, name: String) -> bool {
+    let Some(bone) = document.bone_by_index_mut(index) else {
+        return false;
     };
-    if old != name {
-        document.rename_bone_in_weights(&old, &name);
-        document.rename_bone_in_animations(&old, &name);
-    }
+    bone.name = name;
     true
 }
 
@@ -474,11 +461,11 @@ pub fn rename_bone_at(document: &mut Document, address: &BoneAddress, name: Stri
 /// Snapping and reparenting happen when the drag is released.
 pub fn drag_bone_endpoint(
     document: &mut Document,
-    address: &BoneAddress,
+    index: BoneIndex,
     end: BoneEnd,
     world_point: Point,
 ) -> bool {
-    let Some(bone) = bone_at_mut(document, address) else {
+    let Some(bone) = document.bone_by_index_mut(index) else {
         return false;
     };
     match end {

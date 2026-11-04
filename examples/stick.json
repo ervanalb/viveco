@@ -1,6 +1,6 @@
 {
   "type": "viveco",
-  "version": 2,
+  "version": 5,
   "shapes": [
     {
       "name": "Legs",
@@ -31,17 +31,17 @@
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Upper leg L",
+                  "bone": 7,
                   "weight": 0.4405418
                 },
                 {
-                  "bone": "Lower leg L",
+                  "bone": 8,
                   "weight": 0.5594582
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Upper leg L",
+                  "bone": 7,
                   "weight": 0.99999994
                 }
               ]
@@ -57,17 +57,17 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Upper leg L",
+                  "bone": 7,
                   "weight": 0.4864845
                 },
                 {
-                  "bone": "Lower leg L",
+                  "bone": 8,
                   "weight": 0.51351553
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 0.99942535
                 }
               ]
@@ -83,17 +83,17 @@
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Upper leg R",
+                  "bone": 9,
                   "weight": 0.75734854
                 },
                 {
-                  "bone": "Lower leg R",
+                  "bone": 10,
                   "weight": 0.24265146
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Upper leg R",
+                  "bone": 9,
                   "weight": 0.9999998
                 }
               ]
@@ -109,17 +109,17 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Lower leg R",
+                  "bone": 10,
                   "weight": 0.4259827
                 },
                 {
-                  "bone": "Upper leg R",
+                  "bone": 9,
                   "weight": 0.5740173
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Lower leg R",
+                  "bone": 10,
                   "weight": 0.9997239
                 }
               ]
@@ -127,7 +127,7 @@
           ],
           "start_weights": [
             {
-              "bone": "Lower leg L",
+              "bone": 8,
               "weight": 0.99998176
             }
           ]
@@ -163,21 +163,21 @@
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Neck",
+                  "bone": 5,
                   "weight": 0.47721982
                 },
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 0.5227802
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Neck",
+                  "bone": 5,
                   "weight": 0.43537673
                 },
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 0.56462324
                 }
               ]
@@ -193,17 +193,17 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Neck",
+                  "bone": 5,
                   "weight": 0.53843635
                 },
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 0.46156365
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Body",
+                  "bone": 0,
                   "weight": 0.9995215
                 }
               ]
@@ -211,7 +211,7 @@
           ],
           "start_weights": [
             {
-              "bone": "Head",
+              "bone": 6,
               "weight": 1.0
             }
           ]
@@ -247,17 +247,17 @@
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Shoudler R",
+                  "bone": 3,
                   "weight": 0.43040186
                 },
                 {
-                  "bone": "Elbow R",
+                  "bone": 4,
                   "weight": 0.56959814
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Shoudler R",
+                  "bone": 3,
                   "weight": 0.99999994
                 }
               ]
@@ -277,39 +277,39 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Shoudler R",
+                  "bone": 3,
                   "weight": 0.5086513
                 },
                 {
-                  "bone": "Elbow R",
+                  "bone": 4,
                   "weight": 0.49134868
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Neck",
-                  "weight": 0.00004868933
+                  "bone": 5,
+                  "weight": 4.868933e-05
                 },
                 {
-                  "bone": "Shoudler R",
+                  "bone": 3,
                   "weight": 0.6164581
                 },
                 {
-                  "bone": "Shoulder L",
+                  "bone": 1,
                   "weight": 0.38349324
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Neck",
-                  "weight": 0.000082216764
+                  "bone": 5,
+                  "weight": 8.2216764e-05
                 },
                 {
-                  "bone": "Shoudler R",
+                  "bone": 3,
                   "weight": 0.5372643
                 },
                 {
-                  "bone": "Shoulder L",
+                  "bone": 1,
                   "weight": 0.46265352
                 }
               ]
@@ -329,35 +329,35 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Neck",
+                  "bone": 5,
                   "weight": 0.0001880661
                 },
                 {
-                  "bone": "Shoudler R",
+                  "bone": 3,
                   "weight": 0.4901345
                 },
                 {
-                  "bone": "Shoulder L",
+                  "bone": 1,
                   "weight": 0.50967747
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Shoulder L",
+                  "bone": 1,
                   "weight": 0.49338382
                 },
                 {
-                  "bone": "Elbow L",
+                  "bone": 2,
                   "weight": 0.5066162
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Shoulder L",
+                  "bone": 1,
                   "weight": 0.8329586
                 },
                 {
-                  "bone": "Elbow L",
+                  "bone": 2,
                   "weight": 0.16704145
                 }
               ]
@@ -373,17 +373,17 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Shoulder L",
+                  "bone": 1,
                   "weight": 0.29978222
                 },
                 {
-                  "bone": "Elbow L",
+                  "bone": 2,
                   "weight": 0.7002178
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Elbow L",
+                  "bone": 2,
                   "weight": 0.99999994
                 }
               ]
@@ -391,7 +391,7 @@
           ],
           "start_weights": [
             {
-              "bone": "Elbow R",
+              "bone": 4,
               "weight": 0.99999994
             }
           ]
@@ -426,19 +426,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 1.0
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 0.99997795
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 0.9998096
                 }
               ]
@@ -458,19 +458,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 0.99521106
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 0.99986935
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 0.99994767
                 }
               ]
@@ -490,19 +490,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 0.99984586
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 1.0
                 }
               ]
@@ -522,19 +522,19 @@
               ],
               "ctrl1_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 0.99999994
                 }
               ],
               "ctrl2_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 1.0
                 }
               ],
               "to_weights": [
                 {
-                  "bone": "Head",
+                  "bone": 6,
                   "weight": 1.0
                 }
               ]
@@ -658,7 +658,7 @@
           "value": -0.85785985,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -667,7 +667,7 @@
           "value": -0.42720187,
           "target": {
             "kind": "bone",
-            "bone": "Elbow R",
+            "bone": 4,
             "property": "angle"
           }
         },
@@ -678,7 +678,7 @@
           "handle_out": -0.682975,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -689,7 +689,7 @@
           "handle_out": -0.21331823,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 6,
             "property": "angle"
           }
         },
@@ -700,7 +700,7 @@
           "handle_out": -0.6983473,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -711,7 +711,7 @@
           "handle_out": -0.52515304,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -722,7 +722,7 @@
           "handle_out": -0.709603,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -733,7 +733,7 @@
           "handle_out": -0.49956936,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -744,7 +744,7 @@
           "handle_out": -0.65817374,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -755,7 +755,7 @@
           "handle_out": -0.1466328,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 6,
             "property": "angle"
           }
         },
@@ -766,7 +766,7 @@
           "handle_out": -0.7050633,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         }
@@ -784,7 +784,7 @@
           "handle_out": 0.11839077,
           "target": {
             "kind": "bone",
-            "bone": "Upper leg R",
+            "bone": 9,
             "property": "angle"
           }
         },
@@ -794,7 +794,7 @@
           "handle_out": -9.577862,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -805,7 +805,7 @@
           "handle_out": -0.8966679,
           "target": {
             "kind": "bone",
-            "bone": "Upper leg L",
+            "bone": 7,
             "property": "angle"
           }
         },
@@ -816,7 +816,7 @@
           "handle_out": -0.12456763,
           "target": {
             "kind": "bone",
-            "bone": "Lower leg R",
+            "bone": 10,
             "property": "angle"
           }
         },
@@ -827,7 +827,7 @@
           "handle_out": 1.0896477,
           "target": {
             "kind": "bone",
-            "bone": "Lower leg L",
+            "bone": 8,
             "property": "angle"
           }
         },
@@ -838,7 +838,7 @@
           "handle_out": -41.313194,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -848,7 +848,7 @@
           "handle_in": 0.09472503,
           "target": {
             "kind": "bone",
-            "bone": "Lower leg L",
+            "bone": 8,
             "property": "angle"
           }
         },
@@ -859,7 +859,7 @@
           "handle_out": -0.89440787,
           "target": {
             "kind": "bone",
-            "bone": "Upper leg L",
+            "bone": 7,
             "property": "angle"
           }
         },
@@ -869,7 +869,7 @@
           "handle_out": -0.1656682,
           "target": {
             "kind": "bone",
-            "bone": "Lower leg R",
+            "bone": 10,
             "property": "angle"
           }
         },
@@ -879,7 +879,7 @@
           "handle_out": -14.451131,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -890,7 +890,7 @@
           "handle_out": -40.752525,
           "target": {
             "kind": "bone",
-            "bone": "Body",
+            "bone": 0,
             "property": "y"
           }
         },
@@ -901,7 +901,7 @@
           "handle_out": 0.20125659,
           "target": {
             "kind": "bone",
-            "bone": "Upper leg R",
+            "bone": 9,
             "property": "angle"
           }
         },
@@ -912,7 +912,7 @@
           "handle_out": 0.75282604,
           "target": {
             "kind": "bone",
-            "bone": "Lower leg R",
+            "bone": 10,
             "property": "angle"
           }
         },
@@ -922,7 +922,7 @@
           "handle_out": 0.09728089,
           "target": {
             "kind": "bone",
-            "bone": "Lower leg L",
+            "bone": 8,
             "property": "angle"
           }
         }
@@ -940,7 +940,7 @@
           "handle_out": -0.94017684,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -951,7 +951,7 @@
           "handle_out": 0.9337283,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -962,7 +962,7 @@
           "handle_out": -0.09386356,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -973,7 +973,7 @@
           "handle_out": -0.08341454,
           "target": {
             "kind": "bone",
-            "bone": "Elbow R",
+            "bone": 4,
             "property": "angle"
           }
         },
@@ -984,7 +984,7 @@
           "handle_out": -2.0674138,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -995,7 +995,7 @@
           "handle_out": 2.048605,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -1006,7 +1006,7 @@
           "handle_out": -0.24127197,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -1017,7 +1017,7 @@
           "handle_out": -0.21421799,
           "target": {
             "kind": "bone",
-            "bone": "Elbow R",
+            "bone": 4,
             "property": "angle"
           }
         }
@@ -1033,7 +1033,7 @@
           "value": 1.7641499,
           "target": {
             "kind": "bone",
-            "bone": "Elbow R",
+            "bone": 4,
             "property": "angle"
           }
         },
@@ -1042,7 +1042,7 @@
           "value": -1.7943596,
           "target": {
             "kind": "bone",
-            "bone": "Elbow L",
+            "bone": 2,
             "property": "angle"
           }
         },
@@ -1051,7 +1051,7 @@
           "value": -3.5305176,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "x"
           }
         },
@@ -1060,7 +1060,7 @@
           "value": -86.28256,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "y"
           }
         },
@@ -1069,7 +1069,7 @@
           "value": -2.5446777,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "x"
           }
         },
@@ -1078,7 +1078,7 @@
           "value": -89.05473,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "y"
           }
         },
@@ -1087,7 +1087,7 @@
           "value": -6.7511992,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -1096,7 +1096,7 @@
           "value": 0.3510325,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 6,
             "property": "angle"
           }
         },
@@ -1105,7 +1105,7 @@
           "value": 0.48611158,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -1116,7 +1116,7 @@
           "handle_out": -6.8157835,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -1127,7 +1127,7 @@
           "handle_out": 0.5866387,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -1138,7 +1138,7 @@
           "handle_out": 0.46918583,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -1149,7 +1149,7 @@
           "handle_out": -6.7392764,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "angle"
           }
         },
@@ -1158,7 +1158,7 @@
           "value": 0.57095957,
           "target": {
             "kind": "bone",
-            "bone": "Shoulder L",
+            "bone": 1,
             "property": "angle"
           }
         },
@@ -1168,7 +1168,7 @@
           "handle_in": -0.049354084,
           "target": {
             "kind": "bone",
-            "bone": "Head",
+            "bone": 6,
             "property": "angle"
           }
         },
@@ -1177,7 +1177,7 @@
           "value": -6.8230124,
           "target": {
             "kind": "bone",
-            "bone": "Shoudler R",
+            "bone": 3,
             "property": "angle"
           }
         }
