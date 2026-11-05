@@ -1545,8 +1545,13 @@ fn handle_animate_bone(
 
 /// The pose the animate page shows: the selected animation at the playhead.
 fn animate_pose(editor: &EditorState) -> Pose {
-    crate::animate::selected_animation(editor)
-        .map(|animation| animation.sample_pose(&editor.document, editor.playhead))
+    editor
+        .selected_animation
+        .map(|index| {
+            editor
+                .document
+                .sample_pose(&[(index, editor.playhead, 1.0)])
+        })
         .unwrap_or_default()
 }
 

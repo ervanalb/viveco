@@ -79,7 +79,7 @@ fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
         .map(|window| (window.width(), window.height()))
         .unwrap_or((WINDOW_SIZE as f32, WINDOW_SIZE as f32));
     let transform = fit_transform(bounds, viewport_width, viewport_height);
-    let scene = build_scene(&document, transform.scale.x);
+    let scene = build_scene(&document, 1.0 / f64::from(transform.scale.x));
 
     // `VelloScene2d` has no intrinsic bounds, so provide them for picking.
     let aabb = Aabb::from_min_max(

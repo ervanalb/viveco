@@ -99,6 +99,7 @@ fn update_viveco_scenes(
 
         let pose = asset.sample_pose(&animator.clips);
         let deformed = asset.deformed(&pose);
-        *scene = VelloScene2d::from(crate::render::build_scene(&deformed, scale));
+        let stroke_width = 1.0 / f64::from(scale);
+        *scene = VelloScene2d::from(crate::render::build_scene(&deformed, stroke_width));
     }
 }

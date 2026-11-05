@@ -1,10 +1,12 @@
-//! Converts an [`Asset`] into a Vello [`Scene`].
+//! Converts [`Asset`]s into a Vello [`Scene`].
 //!
 //! This module is enabled by the crate's `vello` feature. It is the rendering
 //! half of the pipeline: callers decide which [`Pose`](crate::Pose) to apply
 //! (for example, with [`Asset::deformed`](crate::Asset::deformed) or the
-//! animation sampler) and then hand the resulting asset to
-//! [`build_scene`].
+//! animation sampler) and then paint the result with [`SceneBuilder`] or the
+//! single-asset [`build_scene`] helper.
+
+use std::cmp::Ordering;
 
 use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point as KurboPoint, Stroke as KurboStroke};
@@ -12,11 +14,10 @@ use vello::peniko::{Color, Fill};
 
 use crate::{Asset, Path, Rgba8, Shape, Style};
 
-/// Builds a Vello scene in document coordinates.
+/// Builds a Vello scene containing a single asset.
 ///
-/// `scale` is the document-to-screen factor the scene will be drawn with. It is
-/// used to paint every stroke as a hairline one screen pixel wide, regardless
-/// of zoom.
+/// `stroke_width` is in document units; pass `1.0 / scale` to paint every
+/// stroke as one screen pixel wide regardless of zoom.
 ///
 /// Sibling shapes are painted in ascending Z order. A shape's paths are
 /// concatenated into one compound path, which is filled with the non-zero
@@ -24,13 +25,66 @@ use crate::{Asset, Path, Rgba8, Shape, Style};
 /// The fill is painted first, then the children inside a clip layer keyed to
 /// the same compound path, then the stroke on top. A shape with children but
 /// no paths acts as an unclipped group.
-pub fn build_scene(document: &Asset, scale: f32) -> Scene {
+///
+/// Use [`SceneBuilder`] to combine several assets in one scene and sort their
+/// top-level shapes against each other.
+pub fn build_scene(document: &Asset, stroke_width: f64) -> Scene {
+    let mut builder = SceneBuilder::new(stroke_width);
+    builder.add_asset(document);
     let mut scene = Scene::new();
-    let stroke_width = 1.0 / f64::from(scale.max(f32::EPSILON));
-    for index in document.shape_indices_in_paint_order() {
-        draw_shape(&mut scene, &document.shapes[index], stroke_width);
-    }
+    builder.finish(&mut scene);
     scene
+}
+
+/// Collects top-level shapes from one or more assets and paints them into a
+/// [`Scene`], sorted by Z across all of them.
+///
+/// Shapes are painted in ascending Z; equal Z keeps the order they were added.
+/// Children stay grouped with their parent and are not re-sorted against the
+/// top-level shapes.
+pub struct SceneBuilder<'a> {
+    stroke_width: f64,
+    shapes: Vec<&'a Shape>,
+}
+
+impl<'a> SceneBuilder<'a> {
+    /// Starts a builder that paints every stroke `stroke_width` document units
+    /// wide.
+    pub fn new(stroke_width: f64) -> Self {
+        Self {
+            stroke_width,
+            shapes: Vec::new(),
+        }
+    }
+
+    /// Adds every top-level shape of `asset`.
+    pub fn add_asset(&mut self, asset: &'a Asset) -> &mut Self {
+        self.shapes.extend(asset.shapes.iter());
+        self
+    }
+
+    /// Adds a single top-level shape.
+    pub fn add_shape(&mut self, shape: &'a Shape) -> &mut Self {
+        self.shapes.push(shape);
+        self
+    }
+
+    /// Sorts the collected shapes by Z and paints them into `scene`, appending
+    /// to whatever the scene already contains.
+    pub fn finish(mut self, scene: &mut Scene) {
+        self.sort();
+        let stroke_width = self.stroke_width;
+        for &shape in &self.shapes {
+            draw_shape(scene, shape, stroke_width);
+        }
+    }
+
+    /// Stable sort by ascending Z, matching
+    /// [`indices_in_paint_order`](crate::indices_in_paint_order).
+    fn sort(&mut self) {
+        self.shapes
+            .sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
+    }
 }
 
 fn draw_shape(scene: &mut Scene, shape: &Shape, stroke_width: f64) {
@@ -262,5 +316,69 @@ mod tests {
         };
 
         let _ = build_scene(&asset, 1.0);
+    }
+
+    #[test]
+    fn builder_sorts_shapes_across_assets() {
+        let shape = |z: f32| Shape {
+            z,
+            ..Default::default()
+        };
+        let first = Asset {
+            shapes: vec![shape(5.0), shape(1.0)],
+            ..Default::default()
+        };
+        let second = Asset {
+            shapes: vec![shape(3.0), shape(2.0)],
+            ..Default::default()
+        };
+
+        let mut builder = SceneBuilder::new(1.0);
+        builder.add_asset(&first).add_asset(&second);
+        builder.sort();
+
+        let order: Vec<f32> = builder.shapes.iter().map(|shape| shape.z).collect();
+        assert_eq!(order, vec![1.0, 2.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn builder_keeps_insertion_order_for_equal_z() {
+        let named = |name: &str, z: f32| Shape {
+            name: name.to_string(),
+            z,
+            ..Default::default()
+        };
+        let asset = Asset {
+            shapes: vec![named("high", 2.0), named("low", 1.0)],
+            ..Default::default()
+        };
+        let added = named("added", 1.0);
+
+        let mut builder = SceneBuilder::new(1.0);
+        builder.add_asset(&asset).add_shape(&added);
+        builder.sort();
+
+        let order: Vec<&str> = builder
+            .shapes
+            .iter()
+            .map(|shape| shape.name.as_str())
+            .collect();
+        assert_eq!(order, vec!["low", "added", "high"]);
+    }
+
+    #[test]
+    fn builder_paints_multiple_assets_into_one_scene() {
+        let asset = Asset {
+            shapes: vec![Shape {
+                paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0])],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(1.0);
+        builder.add_asset(&asset).add_asset(&asset);
+        builder.finish(&mut scene);
     }
 }

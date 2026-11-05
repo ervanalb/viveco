@@ -1103,9 +1103,13 @@ fn refresh_scene(
     // selected animation at the playhead. Both build a deformed copy for
     // display, leaving the document's rest geometry untouched.
     let animation_pose = (*mode == EditorMode::Animate)
-        .then(|| crate::animate::selected_animation(&editor))
+        .then_some(editor.selected_animation)
         .flatten()
-        .map(|animation| animation.sample_pose(&editor.document, editor.playhead));
+        .map(|index| {
+            editor
+                .document
+                .sample_pose(&[(index, editor.playhead, 1.0)])
+        });
     let shown_pose = match *mode {
         EditorMode::Rig => Some(&editor.pose),
         EditorMode::Animate => animation_pose.as_ref(),
@@ -1115,7 +1119,8 @@ fn refresh_scene(
         .filter(|pose| !pose.is_identity())
         .map(|pose| editor.document.deformed(pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
-    let mut scene = build_scene(displayed, scale);
+    let stroke_width = 1.0 / f64::from(scale.max(f32::EPSILON));
+    let mut scene = build_scene(displayed, stroke_width);
 
     if *mode == EditorMode::Draw {
         if let Some(address) = &editor.selected_node {
