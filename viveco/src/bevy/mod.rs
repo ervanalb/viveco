@@ -10,7 +10,7 @@
 //! are ordinary library calls, so a caller that needs different behavior can
 //! replace the component: sample a pose with [`crate::Asset::sample_pose`],
 //! deform the artwork with [`crate::Asset::deformed`], and build a scene with
-//! [`crate::render::build_scene`].
+//! [`crate::Asset::into_scene`].
 
 mod loader;
 mod plugin;

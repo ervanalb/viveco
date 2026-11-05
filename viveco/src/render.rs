@@ -3,8 +3,8 @@
 //! This module is enabled by the crate's `vello` feature. It is the rendering
 //! half of the pipeline: callers decide which [`Pose`](crate::Pose) to apply
 //! (for example, with [`Asset::deformed`](crate::Asset::deformed) or the
-//! animation sampler) and then paint the result with [`SceneBuilder`] or the
-//! single-asset [`build_scene`] helper.
+//! animation sampler) and then paint the result with [`SceneBuilder`] or
+//! [`Asset::into_scene`].
 
 use std::cmp::Ordering;
 
@@ -14,26 +14,28 @@ use vello::peniko::{Color, Fill};
 
 use crate::{Asset, Path, Rgba8, Shape, Style};
 
-/// Builds a Vello scene containing a single asset.
-///
-/// `stroke_width` is in document units; pass `1.0 / scale` to paint every
-/// stroke as one screen pixel wide regardless of zoom.
-///
-/// Sibling shapes are painted in ascending Z order. A shape's paths are
-/// concatenated into one compound path, which is filled with the non-zero
-/// winding rule: contours wound opposite to the outer contour become holes.
-/// The fill is painted first, then the children inside a clip layer keyed to
-/// the same compound path, then the stroke on top. A shape with children but
-/// no paths acts as an unclipped group.
-///
-/// Use [`SceneBuilder`] to combine several assets in one scene and sort their
-/// top-level shapes against each other.
-pub fn build_scene(document: &Asset, stroke_width: f64) -> Scene {
-    let mut builder = SceneBuilder::new(stroke_width);
-    builder.add_asset(document);
-    let mut scene = Scene::new();
-    builder.finish(&mut scene);
-    scene
+impl Asset {
+    /// Builds a Vello scene containing this asset.
+    ///
+    /// `stroke_width` is in document units; pass `1.0 / scale` to paint every
+    /// stroke as one screen pixel wide regardless of zoom.
+    ///
+    /// Sibling shapes are painted in ascending Z order. A shape's paths are
+    /// concatenated into one compound path, which is filled with the non-zero
+    /// winding rule: contours wound opposite to the outer contour become holes.
+    /// The fill is painted first, then the children inside a clip layer keyed to
+    /// the same compound path, then the stroke on top. A shape with children but
+    /// no paths acts as an unclipped group.
+    ///
+    /// Use [`SceneBuilder`] to combine several assets in one scene and sort their
+    /// top-level shapes against each other.
+    pub fn into_scene(&self, stroke_width: f32) -> Scene {
+        let mut builder = SceneBuilder::new();
+        builder.add_asset(self, stroke_width);
+        let mut scene = Scene::new();
+        builder.finish(&mut scene);
+        scene
+    }
 }
 
 /// Collects top-level shapes from one or more assets and paints them into a
@@ -42,30 +44,25 @@ pub fn build_scene(document: &Asset, stroke_width: f64) -> Scene {
 /// Shapes are painted in ascending Z; equal Z keeps the order they were added.
 /// Children stay grouped with their parent and are not re-sorted against the
 /// top-level shapes.
-pub struct SceneBuilder<'a> {
-    stroke_width: f64,
-    shapes: Vec<&'a Shape>,
-}
+#[derive(Default)]
+pub struct SceneBuilder<'a>(Vec<(&'a Shape, f32)>);
 
 impl<'a> SceneBuilder<'a> {
-    /// Starts a builder that paints every stroke `stroke_width` document units
-    /// wide.
-    pub fn new(stroke_width: f64) -> Self {
-        Self {
-            stroke_width,
-            shapes: Vec::new(),
-        }
+    /// Starts an empty builder.
+    pub fn new() -> Self {
+        Self(Vec::new())
     }
 
     /// Adds every top-level shape of `asset`.
-    pub fn add_asset(&mut self, asset: &'a Asset) -> &mut Self {
-        self.shapes.extend(asset.shapes.iter());
+    pub fn add_asset(&mut self, asset: &'a Asset, stroke_width: f32) -> &mut Self {
+        self.0
+            .extend(asset.shapes.iter().map(|shape| (shape, stroke_width)));
         self
     }
 
     /// Adds a single top-level shape.
-    pub fn add_shape(&mut self, shape: &'a Shape) -> &mut Self {
-        self.shapes.push(shape);
+    pub fn add_shape(&mut self, shape: &'a Shape, stroke_width: f32) -> &mut Self {
+        self.0.push((shape, stroke_width));
         self
     }
 
@@ -73,42 +70,70 @@ impl<'a> SceneBuilder<'a> {
     /// to whatever the scene already contains.
     pub fn finish(mut self, scene: &mut Scene) {
         self.sort();
-        let stroke_width = self.stroke_width;
-        for &shape in &self.shapes {
-            draw_shape(scene, shape, stroke_width);
+        for (shape, stroke_width) in &self.0 {
+            shape.draw(scene, *stroke_width);
         }
     }
 
     /// Stable sort by ascending Z, matching
     /// [`indices_in_paint_order`](crate::indices_in_paint_order).
     fn sort(&mut self) {
-        self.shapes
-            .sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
+        self.0
+            .sort_by(|(a, _), (b, _)| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
     }
 }
 
-fn draw_shape(scene: &mut Scene, shape: &Shape, stroke_width: f64) {
-    let path = shape_to_bez_path(shape);
-    draw_fill(scene, &shape.style, &path);
+impl Shape {
+    /// Paints this shape and its descendants into `scene`.
+    fn draw(&self, scene: &mut Scene, stroke_width: f32) {
+        let path = self.to_bez_path();
+        draw_fill(scene, &self.style, &path);
 
-    if !shape.children.is_empty() {
-        // Without paths there is nothing to clip against, so the children are
-        // drawn unclipped rather than being made invisible.
-        let clipped = !shape.paths.is_empty();
-        if clipped {
-            scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &path);
+        if !self.children.is_empty() {
+            // Without paths there is nothing to clip against, so the children
+            // are drawn unclipped rather than being made invisible.
+            let clipped = !self.paths.is_empty();
+            if clipped {
+                scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &path);
+            }
+            for index in self.child_indices_in_paint_order() {
+                self.children[index].draw(scene, stroke_width);
+            }
+            if clipped {
+                scene.pop_layer();
+            }
         }
-        for index in shape.child_indices_in_paint_order() {
-            draw_shape(scene, &shape.children[index], stroke_width);
-        }
-        if clipped {
-            scene.pop_layer();
-        }
+
+        // The stroke sits above the children and is not clipped by its own
+        // outline, so the hairline stays visible along the whole contour.
+        draw_stroke(scene, &self.style, &path, stroke_width);
     }
 
-    // The stroke sits above the children and is not clipped by its own
-    // outline, so the hairline stays visible along the whole contour.
-    draw_stroke(scene, &shape.style, &path, stroke_width);
+    /// Concatenates all of this shape's paths into one compound path.
+    ///
+    /// The closed/open state of each contour is preserved, so an open contour
+    /// remains open for stroking. Filling and clipping implicitly close open
+    /// contours, which is what produces holes for oppositely-wound inner
+    /// contours.
+    pub fn to_bez_path(&self) -> BezPath {
+        let mut bez = BezPath::new();
+        for path in &self.paths {
+            path.append_to(&mut bez, false);
+        }
+        bez
+    }
+
+    /// Like [`Self::to_bez_path`], but explicitly closes any open contour.
+    ///
+    /// This matches the fill semantics used for hit testing, where `kurbo`'s
+    /// winding rule does not close open subpaths on its own.
+    pub fn to_fill_bez_path(&self) -> BezPath {
+        let mut bez = BezPath::new();
+        for path in &self.paths {
+            path.append_to(&mut bez, true);
+        }
+        bez
+    }
 }
 
 fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath) {
@@ -117,10 +142,10 @@ fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath) {
     }
 }
 
-fn draw_stroke(scene: &mut Scene, style: &Style, path: &BezPath, stroke_width: f64) {
+fn draw_stroke(scene: &mut Scene, style: &Style, path: &BezPath, stroke_width: f32) {
     if let Some(stroke) = style.stroke {
         scene.stroke(
-            &KurboStroke::new(stroke_width),
+            &KurboStroke::new(stroke_width as f64),
             Affine::IDENTITY,
             to_color(stroke.color),
             None,
@@ -129,88 +154,43 @@ fn draw_stroke(scene: &mut Scene, style: &Style, path: &BezPath, stroke_width: f
     }
 }
 
-/// Converts a model path into a kurbo path, closing it only when it is a loop.
-///
-/// Omitted control points are resolved to their endpoints. Segments with no
-/// controls are emitted as lines so strokes keep sharp joins.
-pub fn path_to_bez_path(path: &Path) -> BezPath {
-    let mut bez = BezPath::new();
-    let Some(start) = path.start() else {
-        return bez;
-    };
-    bez.move_to(to_kurbo_point(start));
+impl Path {
+    /// Converts this model path into a kurbo path, closing it only when it is a
+    /// loop.
+    ///
+    /// Omitted control points are resolved to their endpoints. Segments with no
+    /// controls are emitted as lines so strokes keep sharp joins.
+    pub fn to_bez_path(&self) -> BezPath {
+        let mut bez = BezPath::new();
+        self.append_to(&mut bez, false);
+        bez
+    }
 
-    let mut previous = start;
-    for segment in &path.segments {
-        let ctrl1 = segment.ctrl1.unwrap_or(previous);
-        let ctrl2 = segment.ctrl2.unwrap_or(segment.to);
-        if segment.is_line() {
-            bez.line_to(to_kurbo_point(segment.to));
-        } else {
-            bez.curve_to(
-                to_kurbo_point(ctrl1),
-                to_kurbo_point(ctrl2),
-                to_kurbo_point(segment.to),
-            );
+    /// Appends this path to `bez`, optionally forcing a closing edge.
+    fn append_to(&self, bez: &mut BezPath, force_close: bool) {
+        let Some(start_point) = self.start() else {
+            return;
+        };
+        bez.move_to(to_kurbo_point(start_point));
+
+        let mut previous = start_point;
+        for segment in &self.segments {
+            let ctrl1 = segment.ctrl1.unwrap_or(previous);
+            let ctrl2 = segment.ctrl2.unwrap_or(segment.to);
+            if segment.is_line() {
+                bez.line_to(to_kurbo_point(segment.to));
+            } else {
+                bez.curve_to(
+                    to_kurbo_point(ctrl1),
+                    to_kurbo_point(ctrl2),
+                    to_kurbo_point(segment.to),
+                );
+            }
+            previous = segment.to;
         }
-        previous = segment.to;
-    }
-    if path.is_closed() {
-        bez.close_path();
-    }
-    bez
-}
-
-/// Concatenates all of a shape's paths into one compound path.
-///
-/// The closed/open state of each contour is preserved, so an open contour
-/// remains open for stroking. Filling and clipping implicitly close open
-/// contours, which is what produces holes for oppositely-wound inner contours.
-pub fn shape_to_bez_path(shape: &Shape) -> BezPath {
-    let mut bez = BezPath::new();
-    for path in &shape.paths {
-        append_path(&mut bez, path, false);
-    }
-    bez
-}
-
-/// Like [`shape_to_bez_path`], but explicitly closes any open contour.
-///
-/// This matches the fill semantics used for hit testing, where `kurbo`'s
-/// winding rule does not close open subpaths on its own.
-pub fn shape_fill_path(shape: &Shape) -> BezPath {
-    let mut bez = BezPath::new();
-    for path in &shape.paths {
-        append_path(&mut bez, path, true);
-    }
-    bez
-}
-
-/// Appends one model path to `bez`, optionally forcing a closing edge.
-fn append_path(bez: &mut BezPath, path: &Path, force_close: bool) {
-    let start = path.start();
-    let Some(start_point) = start else {
-        return;
-    };
-    bez.move_to(to_kurbo_point(start_point));
-
-    let mut previous = start_point;
-    for segment in &path.segments {
-        let ctrl1 = segment.ctrl1.unwrap_or(previous);
-        let ctrl2 = segment.ctrl2.unwrap_or(segment.to);
-        if segment.is_line() {
-            bez.line_to(to_kurbo_point(segment.to));
-        } else {
-            bez.curve_to(
-                to_kurbo_point(ctrl1),
-                to_kurbo_point(ctrl2),
-                to_kurbo_point(segment.to),
-            );
+        if self.is_closed() || force_close {
+            bez.close_path();
         }
-        previous = segment.to;
-    }
-    if path.is_closed() || force_close {
-        bez.close_path();
     }
 }
 
@@ -240,13 +220,13 @@ mod tests {
             ..Default::default()
         };
 
-        let stroked = shape_to_bez_path(&shape);
+        let stroked = shape.to_bez_path();
         assert!(!matches!(
             stroked.elements().last(),
             Some(PathEl::ClosePath)
         ));
 
-        let filled = shape_fill_path(&shape);
+        let filled = shape.to_fill_bez_path();
         assert!(matches!(filled.elements().last(), Some(PathEl::ClosePath)));
     }
 
@@ -266,7 +246,7 @@ mod tests {
             ..Default::default()
         };
 
-        let bez = shape_to_bez_path(&shape);
+        let bez = shape.to_bez_path();
         let moves = bez
             .elements()
             .iter()
@@ -285,9 +265,9 @@ mod tests {
             ..Default::default()
         };
         let probe = KurboPoint::new(4.0, 4.0);
-        let fill = shape_fill_path(&holed);
+        let fill = holed.to_fill_bez_path();
         assert!(!fill.contains(probe));
-        assert!(shape_fill_path(&shape).contains(probe));
+        assert!(shape.to_fill_bez_path().contains(probe));
     }
 
     #[test]
@@ -315,7 +295,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = build_scene(&asset, 1.0);
+        let _ = asset.into_scene(1.0);
     }
 
     #[test]
@@ -333,11 +313,11 @@ mod tests {
             ..Default::default()
         };
 
-        let mut builder = SceneBuilder::new(1.0);
-        builder.add_asset(&first).add_asset(&second);
+        let mut builder = SceneBuilder::new();
+        builder.add_asset(&first, 1.).add_asset(&second, 2.);
         builder.sort();
 
-        let order: Vec<f32> = builder.shapes.iter().map(|shape| shape.z).collect();
+        let order: Vec<f32> = builder.0.iter().map(|(shape, _)| shape.z).collect();
         assert_eq!(order, vec![1.0, 2.0, 3.0, 5.0]);
     }
 
@@ -354,14 +334,14 @@ mod tests {
         };
         let added = named("added", 1.0);
 
-        let mut builder = SceneBuilder::new(1.0);
-        builder.add_asset(&asset).add_shape(&added);
+        let mut builder = SceneBuilder::new();
+        builder.add_asset(&asset, 1.).add_shape(&added, 1.);
         builder.sort();
 
         let order: Vec<&str> = builder
-            .shapes
+            .0
             .iter()
-            .map(|shape| shape.name.as_str())
+            .map(|(shape, _)| shape.name.as_str())
             .collect();
         assert_eq!(order, vec!["low", "added", "high"]);
     }
@@ -377,8 +357,8 @@ mod tests {
         };
 
         let mut scene = Scene::new();
-        let mut builder = SceneBuilder::new(1.0);
-        builder.add_asset(&asset).add_asset(&asset);
+        let mut builder = SceneBuilder::new();
+        builder.add_asset(&asset, 1.).add_asset(&asset, 1.);
         builder.finish(&mut scene);
     }
 }

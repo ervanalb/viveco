@@ -17,9 +17,7 @@ use vello::peniko::{Color, Fill};
 
 use crate::bounds::Bounds;
 use crate::menu_bar::MenuState;
-use crate::render::{
-    build_scene, path_to_bez_path, shape_fill_path, shape_to_bez_path, to_kurbo_point,
-};
+use crate::render::to_kurbo_point;
 use crate::rig::{BoneRename, RigEditing};
 use viveco::{
     Asset, BoneIndex, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle, Style, Weights,
@@ -1119,8 +1117,8 @@ fn refresh_scene(
         .filter(|pose| !pose.is_identity())
         .map(|pose| editor.document.deformed(pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
-    let stroke_width = 1.0 / f64::from(scale.max(f32::EPSILON));
-    let mut scene = build_scene(displayed, stroke_width);
+    let stroke_width = 1.0 / scale.max(f32::EPSILON);
+    let mut scene = displayed.into_scene(stroke_width);
 
     if *mode == EditorMode::Draw {
         if let Some(address) = &editor.selected_node {
@@ -1705,13 +1703,14 @@ fn pick_shape_node(
 
 /// Whether `point` lies inside the shape's combined fill.
 fn shape_contains(shape: &Shape, point: [f32; 2]) -> bool {
-    shape_fill_path(shape).contains(to_kurbo_point(point))
+    shape.to_fill_bez_path().contains(to_kurbo_point(point))
 }
 
 /// Distance from `point` to the nearest contour of `shape`.
 fn shape_distance(shape: &Shape, point: [f32; 2]) -> f32 {
     let point = to_kurbo_point(point);
-    shape_to_bez_path(shape)
+    shape
+        .to_bez_path()
         .segments()
         .map(|segment| segment.nearest(point, NEAREST_ACCURACY).distance_sq)
         .fold(f64::INFINITY, f64::min)
@@ -2535,7 +2534,7 @@ pub(crate) fn draw_path_guides(scene: &mut Scene, path: &Path, scale: f32) {
         Affine::IDENTITY,
         &OVERLAY_ACCENT,
         None,
-        &path_to_bez_path(path),
+        &path.to_bez_path(),
     );
 
     // Arms from cubic control points to the anchors they influence. Only the

@@ -24,7 +24,6 @@ use viveco_editor::file::{DocumentFile, FilePlugin};
 use viveco_editor::history::{History, HistoryPlugin};
 use viveco_editor::menu_bar::MenuBarPlugin;
 use viveco_editor::mode_tabs::ModeTabsPlugin;
-use viveco_editor::render::build_scene;
 use viveco_editor::rig::RigPlugin;
 use viveco_editor::rig_panel::RigPanelPlugin;
 use viveco_editor::rig_sidebar::RigSidebarPlugin;
@@ -79,7 +78,7 @@ fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
         .map(|window| (window.width(), window.height()))
         .unwrap_or((WINDOW_SIZE as f32, WINDOW_SIZE as f32));
     let transform = fit_transform(bounds, viewport_width, viewport_height);
-    let scene = build_scene(&document, 1.0 / f64::from(transform.scale.x));
+    let scene = document.into_scene(1.0 / transform.scale.x);
 
     // `VelloScene2d` has no intrinsic bounds, so provide them for picking.
     let aabb = Aabb::from_min_max(
