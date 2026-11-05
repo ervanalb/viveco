@@ -15,7 +15,7 @@
 mod loader;
 mod plugin;
 
-pub use loader::{VivecoLoader, VivecoLoaderError};
+pub use loader::VivecoLoader;
 pub use plugin::{AnimationSample, VivecoAnimator, VivecoPlugin};
 
 pub mod prelude {

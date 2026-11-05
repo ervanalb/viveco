@@ -52,6 +52,69 @@ impl From<postcard::Error> for BinaryDecodeError {
     }
 }
 
+/// An error loading an asset from its bytes or from a file.
+#[derive(Debug)]
+pub enum AssetLoadError {
+    /// Reading the file failed.
+    ///
+    /// Only [`Asset::load_from_file`] produces this variant;
+    /// [`Asset::from_bytes`] cannot.
+    Io(io::Error),
+    /// The contents were not valid UTF-8 while being parsed as JSON.
+    Utf8(std::str::Utf8Error),
+    /// The JSON document was invalid.
+    Json(serde_json::Error),
+    /// The binary document was invalid.
+    Binary(BinaryDecodeError),
+}
+
+impl std::fmt::Display for AssetLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "could not read viveco asset: {err}"),
+            Self::Utf8(err) => write!(f, "viveco JSON is not UTF-8: {err}"),
+            Self::Json(err) => write!(f, "invalid viveco JSON: {err}"),
+            // `BinaryDecodeError` already describes the failure.
+            Self::Binary(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for AssetLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Utf8(err) => Some(err),
+            Self::Json(err) => Some(err),
+            Self::Binary(err) => Some(err),
+        }
+    }
+}
+
+impl From<io::Error> for AssetLoadError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<std::str::Utf8Error> for AssetLoadError {
+    fn from(err: std::str::Utf8Error) -> Self {
+        Self::Utf8(err)
+    }
+}
+
+impl From<serde_json::Error> for AssetLoadError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err)
+    }
+}
+
+impl From<BinaryDecodeError> for AssetLoadError {
+    fn from(err: BinaryDecodeError) -> Self {
+        Self::Binary(err)
+    }
+}
+
 /// The root of a vector-art file.
 #[cfg_attr(
     feature = "bevy",
@@ -159,19 +222,28 @@ impl Asset {
         Ok(postcard::from_bytes(payload)?)
     }
 
+    /// Decodes an asset from file contents, detecting the encoding.
+    ///
+    /// Contents beginning with the binary magic are decoded with postcard;
+    /// anything else is parsed as UTF-8 JSON. This is the encoding detection
+    /// used by [`Asset::load_from_file`] and the Bevy asset loader.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AssetLoadError> {
+        match Self::from_postcard_slice(bytes) {
+            Ok(asset) => Ok(asset),
+            // Anything without the magic is treated as JSON, so its contents
+            // are parsed as text.
+            Err(BinaryDecodeError::MissingMagic) => {
+                Ok(Self::from_json_str(std::str::from_utf8(bytes)?)?)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// Reads an asset, choosing the encoding from the file's contents.
     ///
-    /// Binary files are recognised by their magic and decoded with postcard;
-    /// anything else is parsed as JSON.
-    pub fn load_from_file(path: impl AsRef<FsPath>) -> io::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        if bytes.starts_with(BINARY_MAGIC) {
-            return Self::from_postcard_slice(&bytes)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
-        }
-        let text = String::from_utf8(bytes)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        Self::from_json_str(&text).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    /// The contents are decoded by [`Asset::from_bytes`].
+    pub fn load_from_file(path: impl AsRef<FsPath>) -> Result<Self, AssetLoadError> {
+        Ok(Self::from_bytes(&std::fs::read(path)?)?)
     }
 
     /// Writes the asset, choosing the encoding from the path's extension.
@@ -331,6 +403,36 @@ mod tests {
         assert!(matches!(
             Asset::from_postcard_slice(json.as_bytes()),
             Err(BinaryDecodeError::MissingMagic)
+        ));
+    }
+
+    #[test]
+    fn from_bytes_detects_the_encoding() {
+        let asset = sample_asset();
+
+        let json = asset.to_json_string().unwrap();
+        assert_eq!(Asset::from_bytes(json.as_bytes()).unwrap(), asset);
+
+        let binary = asset.to_postcard_vec().unwrap();
+        assert_eq!(Asset::from_bytes(&binary).unwrap(), asset);
+    }
+
+    #[test]
+    fn from_bytes_reports_the_decoding_failure() {
+        assert!(matches!(
+            Asset::from_bytes(&[0xff, 0xfe]),
+            Err(AssetLoadError::Utf8(_))
+        ));
+        assert!(matches!(
+            Asset::from_bytes(b"not an asset"),
+            Err(AssetLoadError::Json(_))
+        ));
+
+        let mut binary = sample_asset().to_postcard_vec().unwrap();
+        binary.truncate(binary.len() - 1);
+        assert!(matches!(
+            Asset::from_bytes(&binary),
+            Err(AssetLoadError::Binary(BinaryDecodeError::Postcard(_)))
         ));
     }
 

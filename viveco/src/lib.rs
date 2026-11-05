@@ -36,6 +36,4 @@ pub use pose::*;
 pub use shape::*;
 
 #[cfg(feature = "bevy")]
-pub use self::bevy::{
-    AnimationSample, VivecoAnimator, VivecoLoader, VivecoLoaderError, VivecoPlugin,
-};
+pub use self::bevy::{AnimationSample, VivecoAnimator, VivecoLoader, VivecoPlugin};
