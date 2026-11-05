@@ -1,9 +1,9 @@
 //! Loads and animates the rigged `stick.viveco` example.
 //!
 //! The example asset lives in the workspace's `examples` directory, so the
-//! asset server root is pointed there. The animation cycles through every clip
-//! with a short crossfade, which exercises the `(index, time, weight)` clips on
-//! [`VivecoAnimator`].
+//! asset server root is pointed there. The demo cycles through every animation
+//! with a short crossfade, which exercises the `(index, time, weight)` instances
+//! on [`VivecoAnimator`].
 //!
 //! Run with `cargo run -p viveco --example animate --features bevy`.
 
@@ -18,7 +18,7 @@ use viveco::{Asset, Path, Point, Shape, VivecoAnimator, VivecoPlugin};
 const CYCLE_SECONDS: f32 = 2.5;
 /// Length of the crossfade at the start of each cycle.
 const FADE_SECONDS: f32 = 0.5;
-/// "Walk" is the second clip in stick.viveco.
+/// "Walk" is the second animation in stick.viveco.
 const START_ANIMATION: usize = 1;
 
 fn main() {
@@ -48,7 +48,7 @@ fn main() {
         .run();
 }
 
-/// State used by the example to switch between the asset's animation clips.
+/// State used by the example to switch between the asset's animations.
 #[derive(Resource)]
 struct Demo {
     current: usize,
@@ -110,7 +110,7 @@ fn fit_when_loaded(
     }
 }
 
-/// Advances every clip and rotates through them with a short crossfade.
+/// Advances every animation and rotates through them with a short crossfade.
 fn animate(
     time: Res<Time>,
     assets: Res<Assets<Asset>>,
@@ -141,7 +141,7 @@ fn animate(
         if demo.elapsed >= CYCLE_SECONDS {
             demo.elapsed -= CYCLE_SECONDS;
             demo.current = (demo.current + 1) % count;
-            // Restart the clip that just became current.
+            // Restart the animation that just became current.
             let current = demo.current;
             demo.times[current] = 0.0;
         }
@@ -151,13 +151,13 @@ fn animate(
         let previous = (current + count - 1) % count;
         let blend = (demo.elapsed / FADE_SECONDS).clamp(0.0, 1.0);
 
-        animator.clips.clear();
+        animator.mixer.clear();
         if count > 1 && blend < 1.0 {
             animator
-                .clips
+                .mixer
                 .push((previous, demo.times[previous], 1.0 - blend));
         }
-        animator.clips.push((current, demo.times[current], blend));
+        animator.mixer.push((current, demo.times[current], blend));
     }
 }
 

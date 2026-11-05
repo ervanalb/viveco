@@ -5,6 +5,12 @@
 //! (for example, with [`Asset::deformed`](crate::Asset::deformed) or the
 //! animation sampler) and then paint the result with [`SceneBuilder`] or
 //! [`Asset::into_scene`].
+//!
+//! [`SceneBuilder`] combines several assets into one scene and sorts their
+//! top-level shapes by Z together. Each asset may be added with its own
+//! [`Affine`] placement, which is baked into the emitted geometry.
+//! [`SceneInstance`] bundles a deformed document with that placement and its
+//! stroke width.
 
 use std::cmp::Ordering;
 
@@ -12,7 +18,7 @@ use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point as KurboPoint, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
-use crate::{Asset, Path, Rgba8, Shape, Style};
+use crate::{AnimationInstance, Asset, Path, Rgba8, Shape, Style};
 
 impl Asset {
     /// Builds a Vello scene containing this asset.
@@ -38,14 +44,67 @@ impl Asset {
     }
 }
 
+/// An instance of a document, sampled and placed for rendering into a scene.
+///
+/// It owns its deformed geometry, so the animation instances, the scene-space
+/// placement, and the stroke width travel together as one value.
+/// Build one from animation instances with [`SceneInstance::animated`], then
+/// adjust it with the `with_*` methods. Add it to a [`SceneBuilder`] with
+/// [`SceneBuilder::add_instance`].
+pub struct SceneInstance {
+    /// The deformed document to paint.
+    pub asset: Asset,
+    /// Where the document sits in scene space.
+    pub transform: Affine,
+    /// Stroke width in the document's local units.
+    pub stroke_width: f32,
+}
+
+impl SceneInstance {
+    /// Samples `asset` at `animations` and deforms it into a new instance.
+    ///
+    /// The instance starts at the identity placement with one-unit strokes.
+    pub fn animated(asset: &Asset, animations: &[AnimationInstance]) -> Self {
+        let pose = asset.sample_pose(animations);
+        Self {
+            asset: asset.deformed(&pose),
+            transform: Affine::IDENTITY,
+            stroke_width: 1.0,
+        }
+    }
+
+    /// Sets the scene-space placement.
+    pub fn with_transform(mut self, transform: Affine) -> Self {
+        self.transform = transform;
+        self
+    }
+
+    /// Sets the stroke width in the deformed document's local units.
+    pub fn with_stroke_width(mut self, stroke_width: f32) -> Self {
+        self.stroke_width = stroke_width;
+        self
+    }
+}
+
+/// One shape queued in a [`SceneBuilder`], with the placement that puts it in
+/// scene space.
+struct Placement<'a> {
+    shape: &'a Shape,
+    stroke_width: f32,
+    transform: Affine,
+}
+
 /// Collects top-level shapes from one or more assets and paints them into a
 /// [`Scene`], sorted by Z across all of them.
 ///
 /// Shapes are painted in ascending Z; equal Z keeps the order they were added.
 /// Children stay grouped with their parent and are not re-sorted against the
 /// top-level shapes.
+///
+/// A placement transform affects only the shapes added with it. This is how
+/// callers bake per-asset entity transforms into one shared scene.
 #[derive(Default)]
-pub struct SceneBuilder<'a>(Vec<(&'a Shape, f32)>);
+pub struct SceneBuilder<'a>(Vec<Placement<'a>>);
 
 impl<'a> SceneBuilder<'a> {
     /// Starts an empty builder.
@@ -53,16 +112,51 @@ impl<'a> SceneBuilder<'a> {
         Self(Vec::new())
     }
 
-    /// Adds every top-level shape of `asset`.
+    /// Adds every top-level shape of `instance`.
+    pub fn add_instance(&mut self, instance: &'a SceneInstance) -> &mut Self {
+        self.add_asset_with_transform(&instance.asset, instance.stroke_width, instance.transform)
+    }
+
+    /// Adds every top-level shape of `asset` with an identity placement.
     pub fn add_asset(&mut self, asset: &'a Asset, stroke_width: f32) -> &mut Self {
-        self.0
-            .extend(asset.shapes.iter().map(|shape| (shape, stroke_width)));
+        self.add_asset_with_transform(asset, stroke_width, Affine::IDENTITY)
+    }
+
+    /// Adds every top-level shape of `asset`, placed by `transform`.
+    ///
+    /// `stroke_width` is in the asset's local units; `transform` is applied to
+    /// the geometry afterwards.
+    pub fn add_asset_with_transform(
+        &mut self,
+        asset: &'a Asset,
+        stroke_width: f32,
+        transform: Affine,
+    ) -> &mut Self {
+        self.0.extend(asset.shapes.iter().map(|shape| Placement {
+            shape,
+            stroke_width,
+            transform,
+        }));
         self
     }
 
-    /// Adds a single top-level shape.
+    /// Adds a single top-level shape with an identity placement.
     pub fn add_shape(&mut self, shape: &'a Shape, stroke_width: f32) -> &mut Self {
-        self.0.push((shape, stroke_width));
+        self.add_shape_with_transform(shape, stroke_width, Affine::IDENTITY)
+    }
+
+    /// Adds a single top-level shape, placed by `transform`.
+    pub fn add_shape_with_transform(
+        &mut self,
+        shape: &'a Shape,
+        stroke_width: f32,
+        transform: Affine,
+    ) -> &mut Self {
+        self.0.push(Placement {
+            shape,
+            stroke_width,
+            transform,
+        });
         self
     }
 
@@ -70,8 +164,10 @@ impl<'a> SceneBuilder<'a> {
     /// to whatever the scene already contains.
     pub fn finish(mut self, scene: &mut Scene) {
         self.sort();
-        for (shape, stroke_width) in &self.0 {
-            shape.draw(scene, *stroke_width);
+        for placement in &self.0 {
+            placement
+                .shape
+                .draw(scene, placement.stroke_width, placement.transform);
         }
     }
 
@@ -79,25 +175,25 @@ impl<'a> SceneBuilder<'a> {
     /// [`indices_in_paint_order`](crate::indices_in_paint_order).
     fn sort(&mut self) {
         self.0
-            .sort_by(|(a, _), (b, _)| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
+            .sort_by(|a, b| a.shape.z.partial_cmp(&b.shape.z).unwrap_or(Ordering::Equal));
     }
 }
 
 impl Shape {
-    /// Paints this shape and its descendants into `scene`.
-    fn draw(&self, scene: &mut Scene, stroke_width: f32) {
+    /// Paints this shape and its descendants into `scene`, through `transform`.
+    fn draw(&self, scene: &mut Scene, stroke_width: f32, transform: Affine) {
         let path = self.to_bez_path();
-        draw_fill(scene, &self.style, &path);
+        draw_fill(scene, &self.style, &path, transform);
 
         if !self.children.is_empty() {
             // Without paths there is nothing to clip against, so the children
             // are drawn unclipped rather than being made invisible.
             let clipped = !self.paths.is_empty();
             if clipped {
-                scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &path);
+                scene.push_clip_layer(Fill::NonZero, transform, &path);
             }
             for index in self.child_indices_in_paint_order() {
-                self.children[index].draw(scene, stroke_width);
+                self.children[index].draw(scene, stroke_width, transform);
             }
             if clipped {
                 scene.pop_layer();
@@ -106,7 +202,7 @@ impl Shape {
 
         // The stroke sits above the children and is not clipped by its own
         // outline, so the hairline stays visible along the whole contour.
-        draw_stroke(scene, &self.style, &path, stroke_width);
+        draw_stroke(scene, &self.style, &path, stroke_width, transform);
     }
 
     /// Concatenates all of this shape's paths into one compound path.
@@ -136,17 +232,23 @@ impl Shape {
     }
 }
 
-fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath) {
+fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath, transform: Affine) {
     if let Some(fill) = style.fill {
-        scene.fill(Fill::NonZero, Affine::IDENTITY, to_color(fill), None, path);
+        scene.fill(Fill::NonZero, transform, to_color(fill), None, path);
     }
 }
 
-fn draw_stroke(scene: &mut Scene, style: &Style, path: &BezPath, stroke_width: f32) {
+fn draw_stroke(
+    scene: &mut Scene,
+    style: &Style,
+    path: &BezPath,
+    stroke_width: f32,
+    transform: Affine,
+) {
     if let Some(stroke) = style.stroke {
         scene.stroke(
             &KurboStroke::new(stroke_width as f64),
-            Affine::IDENTITY,
+            transform,
             to_color(stroke.color),
             None,
             path,
@@ -317,7 +419,11 @@ mod tests {
         builder.add_asset(&first, 1.).add_asset(&second, 2.);
         builder.sort();
 
-        let order: Vec<f32> = builder.0.iter().map(|(shape, _)| shape.z).collect();
+        let order: Vec<f32> = builder
+            .0
+            .iter()
+            .map(|placement| placement.shape.z)
+            .collect();
         assert_eq!(order, vec![1.0, 2.0, 3.0, 5.0]);
     }
 
@@ -341,9 +447,31 @@ mod tests {
         let order: Vec<&str> = builder
             .0
             .iter()
-            .map(|(shape, _)| shape.name.as_str())
+            .map(|placement| placement.shape.name.as_str())
             .collect();
         assert_eq!(order, vec!["low", "added", "high"]);
+    }
+
+    #[test]
+    fn builder_keeps_each_assets_placement() {
+        let shape = |z: f32| Shape {
+            z,
+            ..Default::default()
+        };
+        let first = Asset {
+            shapes: vec![shape(2.0), shape(1.0)],
+            ..Default::default()
+        };
+        let transform = Affine::translate((10.0, -20.0));
+
+        let mut builder = SceneBuilder::new();
+        builder.add_asset(&first, 1.0);
+        builder.add_asset_with_transform(&first, 2.0, transform);
+
+        assert_eq!(builder.0.len(), 4);
+        assert_eq!(builder.0[0].transform, Affine::IDENTITY);
+        assert_eq!(builder.0[2].transform, transform);
+        assert_eq!(builder.0[2].stroke_width, 2.0);
     }
 
     #[test]

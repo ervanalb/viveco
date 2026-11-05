@@ -128,7 +128,7 @@ pub struct Asset {
     /// asset.
     pub bones: Vec<Bone>,
 
-    /// Animation clips stored in the asset.
+    /// Animations stored in the asset.
     pub animations: Vec<Animation>,
 }
 
@@ -243,7 +243,7 @@ impl Asset {
     ///
     /// The contents are decoded by [`Asset::from_bytes`].
     pub fn load_from_file(path: impl AsRef<FsPath>) -> Result<Self, AssetLoadError> {
-        Ok(Self::from_bytes(&std::fs::read(path)?)?)
+        Self::from_bytes(&std::fs::read(path)?)
     }
 
     /// Writes the asset, choosing the encoding from the path's extension.

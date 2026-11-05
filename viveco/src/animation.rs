@@ -1,4 +1,4 @@
-//! Animation clips, keyframes, and curve sampling.
+//! Animations, keyframes, and curve sampling.
 
 use std::cmp::Ordering;
 
@@ -8,6 +8,12 @@ use crate::asset::Asset;
 use crate::bone::BoneIndex;
 use crate::pose::Pose;
 use crate::shape::ShapeIndex;
+
+/// One playing instance of an animation:
+/// `(animation index, time in seconds, weight)`.
+///
+/// Several instances can be blended by [`Asset::sample_pose`](crate::Asset::sample_pose).
+pub type AnimationInstance = (usize, f32, f32);
 
 /// A property of a bone that an animation curve can drive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +108,7 @@ pub struct Animation {
     pub duration: f32,
     /// Whether the animation loops back to the start.
     pub cyclic: bool,
-    /// The clip's keyframes, ordered by timestamp.
+    /// The animation's keyframes, ordered by timestamp.
     #[serde(default)]
     pub keyframes: Vec<Keyframe>,
 }
@@ -468,22 +474,21 @@ impl Asset {
             .position(|animation| animation.name == name)
     }
 
-    /// The blended pose of several animation samples at once.
+    /// The blended pose of several animation instances at once.
     ///
-    /// Each clip is `(animation index, time, weight)`. Out-of-range indices,
-    /// non-finite times, and non-positive weights are ignored; the remaining
-    /// poses are weighted-averaged. When no clip contributes, the result is
-    /// the rest pose.
+    /// Out-of-range indices, non-finite times, and non-positive weights are
+    /// ignored; the remaining poses are weighted-averaged. When no instance
+    /// contributes, the result is the rest pose.
     ///
     /// Every sampled pose is re-anchored to the bone's rest head before
-    /// blending, so a bone that one clip leaves at rest still blends correctly
-    /// with a bone another clip rotates. This is the same pivot the rig view
-    /// uses.
-    pub fn sample_pose(&self, clips: &[(usize, f32, f32)]) -> Pose {
+    /// blending, so a bone that one animation leaves at rest still blends
+    /// correctly with a bone another animation rotates. This is the same pivot
+    /// the rig view uses.
+    pub fn sample_pose(&self, animations: &[AnimationInstance]) -> Pose {
         let heads = self.rest_heads();
-        let mut sampled = Vec::with_capacity(clips.len());
+        let mut sampled = Vec::with_capacity(animations.len());
 
-        for &(index, time, weight) in clips {
+        for &(index, time, weight) in animations {
             let Some(animation) = self.animations.get(index) else {
                 continue;
             };
@@ -811,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_pose_blends_animation_clips_by_weight() {
+    fn sample_pose_blends_animation_instances_by_weight() {
         let mut asset = Asset::new();
         asset.bones.push(Bone {
             name: "Arm".into(),
@@ -836,13 +841,13 @@ mod tests {
         assert!((arm.rotation - std::f32::consts::FRAC_PI_2 * 0.75).abs() < 1e-5);
         assert_eq!(arm.pivot, [10.0, 20.0]);
         // An unused channel stays at its animation value, so the blend is a
-        // weighted average of one clip at rest and one rotated.
+        // weighted average of one animation at rest and one rotated.
         assert_eq!(arm.translation, [0.0, 0.0]);
         assert!((arm.scale - 1.0).abs() < 1e-5);
     }
 
     #[test]
-    fn sample_pose_ignores_empty_and_invalid_clips() {
+    fn sample_pose_ignores_empty_and_invalid_instances() {
         let asset = Asset::new();
         assert!(asset.sample_pose(&[]).is_identity());
         assert!(

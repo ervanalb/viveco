@@ -9,11 +9,12 @@
 //! - shapes: [`Shape`], [`Path`], [`Segment`], styling, and vertex weights.
 //! - bones: [`Bone`], the skeleton tree, and rig editing.
 //! - poses: [`Pose`] and the linear-blend skinning it applies to artwork.
-//! - animation: [`Animation`] clips, keyframes, and sampling.
+//! - animation: [`Animation`], [`AnimationInstance`], keyframes, and sampling.
 //! - rendering: [`render`] converts assets into Vello scenes when the
 //!   `vello` feature is enabled.
-//! - Bevy: the `bevy` feature adds an asset loader, an animator component, and
-//!   a rendering plugin (see [`bevy`]).
+//! - Bevy: the `bevy` feature adds an asset loader, an animator component that
+//!   draws into one shared, Z-ordered scene, and a rendering plugin (see
+//!   [`bevy`]).
 //!
 //! All of these types live at the crate root.
 
@@ -36,4 +37,7 @@ pub use pose::*;
 pub use shape::*;
 
 #[cfg(feature = "bevy")]
-pub use self::bevy::{AnimationSample, VivecoAnimator, VivecoLoader, VivecoPlugin};
+pub use self::bevy::{
+    VivecoAnimator, VivecoDefaultScene, VivecoLoader, VivecoPlugin, VivecoScene,
+    VivecoSceneMembers, VivecoSceneOf,
+};

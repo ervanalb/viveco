@@ -28,7 +28,7 @@ impl AssetLoader for VivecoLoader {
         Box::pin(async move {
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).await?;
-            Ok(crate::Asset::from_bytes(&bytes)?)
+            crate::Asset::from_bytes(&bytes)
         })
     }
 
