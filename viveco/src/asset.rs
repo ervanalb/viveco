@@ -1,10 +1,10 @@
-//! The root of a vector-art asset and its JSON encoding.
+//! The root of a vector-art asset and its file encodings.
 
 use std::io;
 use std::path::Path as FsPath;
 
 use serde::de;
-use serde::ser::SerializeMap;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::animation::{Animation, KeyframeTarget};
@@ -19,6 +19,38 @@ pub const MIN_FORMAT_VERSION: u32 = 5;
 
 /// Version written to and expected by this build of the format.
 pub const FORMAT_VERSION: u32 = 5;
+
+/// Bytes every binary asset begins with.
+///
+/// The leading `V` is neither whitespace nor `{`, so JSON contents can never
+/// be mistaken for a binary asset.
+const BINARY_MAGIC: &[u8] = b"VIVECOB1";
+
+/// An error decoding an asset from the binary format.
+#[derive(Debug)]
+pub enum BinaryDecodeError {
+    /// The bytes do not begin with the binary magic.
+    MissingMagic,
+    /// The payload is not a valid postcard encoding of an asset.
+    Postcard(postcard::Error),
+}
+
+impl std::fmt::Display for BinaryDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingMagic => f.write_str("missing viveco binary magic"),
+            Self::Postcard(err) => write!(f, "invalid viveco binary: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for BinaryDecodeError {}
+
+impl From<postcard::Error> for BinaryDecodeError {
+    fn from(err: postcard::Error) -> Self {
+        Self::Postcard(err)
+    }
+}
 
 /// The root of a vector-art file.
 #[derive(Clone, Debug, PartialEq)]
@@ -35,17 +67,16 @@ pub struct Asset {
 
 impl Serialize for Asset {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("type", FORMAT_TYPE)?;
-        map.serialize_entry("version", &FORMAT_VERSION)?;
-        map.serialize_entry("shapes", &self.shapes)?;
-        if !self.bones.is_empty() {
-            map.serialize_entry("bones", &self.bones)?;
-        }
-        if !self.animations.is_empty() {
-            map.serialize_entry("animations", &self.animations)?;
-        }
-        map.end()
+        // Every field is always written, in a fixed order. JSON sees named
+        // keys; postcard sees the same values positionally. Skipping empty
+        // fields would desynchronize postcard's positional decoding.
+        let mut state = serializer.serialize_struct("Asset", 5)?;
+        state.serialize_field("type", FORMAT_TYPE)?;
+        state.serialize_field("version", &FORMAT_VERSION)?;
+        state.serialize_field("shapes", &self.shapes)?;
+        state.serialize_field("bones", &self.bones)?;
+        state.serialize_field("animations", &self.animations)?;
+        state.end()
     }
 }
 
@@ -109,16 +140,55 @@ impl Asset {
         serde_json::to_string_pretty(self)
     }
 
+    /// Encodes the asset in the binary format, including the leading magic.
+    pub fn to_postcard_vec(&self) -> Result<Vec<u8>, postcard::Error> {
+        let mut bytes = Vec::from(BINARY_MAGIC);
+        bytes.extend_from_slice(&postcard::to_allocvec(self)?);
+        Ok(bytes)
+    }
+
+    /// Decodes an asset from the binary format.
+    pub fn from_postcard_slice(bytes: &[u8]) -> Result<Self, BinaryDecodeError> {
+        let Some(payload) = bytes.strip_prefix(BINARY_MAGIC) else {
+            return Err(BinaryDecodeError::MissingMagic);
+        };
+        Ok(postcard::from_bytes(payload)?)
+    }
+
+    /// Reads an asset, choosing the encoding from the file's contents.
+    ///
+    /// Binary files are recognised by their magic and decoded with postcard;
+    /// anything else is parsed as JSON.
     pub fn load_from_file(path: impl AsRef<FsPath>) -> io::Result<Self> {
-        let text = std::fs::read_to_string(path)?;
+        let bytes = std::fs::read(path)?;
+        if bytes.starts_with(BINARY_MAGIC) {
+            return Self::from_postcard_slice(&bytes)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         Self::from_json_str(&text).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
+    /// Writes the asset, choosing the encoding from the path's extension.
+    ///
+    /// A `.json` extension (any case) writes JSON; every other extension
+    /// writes the postcard binary format.
     pub fn save_to_file(&self, path: impl AsRef<FsPath>) -> io::Result<()> {
-        let text = self
-            .to_json_string()
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        std::fs::write(path, text)
+        let path = path.as_ref();
+        let json = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        let bytes = if json {
+            self.to_json_string()
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+                .into_bytes()
+        } else {
+            self.to_postcard_vec()
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        };
+        std::fs::write(path, bytes)
     }
 
     /// Applies `f` to the weight list of every path point in every shape,
@@ -228,6 +298,71 @@ mod tests {
     }
 
     #[test]
+    fn binary_roundtrip_preserves_the_asset() {
+        use crate::animation::{Animation, BoneProperty, Keyframe, KeyframeTarget};
+
+        let mut asset = sample_asset();
+        let mut keyframe = Keyframe::new(
+            0.5,
+            2.0,
+            KeyframeTarget::Bone {
+                bone: 0,
+                property: BoneProperty::Angle,
+            },
+        );
+        keyframe.handle_in = Some(0.25);
+        keyframe.handle_out = Some(0.75);
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(keyframe);
+        asset.animations.push(animation);
+
+        let bytes = asset.to_postcard_vec().unwrap();
+        assert!(bytes.starts_with(BINARY_MAGIC));
+        assert_eq!(Asset::from_postcard_slice(&bytes).unwrap(), asset);
+    }
+
+    #[test]
+    fn json_is_not_decoded_as_binary() {
+        let json = sample_asset().to_json_string().unwrap();
+        assert!(!json.as_bytes().starts_with(BINARY_MAGIC));
+        assert!(matches!(
+            Asset::from_postcard_slice(json.as_bytes()),
+            Err(BinaryDecodeError::MissingMagic)
+        ));
+    }
+
+    #[test]
+    fn truncated_binary_is_rejected() {
+        let mut bytes = sample_asset().to_postcard_vec().unwrap();
+        bytes.truncate(bytes.len() - 1);
+        assert!(matches!(
+            Asset::from_postcard_slice(&bytes),
+            Err(BinaryDecodeError::Postcard(_))
+        ));
+    }
+
+    #[test]
+    fn file_extension_selects_the_encoding() {
+        let asset = sample_asset();
+        let dir = std::env::temp_dir();
+        let tag = std::process::id();
+
+        let json_path = dir.join(format!("viveco_asset_test_{tag}.json"));
+        asset.save_to_file(&json_path).unwrap();
+        let written = std::fs::read(&json_path).unwrap();
+        assert!(!written.starts_with(BINARY_MAGIC));
+        assert_eq!(Asset::load_from_file(&json_path).unwrap(), asset);
+        std::fs::remove_file(&json_path).unwrap();
+
+        let binary_path = dir.join(format!("viveco_asset_test_{tag}.viveco"));
+        asset.save_to_file(&binary_path).unwrap();
+        let written = std::fs::read(&binary_path).unwrap();
+        assert!(written.starts_with(BINARY_MAGIC));
+        assert_eq!(Asset::load_from_file(&binary_path).unwrap(), asset);
+        std::fs::remove_file(&binary_path).unwrap();
+    }
+
+    #[test]
     fn applying_a_bone_map_updates_animation_targets() {
         use crate::animation::{Animation, BoneProperty, Keyframe, KeyframeTarget};
 
@@ -314,7 +449,7 @@ mod tests {
                 "duration": 1.0,
                 "keyframes": [
                     {"timestamp": 0.0, "value": 0.0,
-                     "target": {"kind": "shape", "shape": 0, "property": "x"}}
+                     "target": {"shape": {"shape": 0, "property": "x"}}}
                 ]
             }]
         }"#;

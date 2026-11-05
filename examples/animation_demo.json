@@ -439,9 +439,10 @@
           "timestamp": 0.0,
           "value": -0.6,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           },
           "handle_in": -0.6,
           "handle_out": -0.6
@@ -450,9 +451,10 @@
           "timestamp": 0.5,
           "value": 0.7,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           },
           "handle_in": 0.3,
           "handle_out": 0.8
@@ -461,9 +463,10 @@
           "timestamp": 1.0,
           "value": -0.6,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           },
           "handle_in": -0.6,
           "handle_out": -0.6
@@ -472,9 +475,10 @@
           "timestamp": 1.5,
           "value": 0.7,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           },
           "handle_in": 0.3,
           "handle_out": 0.8
@@ -483,9 +487,10 @@
           "timestamp": 0.0,
           "value": 0.7,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           },
           "handle_in": 0.3,
           "handle_out": 0.8
@@ -494,9 +499,10 @@
           "timestamp": 0.5,
           "value": -0.6,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           },
           "handle_in": -0.6,
           "handle_out": -0.6
@@ -505,9 +511,10 @@
           "timestamp": 1.0,
           "value": 0.7,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           },
           "handle_in": 0.3,
           "handle_out": 0.8
@@ -516,9 +523,10 @@
           "timestamp": 1.5,
           "value": -0.6,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           },
           "handle_in": -0.6,
           "handle_out": -0.6
@@ -527,36 +535,40 @@
           "timestamp": 0.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.5,
           "value": 0.09,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 1.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 1.5,
           "value": -0.09,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         }
       ]
@@ -570,180 +582,200 @@
           "timestamp": 0.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 0,
-            "property": "y"
+            "bone": {
+              "bone": 0,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.3,
           "value": -25.0,
           "target": {
-            "kind": "bone",
-            "bone": 0,
-            "property": "y"
+            "bone": {
+              "bone": 0,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.6,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 0,
-            "property": "y"
+            "bone": {
+              "bone": 0,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.9,
           "value": 12.0,
           "target": {
-            "kind": "bone",
-            "bone": 0,
-            "property": "y"
+            "bone": {
+              "bone": 0,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 1.2,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 0,
-            "property": "y"
+            "bone": {
+              "bone": 0,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.3,
           "value": -18.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.6,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.9,
           "value": 8.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 1.2,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.3,
           "value": -0.5,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.6,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.9,
           "value": 0.4,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 1.2,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 2,
-            "property": "angle"
+            "bone": {
+              "bone": 2,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.3,
           "value": 0.5,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.6,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.9,
           "value": -0.4,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 1.2,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 3,
-            "property": "angle"
+            "bone": {
+              "bone": 3,
+              "property": "angle"
+            }
           }
         }
       ]
@@ -757,90 +789,100 @@
           "timestamp": 0.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.5,
           "value": 0.35,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 1.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 1.5,
           "value": -0.25,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 2.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "angle"
+            "bone": {
+              "bone": 1,
+              "property": "angle"
+            }
           }
         },
         {
           "timestamp": 0.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 0.5,
           "value": 8.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 1.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 1.5,
           "value": -6.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         },
         {
           "timestamp": 2.0,
           "value": 0.0,
           "target": {
-            "kind": "bone",
-            "bone": 1,
-            "property": "y"
+            "bone": {
+              "bone": 1,
+              "property": "y"
+            }
           }
         }
       ]

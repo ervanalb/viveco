@@ -36,7 +36,7 @@ pub type BoneIndex = usize;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bone {
     /// Optional human-readable name, shown in the editor's skeleton tree.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub name: String,
 
     /// The origin end of the bone, in asset space.
@@ -44,7 +44,7 @@ pub struct Bone {
     /// This may be omitted when the bone has a parent, in which case the head
     /// follows the parent's tail. A root bone has no parent, so its head is
     /// always present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub head: Option<Point>,
 
     /// The far end of the bone, in asset space.
@@ -52,7 +52,7 @@ pub struct Bone {
     pub tail: Point,
 
     /// Nested bones, painted relative to this one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub children: Vec<Bone>,
 }
 

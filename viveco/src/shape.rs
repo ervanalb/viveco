@@ -312,7 +312,7 @@ impl<'de> Deserialize<'de> for Rgba8 {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Shape {
     /// Optional human-readable name, shown in the editor's shape tree.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub name: String,
 
     /// Z order among siblings. Lower values are painted first (further back).
@@ -323,11 +323,11 @@ pub struct Shape {
     pub style: Style,
 
     /// Contours combined into this shape's compound path.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub paths: Vec<Path>,
 
     /// Child shapes, clipped to this shape's interior.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub children: Vec<Shape>,
 }
 
@@ -460,7 +460,7 @@ impl Asset {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Path {
     /// Optional human-readable name, shown in the editor's shape tree.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub name: String,
 
     pub ends: PathEnds,
@@ -472,7 +472,7 @@ pub struct Path {
     /// segment's end point, whose weights live in that segment's
     /// [`to_weights`](Segment::to_weights). This list is therefore only used
     /// while the path is open.
-    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    #[serde(default)]
     pub start_weights: Weights,
 }
 
@@ -609,19 +609,19 @@ impl Path {
 /// weights are those of the anchor at `to`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ctrl1: Option<Point>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ctrl2: Option<Point>,
     pub to: Point,
     /// Bone weights of the control near the segment's start.
-    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    #[serde(default)]
     pub ctrl1_weights: Weights,
     /// Bone weights of the control near the segment's end.
-    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    #[serde(default)]
     pub ctrl2_weights: Weights,
     /// Bone weights of the anchor at the segment's end.
-    #[serde(default, skip_serializing_if = "Weights::is_empty")]
+    #[serde(default)]
     pub to_weights: Weights,
 }
 
@@ -663,9 +663,9 @@ pub const DEFAULT_STROKE_WIDTH: f32 = 2.0;
 /// Solid fills and/or strokes applied to a shape.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Style {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub fill: Option<Rgba8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub stroke: Option<StrokeStyle>,
 }
 

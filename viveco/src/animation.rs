@@ -1,4 +1,4 @@
-//! Animation clips, keyframes, curve sampling, and playback.
+//! Animation clips, keyframes, and curve sampling.
 
 use std::cmp::Ordering;
 
@@ -38,7 +38,7 @@ pub enum ShapeProperty {}
 /// of the asset identifies both. Inserting, removing, or moving a bone or shape
 /// therefore rewrites the target of every keyframe that refers to it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum KeyframeTarget {
     /// Drives one property of a bone.
     Bone {
@@ -65,10 +65,10 @@ pub struct Keyframe {
     /// The animated value at [`Self::timestamp`].
     pub value: f32,
     /// Bézier handle toward the previous keyframe.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub handle_in: Option<f32>,
     /// Bézier handle toward the next keyframe.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub handle_out: Option<f32>,
     /// What this keyframe animates.
     pub target: KeyframeTarget,
@@ -96,14 +96,14 @@ impl Keyframe {
 #[serde(from = "AnimationData")]
 pub struct Animation {
     /// User-visible name. Empty names are shown by position.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub name: String,
     /// Length of the animation. Keyframes may not fall outside it.
     pub duration: f32,
     /// Whether the animation loops back to the start.
     pub cyclic: bool,
     /// The clip's keyframes, ordered by timestamp.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub keyframes: Vec<Keyframe>,
 }
 
@@ -244,35 +244,6 @@ impl Animation {
             return;
         }
         self.insert_keyframe(Keyframe::new(time, value, target));
-    }
-
-    /// Advances the playhead by one frame of playback.
-    ///
-    /// Returns the new time and whether playback should continue. A cyclic
-    /// animation wraps around either end; otherwise playback stops on reaching
-    /// the end, or the start when the velocity is negative. An animation with no
-    /// duration cannot play.
-    pub fn advance_playhead(&self, playhead: f32, velocity: f32, delta: f32) -> (f32, bool) {
-        let playhead = if playhead.is_finite() { playhead } else { 0.0 };
-        let duration = self.duration;
-        if !duration.is_finite() || duration <= 0.0 {
-            return (0.0, false);
-        }
-        if !velocity.is_finite() || !delta.is_finite() || velocity == 0.0 {
-            return (playhead.clamp(0.0, duration), true);
-        }
-
-        let next = playhead + velocity * delta;
-        if self.cyclic {
-            return (next.rem_euclid(duration), true);
-        }
-        if next <= 0.0 {
-            (0.0, false)
-        } else if next >= duration {
-            (duration, false)
-        } else {
-            (next, true)
-        }
     }
 }
 
@@ -667,51 +638,6 @@ mod tests {
     }
 
     #[test]
-    fn cyclic_playback_wraps_around_the_end() {
-        let animation = curve(2.0, true, vec![]);
-
-        let (time, playing) = animation.advance_playhead(1.9, 1.0, 0.2);
-        assert!((time - 0.1).abs() < 1e-5);
-        assert!(playing);
-
-        // Negative velocity wraps around the start too.
-        let (time, playing) = animation.advance_playhead(0.1, -1.0, 0.2);
-        assert!((time - 1.9).abs() < 1e-5);
-        assert!(playing);
-    }
-
-    #[test]
-    fn non_cyclic_playback_stops_at_either_end() {
-        let animation = curve(2.0, false, vec![]);
-
-        assert_eq!(animation.advance_playhead(1.9, 1.0, 0.2), (2.0, false));
-        assert_eq!(animation.advance_playhead(0.1, -1.0, 0.2), (0.0, false));
-
-        // Before the end the playhead keeps moving.
-        let (time, playing) = animation.advance_playhead(1.0, 1.0, 0.2);
-        assert!((time - 1.2).abs() < 1e-5);
-        assert!(playing);
-    }
-
-    #[test]
-    fn playback_without_a_duration_stops_immediately() {
-        let animation = Animation::new(0.0);
-        assert_eq!(animation.advance_playhead(1.0, 1.0, 0.1), (0.0, false));
-
-        let animation = Animation::new(f32::NAN);
-        assert_eq!(animation.advance_playhead(1.0, 1.0, 0.1), (0.0, false));
-    }
-
-    #[test]
-    fn zero_velocity_holds_the_playhead() {
-        let animation = curve(2.0, true, vec![]);
-
-        let (time, playing) = animation.advance_playhead(0.75, 0.0, 0.1);
-        assert_eq!(time, 0.75);
-        assert!(playing);
-    }
-
-    #[test]
     fn channels_missing_from_the_animation_stay_at_rest() {
         let mut asset = Asset::new();
         for (name, head) in [("Arm", [10.0, 20.0]), ("Leg", [20.0, 20.0])] {
@@ -745,20 +671,23 @@ mod tests {
         };
 
         let json = asset.to_json_string().unwrap();
+        assert!(json.contains("\"handle_in\""));
+        assert!(json.contains("\"handle_out\""));
         assert_eq!(Asset::from_json_str(&json).unwrap(), asset);
 
-        // Omitted handles and empty animation lists stay out of the file.
+        // Every field is written even when empty, so postcard's positional
+        // decoding stays aligned with the struct.
         let empty = Asset {
             animations: vec![Animation::new(1.0)],
             ..Default::default()
         };
         let json = empty.to_json_string().unwrap();
-        assert!(!json.contains("keyframes"));
-        assert!(!json.contains("handle"));
+        assert!(json.contains("\"keyframes\""));
+        assert!(json.contains("\"name\""));
     }
 
     #[test]
-    fn animation_names_round_trip_and_are_omitted_when_empty() {
+    fn animation_names_round_trip() {
         let named = Asset {
             animations: vec![Animation {
                 name: "Walk".into(),
@@ -774,8 +703,10 @@ mod tests {
             animations: vec![Animation::new(2.0)],
             ..Default::default()
         };
-        let json = unnamed.to_json_string().unwrap();
-        assert!(!json.contains("\"name\""));
+        assert_eq!(
+            Asset::from_json_str(&unnamed.to_json_string().unwrap()).unwrap(),
+            unnamed
+        );
     }
 
     #[test]
@@ -824,13 +755,13 @@ mod tests {
                 "cyclic": true,
                 "keyframes": [
                     {"timestamp": 3.0, "value": 3.0,
-                     "target": {"kind": "bone", "bone": 0, "property": "x"}},
+                     "target": {"bone": {"bone": 0, "property": "x"}}},
                     {"timestamp": -1.0, "value": 0.0,
-                     "target": {"kind": "bone", "bone": 1, "property": "y"}},
+                     "target": {"bone": {"bone": 1, "property": "y"}}},
                     {"timestamp": 1.0, "value": 1.0,
-                     "target": {"kind": "bone", "bone": 2, "property": "angle"}},
+                     "target": {"bone": {"bone": 2, "property": "angle"}}},
                     {"timestamp": 9.0, "value": 9.0,
-                     "target": {"kind": "bone", "bone": 3, "property": "scale"}}
+                     "target": {"bone": {"bone": 3, "property": "scale"}}}
                 ]
             }]
         }"#;

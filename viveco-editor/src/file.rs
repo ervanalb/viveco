@@ -17,7 +17,9 @@ use crate::history::History;
 use viveco::Asset;
 
 /// Name used for a fresh document that has not been saved anywhere yet.
-const UNTITLED_FILE: &str = "untitled.json";
+///
+/// The extension selects the binary format, which is the default.
+const UNTITLED_FILE: &str = "untitled.viveco";
 
 /// Title shown when the document has no file.
 const UNTITLED_TITLE: &str = "Untitled";

@@ -15,11 +15,18 @@ use crate::editor::{DocumentBounds, EditorState, Viewport};
 use crate::file::{DocumentFile, open_document, save_document_to};
 use crate::history::History;
 
-/// Shown in the dialog's file-type filter.
-const FILTER_NAME: &str = "Viveco";
+/// Shown in the dialog's binary file-type filter.
+const BINARY_FILTER_NAME: &str = "Viveco";
 
-/// Extensions accepted by the file-type filter.
-const FILTER_EXTENSIONS: &[&str] = &["json"];
+/// Extensions accepted by the binary file-type filter. Listed first so the
+/// save dialog defaults to the binary format.
+const BINARY_FILTER_EXTENSIONS: &[&str] = &["viveco"];
+
+/// Shown in the dialog's JSON file-type filter.
+const JSON_FILTER_NAME: &str = "Viveco JSON";
+
+/// Extensions accepted by the JSON file-type filter.
+const JSON_FILTER_EXTENSIONS: &[&str] = &["json"];
 
 /// Title of the open dialog.
 const OPEN_TITLE: &str = "Open Viveco";
@@ -106,7 +113,8 @@ impl FileDialogs {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let mut dialog = rfd::FileDialog::new()
-                .add_filter(FILTER_NAME, FILTER_EXTENSIONS)
+                .add_filter(BINARY_FILTER_NAME, BINARY_FILTER_EXTENSIONS)
+                .add_filter(JSON_FILTER_NAME, JSON_FILTER_EXTENSIONS)
                 .set_title(match request {
                     DialogRequest::Open => OPEN_TITLE,
                     DialogRequest::Save => SAVE_TITLE,
