@@ -444,6 +444,29 @@ impl Asset {
     pub fn shape_subtree_len(&self, index: ShapeIndex) -> Option<usize> {
         self.shape_by_index(index).map(Shape::subtree_len)
     }
+
+    /// The pre-order index of the first shape named `name`.
+    ///
+    /// Names are descriptive and need not be unique, so this returns the first
+    /// match in the same depth-first order as [`Self::shape_by_index`].
+    pub fn shape_index_by_name(&self, name: &str) -> Option<ShapeIndex> {
+        fn find(shapes: &[Shape], name: &str, cursor: &mut usize) -> Option<ShapeIndex> {
+            for shape in shapes {
+                let current = *cursor;
+                *cursor += 1;
+                if shape.name == name {
+                    return Some(current);
+                }
+                if let Some(found) = find(&shape.children, name, cursor) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        let mut cursor = 0;
+        find(&self.shapes, name, &mut cursor)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -657,9 +680,6 @@ impl Segment {
 // Paint
 // ---------------------------------------------------------------------------
 
-/// Stroke width used for new and default strokes, in asset units.
-pub const DEFAULT_STROKE_WIDTH: f32 = 2.0;
-
 /// Solid fills and/or strokes applied to a shape.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Style {
@@ -669,11 +689,13 @@ pub struct Style {
     pub stroke: Option<StrokeStyle>,
 }
 
-/// A solid-color stroke of constant width.
+/// A solid-color stroke.
+///
+/// The width is not part of the model: the editor paints every stroke as a
+/// one-pixel outline regardless of zoom.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrokeStyle {
     pub color: Rgba8,
-    pub width: f32,
 }
 
 #[cfg(test)]
@@ -886,5 +908,31 @@ mod tests {
 
         // There is no bone to scale, so the point stays unweighted.
         assert!(weights.is_empty());
+    }
+
+    #[test]
+    fn shapes_are_found_by_name_in_pre_order() {
+        let asset = Asset {
+            shapes: vec![
+                Shape {
+                    name: "Outer".into(),
+                    children: vec![Shape {
+                        name: "Inner".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Shape {
+                    name: "Sibling".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(asset.shape_index_by_name("Outer"), Some(0));
+        assert_eq!(asset.shape_index_by_name("Inner"), Some(1));
+        assert_eq!(asset.shape_index_by_name("Sibling"), Some(2));
+        assert_eq!(asset.shape_index_by_name("Missing"), None);
     }
 }

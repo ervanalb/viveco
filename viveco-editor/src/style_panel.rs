@@ -1,5 +1,4 @@
-//! Bottom style panel: fill and stroke color pickers, stroke width, and
-//! enable toggles.
+//! Bottom style panel: fill and stroke color pickers and enable toggles.
 //!
 //! The panel edits the style of the currently selected shape. A path selection
 //! resolves to its owning shape, since paths are painted with their parent's
@@ -19,12 +18,9 @@ use crate::editor::{
     path_closed_at, set_path_closed, style_at, style_at_mut,
 };
 use crate::theme;
-use viveco::{DEFAULT_STROKE_WIDTH, Rgba8, StrokeStyle, Style};
+use viveco::{Rgba8, StrokeStyle, Style};
 
 const TOGGLE_OFF: Color = Color::NONE;
-
-/// Maximum stroke width exposed by the width slider, in document units.
-const MAX_STROKE_WIDTH: f32 = 24.0;
 
 /// Value range of the 8-bit color sliders.
 const CHANNEL_MAX: f32 = 255.0;
@@ -103,15 +99,11 @@ enum SliderKind {
     StrokeG,
     StrokeB,
     StrokeA,
-    StrokeWidth,
 }
 
 impl SliderKind {
     fn range(self) -> (f32, f32) {
-        match self {
-            Self::StrokeWidth => (0.0, MAX_STROKE_WIDTH),
-            _ => (0.0, CHANNEL_MAX),
-        }
+        (0.0, CHANNEL_MAX)
     }
 
     fn label(self) -> &'static str {
@@ -120,12 +112,7 @@ impl SliderKind {
             Self::FillG | Self::StrokeG => "G",
             Self::FillB | Self::StrokeB => "B",
             Self::FillA | Self::StrokeA => "A",
-            Self::StrokeWidth => "W",
         }
-    }
-
-    fn is_integer(self) -> bool {
-        !matches!(self, Self::StrokeWidth)
     }
 }
 
@@ -185,7 +172,6 @@ struct StylePanelState {
     stroke: ColorState,
     fill_enabled: bool,
     stroke_enabled: bool,
-    stroke_width: f32,
     /// Whether the selected node's paths are closed.
     closed: bool,
     /// Whether the selection has a style the panel can edit. Empty selections
@@ -204,7 +190,6 @@ impl Default for StylePanelState {
             stroke: ColorState::WHITE,
             fill_enabled: false,
             stroke_enabled: false,
-            stroke_width: DEFAULT_STROKE_WIDTH,
             closed: false,
             editable: false,
             synced: None,
@@ -224,7 +209,6 @@ impl StylePanelState {
             SliderKind::StrokeG => self.stroke.g,
             SliderKind::StrokeB => self.stroke.b,
             SliderKind::StrokeA => self.stroke.a,
-            SliderKind::StrokeWidth => self.stroke_width,
         }
     }
 
@@ -240,7 +224,6 @@ impl StylePanelState {
             SliderKind::StrokeG => self.stroke.g = value,
             SliderKind::StrokeB => self.stroke.b = value,
             SliderKind::StrokeA => self.stroke.a = value,
-            SliderKind::StrokeWidth => self.stroke_width = value,
         }
     }
 
@@ -260,12 +243,7 @@ impl StylePanelState {
     }
 
     fn display(&self, kind: SliderKind) -> String {
-        let value = self.value(kind);
-        if kind.is_integer() {
-            format!("{}", channel_round(value))
-        } else {
-            format!("{value:.1}")
-        }
+        format!("{}", channel_round(self.value(kind)))
     }
 
     fn color(&self, target: ColorTarget) -> ColorState {
@@ -288,7 +266,6 @@ impl StylePanelState {
         style.fill = self.fill_enabled.then(|| self.fill.to_rgba8());
         style.stroke = self.stroke_enabled.then(|| StrokeStyle {
             color: self.stroke.to_rgba8(),
-            width: self.stroke_width,
         });
     }
 }
@@ -436,9 +413,6 @@ fn spawn_color_group(parent: &mut ChildSpawnerCommands, target: ColorTarget) {
             spawn_header(group, target);
             for kind in target.channels() {
                 spawn_slider(group, kind);
-            }
-            if target == ColorTarget::Stroke {
-                spawn_slider(group, SliderKind::StrokeWidth);
             }
         });
 }
@@ -619,7 +593,6 @@ fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelSta
     }
     if let Some(stroke) = style.stroke {
         panel.stroke = ColorState::from_rgba8(stroke.color);
-        panel.stroke_width = stroke.width.clamp(0.0, MAX_STROKE_WIDTH);
     }
     panel.fill_enabled = style.fill.is_some();
     panel.stroke_enabled = style.stroke.is_some();
@@ -729,7 +702,6 @@ struct PanelSignature {
     stroke: ColorState,
     fill_enabled: bool,
     stroke_enabled: bool,
-    stroke_width: f32,
     closed: bool,
 }
 
@@ -751,7 +723,6 @@ fn update_visuals(
         stroke: panel.stroke,
         fill_enabled: panel.fill_enabled,
         stroke_enabled: panel.stroke_enabled,
-        stroke_width: panel.stroke_width,
         closed: panel.closed,
     };
     if last.as_ref() == Some(&signature) {
@@ -809,14 +780,9 @@ mod tests {
         panel.set_normalized(SliderKind::FillR, 0.5);
         assert!((panel.fill.r - 127.5).abs() < 1e-4);
 
-        panel.set_normalized(SliderKind::StrokeWidth, 0.5);
-        assert!((panel.stroke_width - MAX_STROKE_WIDTH * 0.5).abs() < 1e-4);
-
         // Out-of-range positions are clamped to the slider's bounds.
         panel.set_normalized(SliderKind::FillA, 2.0);
         assert_eq!(panel.fill.a, CHANNEL_MAX);
-        panel.set_normalized(SliderKind::StrokeWidth, -1.0);
-        assert_eq!(panel.stroke_width, 0.0);
 
         assert!((panel.normalized(SliderKind::FillR) - 0.5).abs() < 1e-4);
     }
@@ -827,7 +793,6 @@ mod tests {
         panel.fill = ColorState::from_rgba8(Rgba8::rgba(10, 20, 30, 40));
         panel.fill_enabled = true;
         panel.stroke = ColorState::from_rgba8(Rgba8::rgb(1, 2, 3));
-        panel.stroke_width = 4.0;
         panel.stroke_enabled = false;
 
         let mut style = Style::default();
@@ -841,7 +806,6 @@ mod tests {
             style.stroke,
             Some(StrokeStyle {
                 color: Rgba8::rgb(1, 2, 3),
-                width: 4.0,
             })
         );
 

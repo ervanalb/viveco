@@ -73,12 +73,13 @@ fn main() {
 fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
     let document = Asset::new();
     let bounds = bounds_for(&document);
-    let scene = build_scene(&document);
 
     let (viewport_width, viewport_height) = window
         .single()
         .map(|window| (window.width(), window.height()))
         .unwrap_or((WINDOW_SIZE as f32, WINDOW_SIZE as f32));
+    let transform = fit_transform(bounds, viewport_width, viewport_height);
+    let scene = build_scene(&document, transform.scale.x);
 
     // `VelloScene2d` has no intrinsic bounds, so provide them for picking.
     let aabb = Aabb::from_min_max(
@@ -92,7 +93,7 @@ fn setup(mut commands: Commands, window: Query<&Window, With<PrimaryWindow>>) {
     commands.spawn((Camera2d, VelloView, Transform::from_xyz(0.0, 0.0, 1000.0)));
     commands.spawn((
         VelloScene2d::from(scene),
-        fit_transform(bounds, viewport_width, viewport_height),
+        transform,
         aabb,
         // Vello renders the scene with its own Y-flip, so the entity's `Aabb`
         // does not describe where the document actually appears. Frustum

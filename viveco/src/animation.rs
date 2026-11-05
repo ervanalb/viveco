@@ -457,6 +457,18 @@ impl From<AnimationData> for Animation {
     }
 }
 
+impl Asset {
+    /// The index of the first animation named `name`.
+    ///
+    /// Animation names are descriptive and need not be unique, so this returns
+    /// the first match in document order.
+    pub fn animation_index_by_name(&self, name: &str) -> Option<usize> {
+        self.animations
+            .iter()
+            .position(|animation| animation.name == name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,6 +755,23 @@ mod tests {
 
         assert_eq!(animation.duration, 5.0);
         assert_eq!(keyframe_times(&animation), vec![0.0, 2.0]);
+    }
+
+    #[test]
+    fn animations_are_found_by_name() {
+        let asset = Asset {
+            animations: vec![
+                Animation::new(1.0),
+                Animation {
+                    name: "Walk".into(),
+                    ..Animation::new(2.0)
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(asset.animation_index_by_name("Walk"), Some(1));
+        assert_eq!(asset.animation_index_by_name("Missing"), None);
     }
 
     #[test]

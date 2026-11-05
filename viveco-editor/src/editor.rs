@@ -22,8 +22,7 @@ use crate::render::{
 };
 use crate::rig::{BoneRename, RigEditing};
 use viveco::{
-    Asset, BoneIndex, DEFAULT_STROKE_WIDTH, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle,
-    Style, Weights,
+    Asset, BoneIndex, Path, PathEnds, Rgba8, Segment, Shape, StrokeStyle, Style, Weights,
 };
 
 /// Width of the layer sidebar on the right, in screen pixels.
@@ -1116,7 +1115,7 @@ fn refresh_scene(
         .filter(|pose| !pose.is_identity())
         .map(|pose| editor.document.deformed(pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
-    let mut scene = build_scene(displayed);
+    let mut scene = build_scene(displayed, scale);
 
     if *mode == EditorMode::Draw {
         if let Some(address) = &editor.selected_node {
@@ -1668,10 +1667,8 @@ fn pick_shape_node(
     };
 
     // Every shape is pickable near its outline, whether or not it has paint,
-    // so an unfilled or unstroked shape can still be selected and dragged. A
-    // stroke widens the tolerance by half its width.
-    let tolerance = shape.style.stroke.map_or(0.0, |stroke| stroke.width * 0.5) + slack;
-    if shape_distance(shape, point) <= tolerance {
+    // so an unfilled or unstroked shape can still be selected and dragged.
+    if shape_distance(shape, point) <= slack {
         return Some(address());
     }
 
@@ -1858,9 +1855,7 @@ fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
         return false;
     };
 
-    // Clicking on a wide stroke still counts as clicking its outline.
-    let stroke_half_width = shape.style.stroke.map_or(0.0, |stroke| stroke.width * 0.5);
-    if distance > slack + stroke_half_width {
+    if distance > slack {
         return false;
     }
 
@@ -2355,7 +2350,6 @@ fn pen_style() -> Style {
         fill: None,
         stroke: Some(StrokeStyle {
             color: PEN_STROKE_COLOR,
-            width: DEFAULT_STROKE_WIDTH,
         }),
     }
 }
@@ -2596,12 +2590,11 @@ mod tests {
         }
     }
 
-    fn stroked(width: f32) -> Style {
+    fn stroked() -> Style {
         Style {
             fill: None,
             stroke: Some(StrokeStyle {
                 color: Rgba8::rgb(0, 0, 0),
-                width,
             }),
         }
     }
@@ -2742,7 +2735,7 @@ mod tests {
     fn parent_stroke_is_picked_over_children() {
         let document = document_of(vec![Shape {
             paths: vec![rect(0.0, 0.0, 100.0, 100.0)],
-            style: stroked(4.0),
+            style: stroked(),
             children: vec![shaped(
                 rect(0.0, 0.0, 100.0, 100.0),
                 filled(Rgba8::rgb(255, 0, 0)),
@@ -2757,7 +2750,7 @@ mod tests {
         );
         // The parent's stroke is painted over the child, so it wins there.
         assert_eq!(
-            pick_shape(&document, None, [1.0, 50.0], 0.0),
+            pick_shape(&document, None, [1.0, 50.0], 2.0),
             Some(shape_address(&[0]))
         );
     }
@@ -2889,11 +2882,11 @@ mod tests {
     fn strokes_are_hit_by_distance() {
         let document = document_of(vec![shaped(
             Path::new([0.0, 50.0]).line_to([100.0, 50.0]),
-            stroked(4.0),
+            stroked(),
         )]);
 
-        assert!(pick_shape(&document, None, [50.0, 52.0], 0.0).is_some());
-        assert!(pick_shape(&document, None, [50.0, 60.0], 0.0).is_none());
+        assert!(pick_shape(&document, None, [50.0, 52.0], 2.0).is_some());
+        assert!(pick_shape(&document, None, [50.0, 60.0], 2.0).is_none());
     }
 
     #[test]
@@ -3508,7 +3501,7 @@ mod tests {
     fn inserting_a_point_selects_the_new_anchor() {
         let document = document_of(vec![shaped(
             Path::new([0.0, 0.0]).line_to([100.0, 0.0]),
-            stroked(2.0),
+            stroked(),
         )]);
         let mut editor = EditorState::new(document);
 

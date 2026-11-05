@@ -7,8 +7,7 @@
       "z": 0.0,
       "style": {
         "stroke": {
-          "color": "#c98f4a",
-          "width": 30.0
+          "color": "#c98f4a"
         }
       },
       "paths": [
@@ -75,8 +74,7 @@
       "z": 1.0,
       "style": {
         "stroke": {
-          "color": "#c98f4a",
-          "width": 24.0
+          "color": "#c98f4a"
         }
       },
       "paths": [
@@ -144,8 +142,7 @@
       "style": {
         "fill": "#4cc9f099",
         "stroke": {
-          "color": "#2b6c86",
-          "width": 3.0
+          "color": "#2b6c86"
         }
       },
       "paths": [

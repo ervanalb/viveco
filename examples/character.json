@@ -8,8 +8,7 @@
       "style": {
         "fill": "#8b5cf6",
         "stroke": {
-          "color": "#0b0b12",
-          "width": 3.0
+          "color": "#0b0b12"
         }
       },
       "paths": [
@@ -62,8 +61,7 @@
       "style": {
         "fill": "#34d399",
         "stroke": {
-          "color": "#064e3b",
-          "width": 2.0
+          "color": "#064e3b"
         }
       },
       "paths": [

@@ -267,7 +267,6 @@ mod tests {
                     fill: Some(Rgba8::rgb(0xb3, 0xb3, 0xb3)),
                     stroke: Some(StrokeStyle {
                         color: Rgba8::rgba(0, 0, 0, 128),
-                        width: 2.0,
                     }),
                 },
                 paths: vec![sample_path()],

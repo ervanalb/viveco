@@ -303,6 +303,29 @@ impl Asset {
         self.bone_by_index(index).map(Bone::subtree_len)
     }
 
+    /// The pre-order index of the first bone named `name`.
+    ///
+    /// Names are descriptive and need not be unique, so this returns the first
+    /// match in the same depth-first order as [`Self::bone_by_index`].
+    pub fn bone_index_by_name(&self, name: &str) -> Option<BoneIndex> {
+        fn find(bones: &[Bone], name: &str, cursor: &mut usize) -> Option<BoneIndex> {
+            for bone in bones {
+                let current = *cursor;
+                *cursor += 1;
+                if bone.name == name {
+                    return Some(current);
+                }
+                if let Some(found) = find(&bone.children, name, cursor) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        let mut cursor = 0;
+        find(&self.bones, name, &mut cursor)
+    }
+
     /// The parent of the bone at `index`, or `None` for a root or missing bone.
     pub fn parent_of(&self, index: BoneIndex) -> Option<BoneIndex> {
         locate(self, index)?.0
@@ -636,5 +659,31 @@ mod tests {
             move_map(5, 0, 2, 3),
             vec![Some(3), Some(4), Some(0), Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn bones_are_found_by_name_in_pre_order() {
+        let asset = Asset {
+            bones: vec![
+                Bone {
+                    name: "Root".into(),
+                    children: vec![Bone {
+                        name: "Child".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Bone {
+                    name: "Sibling".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(asset.bone_index_by_name("Root"), Some(0));
+        assert_eq!(asset.bone_index_by_name("Child"), Some(1));
+        assert_eq!(asset.bone_index_by_name("Sibling"), Some(2));
+        assert_eq!(asset.bone_index_by_name("Missing"), None);
     }
 }

@@ -10,21 +10,26 @@ use viveco::{Asset, Path, Rgba8, Shape, Style};
 
 /// Builds a Vello scene in document coordinates.
 ///
+/// `scale` is the document-to-screen factor the scene will be drawn with. It is
+/// used to paint every stroke as a hairline one screen pixel wide, regardless
+/// of zoom.
+///
 /// Sibling shapes are painted in ascending Z order. A shape's paths are
 /// concatenated into one compound path, which is filled with the non-zero
 /// winding rule: contours wound opposite to the outer contour become holes.
 /// The fill is painted first, then the children inside a clip layer keyed to
 /// the same compound path, then the stroke on top. A shape with children but
 /// no paths acts as an unclipped group.
-pub fn build_scene(document: &Asset) -> Scene {
+pub fn build_scene(document: &Asset, scale: f32) -> Scene {
     let mut scene = Scene::new();
+    let stroke_width = 1.0 / f64::from(scale.max(f32::EPSILON));
     for index in document.shape_indices_in_paint_order() {
-        draw_shape(&mut scene, &document.shapes[index]);
+        draw_shape(&mut scene, &document.shapes[index], stroke_width);
     }
     scene
 }
 
-fn draw_shape(scene: &mut Scene, shape: &Shape) {
+fn draw_shape(scene: &mut Scene, shape: &Shape, stroke_width: f64) {
     let path = shape_to_bez_path(shape);
     draw_fill(scene, &shape.style, &path);
 
@@ -36,7 +41,7 @@ fn draw_shape(scene: &mut Scene, shape: &Shape) {
             scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &path);
         }
         for index in shape.child_indices_in_paint_order() {
-            draw_shape(scene, &shape.children[index]);
+            draw_shape(scene, &shape.children[index], stroke_width);
         }
         if clipped {
             scene.pop_layer();
@@ -44,8 +49,8 @@ fn draw_shape(scene: &mut Scene, shape: &Shape) {
     }
 
     // The stroke sits above the children and is not clipped by its own
-    // outline, so the whole stroke width stays visible.
-    draw_stroke(scene, &shape.style, &path);
+    // outline, so the hairline stays visible along the whole contour.
+    draw_stroke(scene, &shape.style, &path, stroke_width);
 }
 
 fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath) {
@@ -54,10 +59,10 @@ fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath) {
     }
 }
 
-fn draw_stroke(scene: &mut Scene, style: &Style, path: &BezPath) {
+fn draw_stroke(scene: &mut Scene, style: &Style, path: &BezPath, stroke_width: f64) {
     if let Some(stroke) = style.stroke {
         scene.stroke(
-            &KurboStroke::new(f64::from(stroke.width)),
+            &KurboStroke::new(stroke_width),
             Affine::IDENTITY,
             &to_color(stroke.color),
             None,
