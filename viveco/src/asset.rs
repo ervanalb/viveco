@@ -53,6 +53,10 @@ impl From<postcard::Error> for BinaryDecodeError {
 }
 
 /// The root of a vector-art file.
+#[cfg_attr(
+    feature = "bevy",
+    derive(::bevy::asset::Asset, ::bevy::reflect::TypePath)
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Asset {
     pub shapes: Vec<Shape>,

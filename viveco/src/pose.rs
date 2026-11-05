@@ -232,6 +232,58 @@ impl Pose {
     pub fn clear(&mut self) {
         self.bones.fill(BonePose::default());
     }
+
+    /// A weighted average of several poses.
+    ///
+    /// Each sample pairs a pose with a weight; the result has `bone_count`
+    /// entries and every entry is divided by the total weight. Non-finite and
+    /// non-positive weights are ignored, and if nothing remains the result is
+    /// the rest pose.
+    ///
+    /// Samples are averaged field by field, so they must share a pivot for
+    /// each bone or their rotations and translations will refer to different
+    /// origins. [`Asset::sample_pose`](crate::Asset::sample_pose) produces
+    /// such poses.
+    pub fn blend(bone_count: usize, samples: &[(&Pose, f32)]) -> Self {
+        // Accumulators start at zero, including scale (whose identity is 1),
+        // so dividing by the total weight recovers the weighted average.
+        let zero = BonePose {
+            scale: 0.0,
+            ..Default::default()
+        };
+        let mut bones = vec![zero; bone_count];
+        let mut total_weight = 0.0;
+
+        for (pose, weight) in samples {
+            if !weight.is_finite() || *weight <= 0.0 {
+                continue;
+            }
+            let weight = *weight;
+            for (index, accumulated) in bones.iter_mut().enumerate() {
+                let bone = pose.get(index);
+                accumulated.rotation += bone.rotation * weight;
+                accumulated.translation[0] += bone.translation[0] * weight;
+                accumulated.translation[1] += bone.translation[1] * weight;
+                accumulated.scale += bone.scale * weight;
+                accumulated.pivot[0] += bone.pivot[0] * weight;
+                accumulated.pivot[1] += bone.pivot[1] * weight;
+            }
+            total_weight += weight;
+        }
+
+        if total_weight <= f32::EPSILON {
+            return Self::new(bone_count);
+        }
+        for bone in &mut bones {
+            bone.rotation /= total_weight;
+            bone.translation[0] /= total_weight;
+            bone.translation[1] /= total_weight;
+            bone.scale /= total_weight;
+            bone.pivot[0] /= total_weight;
+            bone.pivot[1] /= total_weight;
+        }
+        Self { bones }
+    }
 }
 
 /// The world transform of the bone at `target` under `pose`.

@@ -467,6 +467,42 @@ impl Asset {
             .iter()
             .position(|animation| animation.name == name)
     }
+
+    /// The blended pose of several animation samples at once.
+    ///
+    /// Each clip is `(animation index, time, weight)`. Out-of-range indices,
+    /// non-finite times, and non-positive weights are ignored; the remaining
+    /// poses are weighted-averaged. When no clip contributes, the result is
+    /// the rest pose.
+    ///
+    /// Every sampled pose is re-anchored to the bone's rest head before
+    /// blending, so a bone that one clip leaves at rest still blends correctly
+    /// with a bone another clip rotates. This is the same pivot the rig view
+    /// uses.
+    pub fn sample_pose(&self, clips: &[(usize, f32, f32)]) -> Pose {
+        let heads = self.rest_heads();
+        let mut sampled = Vec::with_capacity(clips.len());
+
+        for &(index, time, weight) in clips {
+            let Some(animation) = self.animations.get(index) else {
+                continue;
+            };
+            if !time.is_finite() || !weight.is_finite() || weight <= 0.0 {
+                continue;
+            }
+            let mut pose = animation.sample_pose(self, time);
+            for (bone, head) in heads.iter().enumerate() {
+                pose.set(bone, pose.get(bone).with_pivot(*head));
+            }
+            sampled.push((pose, weight));
+        }
+
+        let samples: Vec<(&Pose, f32)> = sampled
+            .iter()
+            .map(|(pose, weight)| (pose, *weight))
+            .collect();
+        Pose::blend(self.bone_count(), &samples)
+    }
 }
 
 #[cfg(test)]
@@ -772,6 +808,54 @@ mod tests {
 
         assert_eq!(asset.animation_index_by_name("Walk"), Some(1));
         assert_eq!(asset.animation_index_by_name("Missing"), None);
+    }
+
+    #[test]
+    fn sample_pose_blends_animation_clips_by_weight() {
+        let mut asset = Asset::new();
+        asset.bones.push(Bone {
+            name: "Arm".into(),
+            head: Some([10.0, 20.0]),
+            tail: [10.0, 40.0],
+            children: Vec::new(),
+        });
+
+        let mut rest = Animation::new(1.0);
+        rest.insert_keyframe(bone_keyframe(0.0, 0.0, 0, BoneProperty::Angle));
+        let mut turned = Animation::new(1.0);
+        turned.insert_keyframe(bone_keyframe(
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+            0,
+            BoneProperty::Angle,
+        ));
+        asset.animations = vec![rest, turned];
+
+        let pose = asset.sample_pose(&[(0, 0.0, 0.25), (1, 0.0, 0.75)]);
+        let arm = pose.get(0);
+        assert!((arm.rotation - std::f32::consts::FRAC_PI_2 * 0.75).abs() < 1e-5);
+        assert_eq!(arm.pivot, [10.0, 20.0]);
+        // An unused channel stays at its animation value, so the blend is a
+        // weighted average of one clip at rest and one rotated.
+        assert_eq!(arm.translation, [0.0, 0.0]);
+        assert!((arm.scale - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sample_pose_ignores_empty_and_invalid_clips() {
+        let asset = Asset::new();
+        assert!(asset.sample_pose(&[]).is_identity());
+        assert!(
+            asset
+                .sample_pose(&[(7, 0.0, 1.0), (0, 0.0, 0.0)])
+                .is_identity()
+        );
+
+        // Missing bones and animations leave a rest pose rather than panicking.
+        let mut asset = Asset::new();
+        asset.bones.push(Bone::default());
+        asset.animations.push(Animation::new(1.0));
+        assert!(asset.sample_pose(&[(0, f32::NAN, 1.0)]).is_identity());
     }
 
     #[test]

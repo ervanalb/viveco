@@ -5,7 +5,24 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Adds `viveco::render`, which converts assets into Vello scenes.
+vello = ["dep:vello"]
+# Adds the Bevy asset loader, animator component, and rendering plugin.
+bevy = ["dep:bevy", "dep:bevy_vello", "vello"]
+# Link Bevy dynamically: much faster incremental builds for development.
+dynamic_linking = ["bevy", "bevy/dynamic_linking"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true
+vello = { workspace = true, optional = true }
+bevy = { workspace = true, optional = true }
+bevy_vello = { workspace = true, optional = true }
+
+[[example]]
+name = "animate"
+path = "examples/animate.rs"
+required-features = ["bevy"]

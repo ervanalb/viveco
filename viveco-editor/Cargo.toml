@@ -9,7 +9,7 @@ edition = "2024"
 dynamic_linking = ["bevy/dynamic_linking"]
 
 [dependencies]
-viveco.workspace = true
+viveco = { workspace = true, features = ["vello"] }
 bevy = "0.19"
 bevy_vello = "0.14"
 # Native file dialogs. On Linux the XDG portal backend is used; it needs no
