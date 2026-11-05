@@ -40,7 +40,8 @@ fn examples_load_as_the_current_format() {
     let mut checked = 0;
     for entry in std::fs::read_dir(&dir).expect("examples directory") {
         let path = entry.expect("directory entry").path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        let extension = path.extension().and_then(|ext| ext.to_str());
+        if !matches!(extension, Some("json" | "viveco")) {
             continue;
         }
 
