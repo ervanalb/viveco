@@ -1,9 +1,10 @@
 //! Loads and animates the rigged `stick.viveco` example.
 //!
 //! The example asset lives in the workspace's `examples` directory, so the
-//! asset server root is pointed there. The demo spawns its scene explicitly,
-//! then cycles through every animation with a short crossfade, which exercises
-//! the `(index, time, weight)` instances on [`VivecoInstance`].
+//! asset server root is pointed there. The demo opts into a default scene, so
+//! its instance does not need to name one, then cycles through every animation
+//! with a short crossfade, which exercises the `(index, time, weight)`
+//! instances on [`VivecoInstance`].
 //!
 //! Run with `cargo run -p viveco --example animate --features bevy`.
 
@@ -58,13 +59,13 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         Transform::from_xyz(0.0, 0.0, 100.0).with_scale(Vec3::splat(1.)),
     ));
 
-    let scene = commands.spawn((viveco::VivecoScene,)).id();
+    // Mark one scene as the default; for VivecoInstances without explicit `VivecoSceneOf`.
+    commands.spawn((viveco::VivecoScene, viveco::VivecoDefaultScene));
 
     let handle = asset_server.load::<viveco::Asset>("stick.viveco");
     commands.spawn((
         viveco::VivecoInstance::from_animation(handle, START_ANIMATION),
         viveco::VivecoStrokeWidthInPixels::default(),
-        viveco::VivecoSceneOf(scene),
     ));
 }
 

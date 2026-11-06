@@ -10,10 +10,11 @@
 //!   every [`VivecoInstance`] into the [`VivecoScene`] named by its
 //!   [`VivecoSceneOf`] component.
 //!
-//! Everything is explicit: the plugin never spawns entities, and it never
-//! assigns an instance to a scene. Spawn the [`VivecoScene`] entities your app
-//! needs and link instances with [`VivecoSceneOf`]. An instance without a
-//! [`VivecoSceneOf`] is ignored.
+//! Everything is explicit: the plugin never spawns entities. Spawn the
+//! [`VivecoScene`] entities your app needs and link instances with
+//! [`VivecoSceneOf`]. Marking one scene [`VivecoDefaultScene`] opts into a
+//! default target for instances that do not name a scene; without such a
+//! marker, unlinked instances are ignored.
 //!
 //! # With the plugin
 //!
@@ -54,6 +55,25 @@
 //! space. Spawn several scenes for independent rendering (for example, one per
 //! camera or render layer); a scene's own transform applies to all its
 //! contents.
+//!
+//! # Default scene
+//!
+//! Marking a scene with [`VivecoDefaultScene`] makes it the target for
+//! instances that do not name one, so those instances need no [`VivecoSceneOf`]:
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use viveco::{Asset, VivecoDefaultScene, VivecoInstance, VivecoScene};
+//! # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
+//! commands.spawn((VivecoScene, VivecoDefaultScene));
+//! commands.spawn(VivecoInstance::from_animation(asset, 0));
+//! # }
+//! ```
+//!
+//! Each instance is linked once; an explicit [`VivecoSceneOf`] always wins. If
+//! several scenes carry the marker, the one with the lowest entity ID is used,
+//! and with no marked scene unlinked instances are ignored. Removing the
+//! default scene unlinks its members, which can then join a new default.
 //!
 //! # Stroke width
 //!
@@ -136,8 +156,8 @@ mod plugin;
 
 pub use loader::VivecoLoader;
 pub use plugin::{
-    VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneMembers, VivecoSceneOf,
-    VivecoStrokeWidthInPixels,
+    VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneMembers,
+    VivecoSceneOf, VivecoStrokeWidthInPixels,
 };
 
 /// The Bevy integration's vocabulary.
@@ -147,6 +167,7 @@ pub use plugin::{
 /// `viveco` directly.
 pub mod prelude {
     pub use super::{
-        VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf, VivecoStrokeWidthInPixels,
+        VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf,
+        VivecoStrokeWidthInPixels,
     };
 }

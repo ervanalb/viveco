@@ -38,6 +38,6 @@ pub use shape::*;
 
 #[cfg(feature = "bevy")]
 pub use self::bevy::{
-    VivecoInstance, VivecoLoader, VivecoPlugin, VivecoScene, VivecoSceneMembers, VivecoSceneOf,
-    VivecoStrokeWidthInPixels,
+    VivecoDefaultScene, VivecoInstance, VivecoLoader, VivecoPlugin, VivecoScene,
+    VivecoSceneMembers, VivecoSceneOf, VivecoStrokeWidthInPixels,
 };

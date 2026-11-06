@@ -20,8 +20,10 @@ use super::VivecoLoader;
 /// Each animation instance is sampled at its time, the poses are blended by
 /// weight, and the resulting geometry is placed into the [`VivecoScene`] named
 /// by this entity's [`VivecoSceneOf`] component. An instance without a
-/// [`VivecoSceneOf`] is not rendered, and [`VivecoPlugin`] never assigns one:
-/// spawn a [`VivecoScene`] yourself and link the instance to it.
+/// [`VivecoSceneOf`] joins the scene marked [`VivecoDefaultScene`], if any;
+/// otherwise it is not rendered. [`VivecoPlugin`] never spawns a scene, so
+/// spawn a [`VivecoScene`] yourself and link the instance to it (or mark it as
+/// the default).
 ///
 /// ```
 /// # use bevy::prelude::*;
@@ -89,8 +91,7 @@ impl VivecoInstance {
 
 /// Links a [`VivecoInstance`] to the [`VivecoScene`] it draws into.
 ///
-/// Every instance that should be rendered needs this component. The plugin
-/// does not insert it for you, so a scene is created and populated explicitly:
+/// A scene is created and populated explicitly:
 ///
 /// ```
 /// # use bevy::prelude::*;
@@ -107,6 +108,9 @@ impl VivecoInstance {
 /// Point several instances at the same [`VivecoScene`] to Z-order their
 /// artwork together, or at different scenes to render them independently (for
 /// example, one per camera or render layer).
+///
+/// An instance without this component joins the scene marked
+/// [`VivecoDefaultScene`], if one exists; otherwise it is not rendered.
 ///
 /// This is a Bevy relationship: despawning the scene removes the component,
 /// and the scene's [`VivecoSceneMembers`] stays up to date automatically.
@@ -145,6 +149,28 @@ pub struct VivecoSceneMembers(Vec<Entity>);
 #[derive(Component)]
 #[require(VelloScene2d, NoFrustumCulling)]
 pub struct VivecoScene;
+
+/// Marks the [`VivecoScene`] that instances without [`VivecoSceneOf`] join.
+///
+/// Add this component to one [`VivecoScene`] to opt into a default scene. The
+/// plugin then links every [`VivecoInstance`] that does not name a scene to it,
+/// so instances can be spawned without picking a scene:
+///
+/// ```
+/// # use bevy::prelude::*;
+/// # use viveco::{Asset, VivecoDefaultScene, VivecoInstance, VivecoScene};
+/// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
+/// commands.spawn((VivecoScene, VivecoDefaultScene));
+/// commands.spawn(VivecoInstance::from_animation(asset, 0));
+/// # }
+/// ```
+///
+/// Linking happens once per instance; an explicit [`VivecoSceneOf`] always
+/// wins. If several scenes are marked, the one with the lowest entity ID is
+/// used. With no marked scene, instances without [`VivecoSceneOf`] are not
+/// rendered.
+#[derive(Component, Default)]
+pub struct VivecoDefaultScene;
 
 /// Keeps strokes at a fixed size on screen.
 ///
@@ -217,6 +243,7 @@ impl Plugin for VivecoPlugin {
                 // `chain` so an asset event re-marks instances before the
                 // scene update reads their change ticks.
                 (
+                    attach_default_scene,
                     normalize_viveco_stroke_widths,
                     mark_reloaded_instances,
                     update_viveco_scenes,
@@ -249,6 +276,28 @@ fn mark_reloaded_instances(
                 instance.set_changed();
             }
         }
+    }
+}
+
+/// Links instances that do not name a scene to the [`VivecoDefaultScene`].
+///
+/// An instance is linked once; afterwards the `Without<VivecoSceneOf>` query
+/// matches nothing. The system returns immediately when no scene is marked, so
+/// its steady-state cost is an empty query scan. `chain` inserts a
+/// deferred-command sync point before the scene update, so a newly linked
+/// instance renders in the same frame.
+fn attach_default_scene(
+    mut commands: Commands,
+    defaults: Query<Entity, With<VivecoDefaultScene>>,
+    unlinked: Query<Entity, (With<VivecoInstance>, Without<VivecoSceneOf>)>,
+) {
+    // Pick the lowest index so the choice is deterministic if more than one
+    // scene is marked. (`Entity`'s own ordering is not index order.)
+    let Some(scene) = defaults.iter().min_by_key(|entity| entity.index_u32()) else {
+        return;
+    };
+    for entity in &unlinked {
+        commands.entity(entity).insert(VivecoSceneOf(scene));
     }
 }
 
@@ -509,6 +558,23 @@ mod tests {
         counts
     }
 
+    fn scene_path_count(app: &mut App, entity: Entity) -> u32 {
+        let mut query = app.world_mut().query::<&VelloScene2d>();
+        query
+            .get(app.world(), entity)
+            .map_or(0, |scene| scene.encoding().n_paths)
+    }
+
+    fn spawn_unlinked_instance(app: &mut App, asset: Handle<crate::Asset>) -> Entity {
+        app.world_mut()
+            .spawn((
+                VivecoInstance::new(asset, Vec::new()),
+                Transform::default(),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id()
+    }
+
     #[test]
     fn one_scene_combines_every_instance() {
         let mut app = test_app();
@@ -562,23 +628,105 @@ mod tests {
     }
 
     #[test]
-    fn an_unlinked_instance_is_not_rendered() {
+    fn an_unlinked_instance_is_not_rendered_without_a_default_scene() {
         let mut app = test_app();
         let scene = spawn_scene(&mut app);
         let asset = add_asset(&mut app);
-        app.world_mut().spawn((
-            VivecoInstance::new(asset, Vec::new()),
-            Transform::default(),
-            InheritedVisibility::VISIBLE,
-        ));
+        spawn_unlinked_instance(&mut app, asset);
 
         app.update();
 
         // The scene exists but stays empty; nothing was assigned implicitly.
         assert_eq!(scene_path_counts(&mut app), vec![0]);
-        let mut query = app.world_mut().query::<&VelloScene2d>();
-        let scene = query.get(app.world(), scene).unwrap();
-        assert_eq!(scene.encoding().n_paths, 0);
+        assert_eq!(scene_path_count(&mut app, scene), 0);
+    }
+
+    #[test]
+    fn a_default_scene_renders_unlinked_instances() {
+        let mut app = test_app();
+        let scene = app
+            .world_mut()
+            .spawn((VivecoScene, VivecoDefaultScene))
+            .id();
+        let asset = add_asset(&mut app);
+        let instance = spawn_unlinked_instance(&mut app, asset);
+
+        app.update();
+
+        assert_eq!(scene_path_count(&mut app, scene), 1);
+        // The link is real: it happened once and is now a normal relationship.
+        assert_eq!(
+            app.world().get::<VivecoSceneOf>(instance),
+            Some(&VivecoSceneOf(scene))
+        );
+    }
+
+    #[test]
+    fn an_explicit_scene_wins_over_the_default() {
+        let mut app = test_app();
+        let default = app
+            .world_mut()
+            .spawn((VivecoScene, VivecoDefaultScene))
+            .id();
+        let explicit = spawn_scene(&mut app);
+        let asset = add_asset(&mut app);
+        spawn_instance(&mut app, explicit, asset, Transform::default());
+
+        app.update();
+
+        assert_eq!(scene_path_count(&mut app, explicit), 1);
+        assert_eq!(scene_path_count(&mut app, default), 0);
+    }
+
+    #[test]
+    fn members_rejoin_a_replacement_default_scene() {
+        let mut app = test_app();
+        let old_default = app
+            .world_mut()
+            .spawn((VivecoScene, VivecoDefaultScene))
+            .id();
+        let asset = add_asset(&mut app);
+        let instance = spawn_unlinked_instance(&mut app, asset);
+        app.update();
+        assert_eq!(scene_path_count(&mut app, old_default), 1);
+
+        // Despawning the scene removes `VivecoSceneOf` from its members.
+        app.world_mut().entity_mut(old_default).despawn();
+        app.update();
+        assert!(scene_path_counts(&mut app).is_empty());
+        assert!(app.world().get::<VivecoSceneOf>(instance).is_none());
+
+        let replacement = app
+            .world_mut()
+            .spawn((VivecoScene, VivecoDefaultScene))
+            .id();
+        app.update();
+
+        assert_eq!(scene_path_count(&mut app, replacement), 1);
+        assert_eq!(
+            app.world().get::<VivecoSceneOf>(instance),
+            Some(&VivecoSceneOf(replacement))
+        );
+    }
+
+    #[test]
+    fn the_lowest_marked_scene_is_the_default() {
+        let mut app = test_app();
+        let first = app
+            .world_mut()
+            .spawn((VivecoScene, VivecoDefaultScene))
+            .id();
+        let second = app
+            .world_mut()
+            .spawn((VivecoScene, VivecoDefaultScene))
+            .id();
+        let asset = add_asset(&mut app);
+        spawn_unlinked_instance(&mut app, asset);
+
+        app.update();
+
+        assert_eq!(scene_path_count(&mut app, first), 1);
+        assert_eq!(scene_path_count(&mut app, second), 0);
     }
 
     #[test]
