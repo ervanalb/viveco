@@ -1,10 +1,11 @@
-//! The animator component and the systems that render it.
+//! The instance component and the systems that render it.
 
 use ::bevy::asset::AssetEvent;
-use ::bevy::camera::visibility::{NoFrustumCulling, VisibilitySystems};
+use ::bevy::camera::CameraUpdateSystems;
+use ::bevy::camera::visibility::{NoFrustumCulling, RenderLayers, VisibilitySystems};
 use ::bevy::prelude::*;
 use ::bevy::transform::TransformSystems;
-use ::bevy_vello::prelude::VelloScene2d;
+use ::bevy_vello::prelude::{VelloScene2d, VelloView};
 use ::vello::Scene;
 use ::vello::kurbo::Affine;
 
@@ -17,43 +18,95 @@ use super::VivecoLoader;
 /// given times.
 ///
 /// Each animation instance is sampled at its time, the poses are blended by
-/// weight, and the resulting geometry is placed into the [`VivecoScene`] this
-/// entity refers to. Animators without a [`VivecoSceneOf`] component join the
-/// default scene. The entity's [`GlobalTransform`] is baked into scene space,
-/// and its top-level shapes are Z-ordered against the other members' shapes.
-/// Both non-cyclic and cyclic animations use the sampling behavior of
+/// weight, and the resulting geometry is placed into the [`VivecoScene`] named
+/// by this entity's [`VivecoSceneOf`] component. An instance without a
+/// [`VivecoSceneOf`] is not rendered, and [`VivecoPlugin`] never assigns one:
+/// spawn a [`VivecoScene`] yourself and link the instance to it.
+///
+/// ```
+/// # use bevy::prelude::*;
+/// # use viveco::{Asset, VivecoInstance, VivecoScene, VivecoSceneOf};
+/// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
+/// let scene = commands.spawn(VivecoScene).id();
+/// commands.spawn((
+///     VivecoInstance::from_animation(asset, 0),
+///     VivecoSceneOf(scene),
+/// ));
+/// # }
+/// ```
+///
+/// The entity's [`GlobalTransform`] is baked into scene space, and its
+/// top-level shapes are Z-ordered against the other members' shapes. Both
+/// non-cyclic and cyclic animations use the sampling behavior of
 /// [`Animation::sample_pose`](crate::Animation::sample_pose).
+///
+/// Stroke widths are explicit and in the asset's local units: they are painted
+/// like the rest of the geometry, so scaling the instance entity, its scene, or
+/// the camera scales the stroke along with the artwork. Add
+/// [`VivecoStrokeWidthInPixels`] to keep an on-screen width instead.
 ///
 /// A user who wants a different pose or rendering path can spawn their own
 /// component instead: the underlying steps are ordinary library calls.
 #[derive(Component, Clone, Debug)]
 #[require(Transform, Visibility)]
-pub struct VivecoAnimator {
+pub struct VivecoInstance {
     /// The loaded document to render.
     pub asset: Handle<crate::Asset>,
     /// The animation mixer: the instances to blend, as
     /// `(animation index, time in seconds, weight)`.
     pub mixer: Vec<AnimationInstance>,
+    /// Stroke width in the asset's local units, used as-is.
+    ///
+    /// The painted width also scales with the instance entity, its scene, and
+    /// any camera zoom. Set [`VivecoStrokeWidthInPixels`] on the instance or
+    /// its scene to have the plugin maintain a constant on-screen width
+    /// instead.
+    pub stroke_width: f32,
 }
 
-impl VivecoAnimator {
-    /// Creates an animator for `asset` with the given mixer.
+impl VivecoInstance {
+    /// Creates an instance for `asset` with the given mixer and a stroke width
+    /// of `1.0`.
     pub fn new(asset: Handle<crate::Asset>, mixer: Vec<AnimationInstance>) -> Self {
-        Self { asset, mixer }
+        Self {
+            asset,
+            mixer,
+            stroke_width: 1.0,
+        }
     }
 
-    /// Creates an animator that plays only the animation at `index`.
+    /// Sets the stroke width, in the asset's local units.
+    pub fn with_stroke_width(mut self, stroke_width: f32) -> Self {
+        self.stroke_width = stroke_width;
+        self
+    }
+
+    /// Creates an instance that plays only the animation at `index`.
     pub fn from_animation(asset: Handle<crate::Asset>, index: usize) -> Self {
         Self::new(asset, vec![(index, 0.0, 1.0)])
     }
 }
 
-/// Links a [`VivecoAnimator`] to the [`VivecoScene`] it draws into.
+/// Links a [`VivecoInstance`] to the [`VivecoScene`] it draws into.
 ///
-/// Animators without this component join the default scene, which
-/// [`VivecoPlugin`] spawns and marks with [`VivecoDefaultScene`]. Insert this
-/// component to put an animator in a specific scene, or to split animators
-/// across several scenes.
+/// Every instance that should be rendered needs this component. The plugin
+/// does not insert it for you, so a scene is created and populated explicitly:
+///
+/// ```
+/// # use bevy::prelude::*;
+/// # use viveco::{Asset, VivecoInstance, VivecoScene, VivecoSceneOf};
+/// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
+/// let scene = commands.spawn(VivecoScene).id();
+/// commands.spawn((
+///     VivecoInstance::from_animation(asset, 0),
+///     VivecoSceneOf(scene),
+/// ));
+/// # }
+/// ```
+///
+/// Point several instances at the same [`VivecoScene`] to Z-order their
+/// artwork together, or at different scenes to render them independently (for
+/// example, one per camera or render layer).
 ///
 /// This is a Bevy relationship: despawning the scene removes the component,
 /// and the scene's [`VivecoSceneMembers`] stays up to date automatically.
@@ -61,7 +114,7 @@ impl VivecoAnimator {
 #[relationship(relationship_target = VivecoSceneMembers)]
 pub struct VivecoSceneOf(pub Entity);
 
-/// The animators that draw into one [`VivecoScene`].
+/// The instances that draw into one [`VivecoScene`].
 ///
 /// Maintained automatically by [`VivecoSceneOf`]. A scene rebuilds when its
 /// membership changes or one of its members changes.
@@ -71,92 +124,117 @@ pub struct VivecoSceneMembers(Vec<Entity>);
 
 /// An entity that carries one Vello scene.
 ///
-/// [`VivecoPlugin`] spawns one on startup with an empty [`VelloScene2d`] and
-/// marks it with [`VivecoDefaultScene`]. Every animator that refers to this
-/// scene contributes its deformed artwork, placed by its entity's
-/// [`GlobalTransform`] and sorted against the other members' shapes by Z.
+/// Spawn one for every independently rendered scene. Spawning it also adds the
+/// empty [`VelloScene2d`] the plugin paints into:
 ///
-/// Leave the entity's transform at its default to display each animator at its
+/// ```
+/// # use bevy::prelude::*;
+/// # use viveco::VivecoScene;
+/// # fn spawn(commands: &mut Commands) -> Entity {
+/// commands.spawn(VivecoScene).id()
+/// # }
+/// ```
+///
+/// Every instance that refers to this scene contributes its deformed artwork,
+/// placed by its entity's [`GlobalTransform`] and sorted against the other
+/// members' shapes by Z. Viveco never spawns a scene on its own; without one,
+/// instances are simply not rendered.
+///
+/// Leave the entity's transform at its default to display each instance at its
 /// own Bevy transform. A transform here applies to the whole scene.
-///
-/// Spawn additional `VivecoScene` entities and point animators at them with
-/// [`VivecoSceneOf`] to render independent scenes (for example, one per camera
-/// or render layer).
 #[derive(Component)]
 #[require(VelloScene2d, NoFrustumCulling)]
 pub struct VivecoScene;
 
-/// Marks the scene that animators join when they have no [`VivecoSceneOf`].
+/// Keeps strokes at a fixed size on screen.
 ///
-/// [`VivecoPlugin`] gives this marker to the scene it spawns, or to the first
-/// existing scene. Move it to another [`VivecoScene`] to change the default.
-#[derive(Component, Default)]
-pub struct VivecoDefaultScene;
+/// Attach this to a [`VivecoInstance`], or to its [`VivecoScene`], to have the
+/// plugin rewrite the instance's
+/// [`stroke_width`](VivecoInstance::stroke_width) so painted strokes keep
+/// `width` logical pixels. All three scales that affect the painted size are
+/// compensated: the instance entity, its scene, and the observing camera. A
+/// component on the instance overrides one on its scene.
+///
+/// The camera factor comes from the `Camera2d` with `VelloView` whose
+/// `RenderLayers` overlap the scene's. If several cameras match, the most
+/// zoomed-in one wins; if none match, only the entity and scene scales are
+/// compensated. Without this component the instance's `stroke_width` is used
+/// exactly as authored.
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use viveco::{Asset, VivecoInstance, VivecoStrokeWidthInPixels, VivecoScene, VivecoSceneOf};
+/// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
+/// let scene = commands
+///     .spawn((VivecoScene, VivecoStrokeWidthInPixels::new(2.0)))
+///     .id();
+/// commands.spawn((
+///     VivecoInstance::from_animation(asset, 0),
+///     VivecoSceneOf(scene),
+/// ));
+/// # }
+/// ```
+#[derive(Component, Clone, Copy, Debug)]
+pub struct VivecoStrokeWidthInPixels {
+    /// The target stroke width in logical pixels.
+    pub width: f32,
+}
+
+impl VivecoStrokeWidthInPixels {
+    /// Targets `width` logical pixels.
+    pub fn new(width: f32) -> Self {
+        Self { width }
+    }
+}
+
+impl Default for VivecoStrokeWidthInPixels {
+    /// Targets one logical pixel.
+    fn default() -> Self {
+        Self::new(1.0)
+    }
+}
 
 /// Registers the asset loader and the rendering systems.
+///
+/// The plugin owns no entities or resources of its own. It only:
+///
+/// - registers [`VivecoLoader`](super::VivecoLoader) so `.viveco` files load
+///   through the [`AssetServer`](::bevy::asset::AssetServer), and
+/// - adds the `PostUpdate` systems that paint each [`VivecoInstance`] into the
+///   [`VivecoScene`] named by its [`VivecoSceneOf`].
+///
+/// Add it after bevy_vello's `VelloPlugin`, then spawn your scenes and
+/// instances yourself. See the [module docs](crate::bevy) for a worked example
+/// and for the equivalent code without the plugin.
 pub struct VivecoPlugin;
 
 impl Plugin for VivecoPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<crate::Asset>()
             .init_asset_loader::<VivecoLoader>()
-            .add_systems(Startup, spawn_viveco_scene)
             .add_systems(
                 PostUpdate,
+                // `chain` so an asset event re-marks instances before the
+                // scene update reads their change ticks.
                 (
-                    attach_animators_to_default_scene,
-                    mark_reloaded_animators,
+                    normalize_viveco_stroke_widths,
+                    mark_reloaded_instances,
                     update_viveco_scenes,
                 )
                     .chain()
                     .after(TransformSystems::Propagate)
-                    .after(VisibilitySystems::VisibilityPropagate),
+                    .after(VisibilitySystems::VisibilityPropagate)
+                    .after(CameraUpdateSystems),
             );
     }
 }
 
-/// Spawns the default scene, or marks an existing one as the default.
-fn spawn_viveco_scene(
-    mut commands: Commands,
-    scenes: Query<Entity, With<VivecoScene>>,
-    defaults: Query<Entity, (With<VivecoScene>, With<VivecoDefaultScene>)>,
-) {
-    if !defaults.is_empty() {
-        return;
-    }
-    match scenes.iter().next() {
-        Some(scene) => {
-            commands.entity(scene).insert(VivecoDefaultScene);
-        }
-        None => {
-            commands.spawn((VivecoScene, VivecoDefaultScene));
-        }
-    }
-}
-
-/// Attaches animators that do not name a scene to the default one.
-///
-/// `chain` inserts a deferred-command sync point before the scene update, so a
-/// newly attached animator is rendered in the same frame.
-fn attach_animators_to_default_scene(
-    mut commands: Commands,
-    defaults: Query<Entity, (With<VivecoScene>, With<VivecoDefaultScene>)>,
-    animators: Query<Entity, (With<VivecoAnimator>, Without<VivecoSceneOf>)>,
-) {
-    let Some(scene) = defaults.iter().next() else {
-        return;
-    };
-    for entity in &animators {
-        commands.entity(entity).insert(VivecoSceneOf(scene));
-    }
-}
-
-/// Makes animators rebuild when their asynchronously loaded asset arrives,
+/// Makes instances rebuild when their asynchronously loaded asset arrives,
 /// changes, or goes away. Change detection on the component only sees edits to
 /// the animation instances.
-fn mark_reloaded_animators(
+fn mark_reloaded_instances(
     mut events: MessageReader<AssetEvent<crate::Asset>>,
-    mut animators: Query<&mut VivecoAnimator>,
+    mut instances: Query<&mut VivecoInstance>,
 ) {
     for event in events.read() {
         let id = match event {
@@ -166,18 +244,112 @@ fn mark_reloaded_animators(
             | AssetEvent::LoadedWithDependencies { id } => *id,
             _ => continue,
         };
-        for mut animator in &mut animators {
-            if animator.asset.id() == id {
-                animator.set_changed();
+        for mut instance in &mut instances {
+            if instance.asset.id() == id {
+                instance.set_changed();
             }
         }
     }
 }
 
+/// Keeps instances with [`VivecoStrokeWidthInPixels`] at a constant on-screen
+/// stroke width.
+///
+/// The painted width scales with the instance entity, its scene, and the
+/// observing camera, so this divides the target width by all three factors.
+/// The component can live on the instance or on its scene; the instance's
+/// value wins. The width is written only when it changes, so a static zoom does
+/// not mark the instance changed every frame.
+#[allow(clippy::type_complexity)]
+fn normalize_viveco_stroke_widths(
+    mut instances: Query<(
+        &mut VivecoInstance,
+        &VivecoSceneOf,
+        &GlobalTransform,
+        Option<&VivecoStrokeWidthInPixels>,
+    )>,
+    scenes: Query<
+        (
+            &GlobalTransform,
+            Option<&RenderLayers>,
+            Option<&VivecoStrokeWidthInPixels>,
+        ),
+        With<VivecoScene>,
+    >,
+    cameras: Query<
+        (
+            &Camera,
+            &Projection,
+            &GlobalTransform,
+            Option<&RenderLayers>,
+        ),
+        (With<Camera2d>, With<VelloView>),
+    >,
+) {
+    for (mut instance, scene_of, transform, pixels) in &mut instances {
+        let Ok((scene_transform, scene_layers, scene_pixels)) = scenes.get(scene_of.0) else {
+            continue;
+        };
+        let Some(pixels) = pixels.or(scene_pixels) else {
+            continue;
+        };
+
+        // bevy_vello renders a scene only for cameras whose render layers
+        // overlap the scene's, so use the same rule here.
+        let scene_layers = scene_layers.cloned().unwrap_or_default();
+        let mut pixels_per_unit = 0.0_f32;
+        for (camera, projection, camera_transform, camera_layers) in &cameras {
+            let camera_layers = camera_layers.cloned().unwrap_or_default();
+            if scene_layers.intersects(&camera_layers) {
+                pixels_per_unit = pixels_per_unit.max(camera_pixels_per_unit(
+                    camera,
+                    projection,
+                    camera_transform,
+                ));
+            }
+        }
+        // With no matching camera the entity and scene scales are still
+        // compensated; assume an unzoomed camera.
+        if pixels_per_unit <= 0.0 {
+            pixels_per_unit = 1.0;
+        }
+
+        let world_scale =
+            (max_scale(transform) * max_scale(scene_transform) * pixels_per_unit).max(f32::EPSILON);
+        let width = pixels.width / world_scale;
+        if instance.stroke_width != width {
+            instance.stroke_width = width;
+        }
+    }
+}
+
+/// Pixels per world unit for one 2D camera, combining its transform scale and
+/// its projection's zoom.
+fn camera_pixels_per_unit(
+    camera: &Camera,
+    projection: &Projection,
+    transform: &GlobalTransform,
+) -> f32 {
+    let Some(viewport) = camera.logical_viewport_size() else {
+        return 1.0;
+    };
+    // `clip_from_view` maps view space to NDC; NDC spans two units across the
+    // viewport, so this is the view-to-pixel scale. The camera transform then
+    // scales world units into view units.
+    let view_to_pixels = projection.get_clip_from_view().x_axis.x.abs() * viewport.x * 0.5;
+    (view_to_pixels / max_scale(transform)).max(f32::EPSILON)
+}
+
+/// The larger of a transform's absolute X and Y scales.
+fn max_scale(transform: &GlobalTransform) -> f32 {
+    let scale = transform.scale();
+    scale.x.abs().max(scale.y.abs())
+}
+
 /// Rebuilds each scene from its members.
 ///
 /// A scene is rebuilt when its membership changes, or when one of its members'
-/// animator, global transform, or inherited visibility changes. Every member is
+/// instance, global transform, or inherited visibility changes. Every member is
 /// considered once a rebuild is needed, because the combined Z order depends on
 /// all of them.
 // Bevy system signatures are inherently verbose; this query is still the
@@ -185,8 +357,8 @@ fn mark_reloaded_animators(
 #[allow(clippy::type_complexity)]
 fn update_viveco_scenes(
     mut scenes: Query<(&mut VelloScene2d, Option<Ref<VivecoSceneMembers>>), With<VivecoScene>>,
-    animators: Query<(
-        Ref<VivecoAnimator>,
+    instances: Query<(
+        Ref<VivecoInstance>,
         Ref<GlobalTransform>,
         Ref<InheritedVisibility>,
     )>,
@@ -202,10 +374,10 @@ fn update_viveco_scenes(
 
         let changed = members.is_changed()
             || members.iter().any(|entity| {
-                animators
+                instances
                     .get(entity)
-                    .is_ok_and(|(animator, transform, visibility)| {
-                        animator.is_changed() || transform.is_changed() || visibility.is_changed()
+                    .is_ok_and(|(instance, transform, visibility)| {
+                        instance.is_changed() || transform.is_changed() || visibility.is_changed()
                     })
             });
         if !changed {
@@ -219,31 +391,31 @@ fn update_viveco_scenes(
 
         // Instances own their deformed geometry, but the builder borrows their
         // shapes, so they have to outlive it.
-        let mut instances = Vec::new();
+        let mut scene_instances = Vec::new();
         for entity in members {
-            let Ok((animator, transform, visibility)) = animators.get(entity) else {
+            let Ok((instance, transform, visibility)) = instances.get(entity) else {
                 continue;
             };
             if !visibility.get() {
                 continue;
             }
-            let Some(asset) = assets.get(&animator.asset) else {
+            let Some(asset) = assets.get(&instance.asset) else {
                 continue;
             };
-            let scale = transform.scale().x.abs().max(transform.scale().y.abs());
+            let scale = max_scale(&transform);
             if scale <= f32::EPSILON {
                 continue;
             }
 
-            instances.push(
-                SceneInstance::animated(asset, &animator.mixer)
+            scene_instances.push(
+                SceneInstance::animated(asset, &instance.mixer)
                     .with_transform(scene_affine(&transform))
-                    .with_stroke_width(1.0 / scale),
+                    .with_stroke_width(instance.stroke_width),
             );
         }
 
         let mut builder = SceneBuilder::new();
-        for instance in &instances {
+        for instance in &scene_instances {
             builder.add_instance(instance);
         }
 
@@ -307,10 +479,20 @@ mod tests {
             })
     }
 
-    fn spawn_animator(app: &mut App, asset: Handle<crate::Asset>, transform: Transform) -> Entity {
+    fn spawn_scene(app: &mut App) -> Entity {
+        app.world_mut().spawn(VivecoScene).id()
+    }
+
+    fn spawn_instance(
+        app: &mut App,
+        scene: Entity,
+        asset: Handle<crate::Asset>,
+        transform: Transform,
+    ) -> Entity {
         app.world_mut()
             .spawn((
-                VivecoAnimator::new(asset, Vec::new()),
+                VivecoInstance::new(asset, Vec::new()),
+                VivecoSceneOf(scene),
                 transform,
                 InheritedVisibility::VISIBLE,
             ))
@@ -328,11 +510,17 @@ mod tests {
     }
 
     #[test]
-    fn one_scene_combines_every_animator() {
+    fn one_scene_combines_every_instance() {
         let mut app = test_app();
+        let scene = spawn_scene(&mut app);
         let asset = add_asset(&mut app);
-        spawn_animator(&mut app, asset.clone(), Transform::from_xyz(5.0, 6.0, 0.0));
-        spawn_animator(&mut app, asset, Transform::default());
+        spawn_instance(
+            &mut app,
+            scene,
+            asset.clone(),
+            Transform::from_xyz(5.0, 6.0, 0.0),
+        );
+        spawn_instance(&mut app, scene, asset, Transform::default());
 
         app.update();
 
@@ -350,10 +538,11 @@ mod tests {
     }
 
     #[test]
-    fn animators_can_target_their_own_scene() {
+    fn instances_can_target_their_own_scene() {
         let mut app = test_app();
+        let first = spawn_scene(&mut app);
         let asset = add_asset(&mut app);
-        spawn_animator(&mut app, asset, Transform::default());
+        spawn_instance(&mut app, first, asset, Transform::default());
         app.update();
 
         // A second scene with a document that has two shapes, so the counts
@@ -365,23 +554,173 @@ mod tests {
                 shapes: vec![filled_shape(), filled_shape()],
                 ..Default::default()
             });
-        let second = app.world_mut().spawn(VivecoScene).id();
-        app.world_mut().spawn((
-            VivecoAnimator::new(two_shapes, Vec::new()),
-            VivecoSceneOf(second),
-            Transform::default(),
-            InheritedVisibility::VISIBLE,
-        ));
+        let second = spawn_scene(&mut app);
+        spawn_instance(&mut app, second, two_shapes, Transform::default());
         app.update();
 
         assert_eq!(scene_path_counts(&mut app), vec![1, 2]);
     }
 
     #[test]
+    fn an_unlinked_instance_is_not_rendered() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let asset = add_asset(&mut app);
+        app.world_mut().spawn((
+            VivecoInstance::new(asset, Vec::new()),
+            Transform::default(),
+            InheritedVisibility::VISIBLE,
+        ));
+
+        app.update();
+
+        // The scene exists but stays empty; nothing was assigned implicitly.
+        assert_eq!(scene_path_counts(&mut app), vec![0]);
+        let mut query = app.world_mut().query::<&VelloScene2d>();
+        let scene = query.get(app.world(), scene).unwrap();
+        assert_eq!(scene.encoding().n_paths, 0);
+    }
+
+    #[test]
+    fn stroke_width_in_pixels_compensates_entity_and_scene_scale() {
+        let mut app = test_app();
+        let scene = app
+            .world_mut()
+            .spawn((
+                VivecoScene,
+                Transform::default().with_scale(Vec3::splat(2.0)),
+            ))
+            .id();
+        let asset = add_asset(&mut app);
+        let entity = app
+            .world_mut()
+            .spawn((
+                VivecoInstance::new(asset, Vec::new()),
+                VivecoSceneOf(scene),
+                VivecoStrokeWidthInPixels::new(4.0),
+                Transform::default().with_scale(Vec3::splat(2.0)),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+
+        app.update();
+
+        // With no camera, only the entity and scene scales apply: 4 / (2 * 2).
+        let instance = app.world().get::<VivecoInstance>(entity).unwrap();
+        assert!((instance.stroke_width - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stroke_width_in_pixels_on_the_scene_applies_to_its_members() {
+        let mut app = test_app();
+        let scene = app
+            .world_mut()
+            .spawn((
+                VivecoScene,
+                VivecoStrokeWidthInPixels::new(6.0),
+                Transform::default().with_scale(Vec3::splat(3.0)),
+            ))
+            .id();
+        let asset = add_asset(&mut app);
+        let transform = Transform::default().with_scale(Vec3::splat(2.0));
+        let member = app
+            .world_mut()
+            .spawn((
+                VivecoInstance::new(asset.clone(), Vec::new()),
+                VivecoSceneOf(scene),
+                transform,
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+        // An instance-level component overrides the scene's.
+        let overridden = app
+            .world_mut()
+            .spawn((
+                VivecoInstance::new(asset, Vec::new()),
+                VivecoSceneOf(scene),
+                VivecoStrokeWidthInPixels::new(12.0),
+                transform,
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+
+        app.update();
+
+        // 6 / (2 * 3) from the scene, and 12 / (2 * 3) from the override.
+        let world = app.world();
+        let member_instance = world.get::<VivecoInstance>(member).unwrap();
+        assert!((member_instance.stroke_width - 1.0).abs() < 1e-6);
+        let overridden_instance = world.get::<VivecoInstance>(overridden).unwrap();
+        assert!((overridden_instance.stroke_width - 2.0).abs() < 1e-6);
+    }
+
+    /// Builds a 2D camera at the given viewport size and returns the pixels
+    /// per world unit at that camera's scale.
+    fn camera_pixels_at(viewport: f32, projection_scale: f32, camera_scale: f32) -> f32 {
+        use ::bevy::camera::{CameraProjection, ComputedCameraValues, RenderTargetInfo, Viewport};
+
+        let size = UVec2::splat(viewport as u32);
+        let camera = Camera {
+            viewport: Some(Viewport {
+                physical_size: size,
+                ..default()
+            }),
+            computed: ComputedCameraValues {
+                target_info: Some(RenderTargetInfo {
+                    physical_size: size,
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            ..default()
+        };
+        let mut projection = OrthographicProjection::default_2d();
+        projection.scale = projection_scale;
+        let logical = size.as_vec2();
+        projection.update(logical.x, logical.y);
+        let transform =
+            GlobalTransform::from(Transform::default().with_scale(Vec3::splat(camera_scale)));
+
+        camera_pixels_per_unit(&camera, &Projection::Orthographic(projection), &transform)
+    }
+
+    #[test]
+    fn camera_scale_and_projection_zoom_both_count() {
+        // Window-sized ortho projection: one world unit is one logical pixel.
+        assert!((camera_pixels_at(400.0, 1.0, 1.0) - 1.0).abs() < 1e-5);
+        // Projection scale 2 zooms out, halving the pixels per world unit.
+        assert!((camera_pixels_at(400.0, 2.0, 1.0) - 0.5).abs() < 1e-5);
+        // Scaling the camera entity also zooms out.
+        assert!((camera_pixels_at(400.0, 1.0, 2.0) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn stroke_width_is_used_as_authored_without_a_pixel_width() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let asset = add_asset(&mut app);
+        let entity = app
+            .world_mut()
+            .spawn((
+                VivecoInstance::new(asset, Vec::new()).with_stroke_width(0.25),
+                VivecoSceneOf(scene),
+                Transform::default().with_scale(Vec3::splat(3.0)),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+
+        app.update();
+
+        let instance = app.world().get::<VivecoInstance>(entity).unwrap();
+        assert_eq!(instance.stroke_width, 0.25);
+    }
+
+    #[test]
     fn a_scene_clears_when_its_members_go_away() {
         let mut app = test_app();
+        let scene = spawn_scene(&mut app);
         let asset = add_asset(&mut app);
-        let entity = spawn_animator(&mut app, asset, Transform::default());
+        let entity = spawn_instance(&mut app, scene, asset, Transform::default());
         app.update();
         assert_eq!(scene_path_counts(&mut app), vec![1]);
 

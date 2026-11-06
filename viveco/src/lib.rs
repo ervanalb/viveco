@@ -12,9 +12,9 @@
 //! - animation: [`Animation`], [`AnimationInstance`], keyframes, and sampling.
 //! - rendering: [`render`] converts assets into Vello scenes when the
 //!   `vello` feature is enabled.
-//! - Bevy: the `bevy` feature adds an asset loader, an animator component that
-//!   draws into one shared, Z-ordered scene, and a rendering plugin (see
-//!   [`bevy`]).
+//! - Bevy: the `bevy` feature adds an asset loader, an instance component that
+//!   draws into an explicitly spawned, Z-ordered scene, and a rendering plugin
+//!   (see [`bevy`]).
 //!
 //! All of these types live at the crate root.
 
@@ -38,6 +38,6 @@ pub use shape::*;
 
 #[cfg(feature = "bevy")]
 pub use self::bevy::{
-    VivecoAnimator, VivecoDefaultScene, VivecoLoader, VivecoPlugin, VivecoScene,
-    VivecoSceneMembers, VivecoSceneOf,
+    VivecoInstance, VivecoLoader, VivecoPlugin, VivecoScene, VivecoSceneMembers, VivecoSceneOf,
+    VivecoStrokeWidthInPixels,
 };

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["bevy"] # XXX
 # Adds `viveco::render`, which converts assets into Vello scenes.
 vello = ["dep:vello"]
 # Adds the Bevy asset loader, animator component, and rendering plugin.
