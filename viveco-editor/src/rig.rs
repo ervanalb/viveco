@@ -6,8 +6,15 @@
 //! the hierarchy stays rigid.
 //!
 //! The select tool moves a bone by dragging its body and reshapes it by
-//! dragging either endpoint. The pen tool places connected bone chains, each
-//! new bone parented to the previous one. Weight painting is a later stage.
+//! dragging either endpoint. Selection can span several bones: Shift-click adds
+//! a bone, Ctrl-click toggles it, Ctrl+A selects every bone, and dragging empty
+//! space draws a box selection. Dragging the body of any selected bone moves the
+//! whole selection, once the pointer has travelled far enough to distinguish a
+//! drag from a click. Shift/Ctrl-clicking a joint selects its bone; dragging the
+//! joint reshapes it.
+//!
+//! The pen tool places connected bone chains, each new bone parented to the
+//! previous one. Weight painting is a later stage.
 //!
 //! Animate mode reuses the pose tools: dragging a bone there keys its rotation,
 //! shift-drag keys its translation, and ctrl-drag keys its scale, writing the
@@ -17,7 +24,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_vello::prelude::vello;
 use vello::Scene;
-use vello::kurbo::{Affine, BezPath, Stroke as KurboStroke};
+use vello::kurbo::{Affine, BezPath, Rect, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
 use crate::editor::{
@@ -56,6 +63,10 @@ const BONE_CONNECT_SNAP: f32 = 10.0;
 /// as a drag that can snap. A plain click on a joint leaves the rig alone.
 const BONE_ENDPOINT_CLICK_SLOP: f32 = 3.0;
 
+/// Distance, in screen pixels, a press must travel before it moves bones or
+/// marquee-selects them rather than counting as a click.
+const BONE_DRAG_CLICK_SLOP: f32 = 3.0;
+
 /// Shortest bone, in screen pixels, the pen tool can create.
 const MIN_BONE_SCREEN_LENGTH: f32 = 4.0;
 
@@ -84,6 +95,10 @@ const BONE_SELECTED_FILL: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xdd);
 const BONE_SELECTED_STROKE: Color = Color::from_rgba8(0xaf, 0xe9, 0xff, 0xff);
 const BONE_HANDLE_FILL: Color = Color::from_rgba8(0xf2, 0xf8, 0xff, 0xff);
 
+/// Box-selection rectangle in rig mode.
+const BONE_MARQUEE_FILL: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x24);
+const BONE_MARQUEE_STROKE: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xb0);
+
 /// An in-progress inline rename of a bone row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoneRename {
@@ -96,13 +111,16 @@ pub struct BoneRename {
 /// A bone drag in progress.
 #[derive(Clone, Debug)]
 enum BoneDrag {
-    /// Moving the whole bone and its descendants through its body.
+    /// Moving every selected bone through its body. Each bone pairs with the
+    /// inverse of its world transform, so one screen-space drag maps back into
+    /// every bone's rest frame.
     Bulk {
-        index: BoneIndex,
+        roots: Vec<(BoneIndex, Similarity)>,
+        /// Where the press landed, so a click does not move the rig.
+        origin: Point,
         last: Point,
-        /// The inverse of the bone's world transform, which maps a world-space
-        /// drag back into the rest frame the document stores.
-        inverse: Similarity,
+        /// Set once the pointer has moved far enough to count as a drag.
+        started: bool,
     },
     /// Reshaping one endpoint.
     Endpoint {
@@ -110,6 +128,24 @@ enum BoneDrag {
         end: BoneEnd,
         /// Where the press landed, so a click alone does not snap.
         origin: Point,
+    },
+    /// A Shift/Ctrl press on a joint, waiting to see whether it becomes a
+    /// click (which selects the bone) or a drag (which reshapes the joint).
+    EndpointClick {
+        index: BoneIndex,
+        end: BoneEnd,
+        origin: Point,
+        /// Ctrl toggles the bone; Shift adds it.
+        toggle: bool,
+    },
+    /// A box selection over the skeleton.
+    Marquee {
+        start: Point,
+        current: Point,
+        /// Selection that existed before the box, kept while Shift or Ctrl is
+        /// held.
+        baseline: Vec<BoneIndex>,
+        additive: bool,
     },
 }
 
@@ -181,6 +217,14 @@ impl RigEditing {
     pub fn preview(&self) -> Option<(Point, Point)> {
         self.preview
     }
+
+    /// The corners of the box selection in progress, if any.
+    pub fn selection_marquee(&self) -> Option<(Point, Point)> {
+        match &self.drag {
+            Some(BoneDrag::Marquee { start, current, .. }) => Some((*start, *current)),
+            _ => None,
+        }
+    }
 }
 
 pub struct RigPlugin;
@@ -206,6 +250,26 @@ impl Plugin for RigPlugin {
 
 fn distance(a: Point, b: Point) -> f32 {
     (a[0] - b[0]).hypot(a[1] - b[1])
+}
+
+/// True while either shift key is held.
+fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
+}
+
+/// True while either control key is held.
+fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
+}
+
+/// Whether the pointer has moved far enough from `origin` to count as a drag.
+fn drag_started(origin: Point, current: Point, pixel: f32) -> bool {
+    distance(origin, current) > pixel * BONE_DRAG_CLICK_SLOP
+}
+
+/// Whether `point` lies inside the box between two corners.
+fn inside_box(point: Point, min: Point, max: Point) -> bool {
+    point[0] >= min[0] && point[0] <= max[0] && point[1] >= min[1] && point[1] <= max[1]
 }
 
 /// The vector from `from` to `to`.
@@ -1056,6 +1120,8 @@ pub fn begin_bone_rename(editor: &mut EditorState, index: BoneIndex) {
         .bone_name(index)
         .unwrap_or_default()
         .to_owned();
+    editor.selected_bones.clear();
+    editor.selected_bones.push(index);
     editor.selected_bone = Some(index);
     editor.bone_renaming = Some(BoneRename { index, buffer });
 }
@@ -1078,26 +1144,41 @@ pub fn cancel_bone_rename(editor: &mut EditorState) {
     editor.bone_renaming = None;
 }
 
-/// Deletes the selected bone and its children. Returns whether anything was
-/// removed.
+/// Deletes every selected bone and their children. Returns whether anything
+/// was removed.
 pub fn delete_selected_bone(editor: &mut EditorState) -> bool {
-    let Some(index) = editor.selected_bone.take() else {
-        return false;
-    };
+    let mut indices = std::mem::take(&mut editor.selected_bones);
+    let primary = editor.selected_bone.take();
     editor.bone_renaming = None;
-    // The document removal rewrites indices; mirror the same map onto the
-    // transient pose so its entries keep naming the same bones.
-    let Some(len) = editor.document.bone_subtree_len(index) else {
-        return false;
-    };
-    let count = editor.document.bone_count();
-    if editor.document.remove_bone(index) {
-        editor.pose.apply_bone_map(&removal_map(count, index, len));
-        editor.structure_revision += 1;
-        true
-    } else {
-        false
+    // Direct assignments to the primary bone still exist, so fall back to it
+    // when the multi-selection is empty.
+    if indices.is_empty()
+        && let Some(index) = primary
+    {
+        indices.push(index);
     }
+    indices.sort_unstable();
+    indices.dedup();
+
+    let mut changed = false;
+    // Removing a higher index never shifts a lower one, and a removed parent
+    // takes its already-deleted descendants with it.
+    for index in indices.into_iter().rev() {
+        let Some(len) = editor.document.bone_subtree_len(index) else {
+            continue;
+        };
+        // The document removal rewrites indices; mirror the same map onto the
+        // transient pose so its entries keep naming the same bones.
+        let count = editor.document.bone_count();
+        if editor.document.remove_bone(index) {
+            editor.pose.apply_bone_map(&removal_map(count, index, len));
+            changed = true;
+        }
+    }
+    if changed {
+        editor.structure_revision += 1;
+    }
+    changed
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,7 +1265,7 @@ fn handle_bone_input(
         if matches!(tool.0, Tool::Pen | Tool::WeightPaint) {
             tool.0 = Tool::Select;
         } else {
-            editor.selected_bone = None;
+            editor.clear_bone_selection();
         }
         return;
     }
@@ -1192,6 +1273,11 @@ fn handle_bone_input(
     if keys.just_pressed(KeyCode::Delete) && tool.0 == Tool::Select {
         editor.rig.cancel_editing();
         delete_selected_bone(&mut editor);
+        return;
+    }
+
+    if tool.0 == Tool::Select && ctrl_held(&keys) && keys.just_pressed(KeyCode::KeyA) {
+        editor.select_all_bones();
         return;
     }
 
@@ -1208,7 +1294,7 @@ fn handle_bone_input(
     let over = over_ui(cursor, window);
 
     match tool.0 {
-        Tool::Select => handle_bone_select(&mouse, &mut editor, point, pixel, over),
+        Tool::Select => handle_bone_select(&mouse, &keys, &mut editor, point, pixel, over),
         Tool::Pen => handle_bone_pen(&mouse, &mut editor, point, pixel, over),
         Tool::WeightPaint => handle_weight_paint(
             &mouse,
@@ -1262,8 +1348,13 @@ fn handle_weight_paint(
 
 /// Select tool: click to select, drag the body to move, drag an endpoint to
 /// reshape.
+///
+/// Shift-click adds a bone to the selection and Ctrl-click toggles it. Dragging
+/// the body of any selected bone moves every selected bone. Shift/Ctrl-dragging
+/// a joint still reshapes it; a press that never moves selects instead.
 fn handle_bone_select(
     mouse: &ButtonInput<MouseButton>,
+    keys: &ButtonInput<KeyCode>,
     editor: &mut EditorState,
     point: Point,
     pixel: f32,
@@ -1277,6 +1368,11 @@ fn handle_bone_select(
         }
         return;
     }
+
+    let shift = shift_held(keys);
+    let ctrl = ctrl_held(keys);
+    let extend = shift || ctrl;
+    let toggle = ctrl && !shift;
 
     if mouse.just_pressed(MouseButton::Left) {
         let joint = endpoint_near(
@@ -1306,10 +1402,21 @@ fn handle_bone_select(
         };
 
         if grab_joint && let Some((index, end, _)) = joint {
+            if extend {
+                // Deferred: released without moving, this selects the bone;
+                // moved, it reshapes the joint like a plain drag.
+                editor.rig.drag = Some(BoneDrag::EndpointClick {
+                    index,
+                    end,
+                    origin: point,
+                    toggle,
+                });
+                return;
+            }
             // Selecting clears any previous gesture, so the new drag is set
             // after it. The cursor is mapped back onto rest geometry as the
             // drag proceeds, since the skeleton is drawn posed.
-            editor.select_bone(Some(index));
+            editor.select_only_bone(index);
             editor.rig.drag = Some(BoneDrag::Endpoint {
                 index,
                 end,
@@ -1318,37 +1425,66 @@ fn handle_bone_select(
             return;
         }
 
-        // Clicking a bone's body selects it and starts moving it.
+        // Clicking a bone's body selects it and starts moving the selection.
         if let Some(index) = body {
-            let inverse = begin_bulk_drag(editor, index);
-            editor.select_bone(Some(index));
-            editor.rig.drag = Some(BoneDrag::Bulk {
-                index,
-                last: point,
-                inverse,
-            });
+            if extend {
+                if toggle {
+                    editor.toggle_bone_selection(index);
+                } else {
+                    editor.add_bone_selection(index);
+                }
+                if editor.bone_is_selected(index) {
+                    let drag = begin_bulk_selection_drag(editor, point);
+                    editor.rig.drag = drag;
+                } else {
+                    editor.rig.drag = None;
+                }
+            } else if editor.bone_is_selected(index) {
+                let drag = begin_bulk_selection_drag(editor, point);
+                editor.rig.drag = drag;
+            } else {
+                editor.select_only_bone(index);
+                let drag = begin_bulk_selection_drag(editor, point);
+                editor.rig.drag = drag;
+            }
             return;
         }
 
-        editor.select_bone(None);
-        editor.rig.drag = None;
+        // Pressing empty space box-selects. Shift and Ctrl add the box contents
+        // to the existing selection.
+        let (baseline, additive) = if extend {
+            (editor.selected_bones.clone(), true)
+        } else {
+            editor.clear_bone_selection();
+            (Vec::new(), false)
+        };
+        editor.rig.drag = Some(BoneDrag::Marquee {
+            start: point,
+            current: point,
+            baseline,
+            additive,
+        });
     }
 
     if mouse.pressed(MouseButton::Left) {
         match editor.rig.drag.clone() {
             Some(BoneDrag::Bulk {
-                index,
+                roots,
+                origin,
                 last,
-                inverse,
+                started,
             }) => {
-                let delta = [point[0] - last[0], point[1] - last[1]];
-                let rest_delta = inverse.apply_vector(delta);
-                editor.document.translate_bone(index, rest_delta);
-                editor.rig.drag = Some(BoneDrag::Bulk {
-                    index,
-                    last: point,
-                    inverse,
-                });
+                let dragging = started || drag_started(origin, point, pixel);
+                if dragging {
+                    let delta = [point[0] - last[0], point[1] - last[1]];
+                    translate_selected_bones(&mut editor.document, &roots, delta);
+                    editor.rig.drag = Some(BoneDrag::Bulk {
+                        roots,
+                        origin,
+                        last: point,
+                        started: true,
+                    });
+                }
             }
             Some(BoneDrag::Endpoint { index, end, .. }) => {
                 // The posed joint is what the cursor follows, so map it back to
@@ -1356,34 +1492,150 @@ fn handle_bone_select(
                 let rest = endpoint_rest_point(&editor.document, &editor.pose, index, point);
                 drag_endpoint_keeping_children(editor, index, end, rest);
             }
+            Some(BoneDrag::EndpointClick {
+                index, end, origin, ..
+            }) => {
+                // Movement turns the pending click into the usual endpoint
+                // reshape, collapsing the selection to the edited bone.
+                if drag_started(origin, point, pixel) {
+                    editor.select_only_bone(index);
+                    editor.rig.drag = Some(BoneDrag::Endpoint { index, end, origin });
+                }
+            }
+            Some(BoneDrag::Marquee {
+                start,
+                baseline,
+                additive,
+                ..
+            }) => {
+                // A box only selects after the pointer has moved far enough;
+                // a click on empty space just clears the selection.
+                let mut bones = if drag_started(start, point, pixel) {
+                    bones_in_box(&editor.document, &editor.pose, start, point)
+                } else {
+                    Vec::new()
+                };
+                if additive {
+                    for &index in &baseline {
+                        if !bones.contains(&index) {
+                            bones.push(index);
+                        }
+                    }
+                }
+                editor.selected_bones = bones;
+                editor.sync_primary_bone();
+                editor.rig.drag = Some(BoneDrag::Marquee {
+                    start,
+                    current: point,
+                    baseline,
+                    additive,
+                });
+            }
             None => {}
         }
     }
 
     if mouse.just_released(MouseButton::Left) {
-        // Joining the released endpoint to a nearby joint connects the bones.
-        // A press that never moved is just a click, so it does not snap.
-        if let Some(BoneDrag::Endpoint { index, end, origin }) = editor.rig.drag.take()
-            && distance(origin, point) > pixel * BONE_ENDPOINT_CLICK_SLOP
-        {
-            // Snap against the posed joints the cursor is aiming at, not their
-            // rest positions. Reparenting can shift bone indices, so work on a
-            // copy and store it back once the remap is done.
-            let mut pose = editor.pose.clone();
-            if finish_endpoint_drag(
-                editor,
+        match editor.rig.drag.take() {
+            // A Shift/Ctrl press that never became a drag is a click.
+            Some(BoneDrag::EndpointClick {
                 index,
-                end,
-                point,
-                pixel * BONE_CONNECT_SNAP,
-                &mut pose,
-            ) {
-                editor.structure_revision += 1;
+                origin,
+                toggle,
+                ..
+            }) => {
+                if !drag_started(origin, point, pixel) {
+                    if toggle {
+                        editor.toggle_bone_selection(index);
+                    } else {
+                        editor.add_bone_selection(index);
+                    }
+                }
             }
-            editor.pose = pose;
+            // Joining the released endpoint to a nearby joint connects the
+            // bones. A press that never moved is just a click, so it does not
+            // snap.
+            Some(BoneDrag::Endpoint { index, end, origin })
+                if distance(origin, point) > pixel * BONE_ENDPOINT_CLICK_SLOP =>
+            {
+                // Snap against the posed joints the cursor is aiming at, not
+                // their rest positions. Reparenting can shift bone indices, so
+                // work on a copy and store it back once the remap is done.
+                let mut pose = editor.pose.clone();
+                if finish_endpoint_drag(
+                    editor,
+                    index,
+                    end,
+                    point,
+                    pixel * BONE_CONNECT_SNAP,
+                    &mut pose,
+                ) {
+                    editor.structure_revision += 1;
+                }
+                editor.pose = pose;
+            }
+            _ => {}
         }
-        editor.rig.drag = None;
     }
+}
+
+/// Starts dragging every selected bone through its body.
+///
+/// Each bone records the inverse of its drawn world transform, so a single
+/// world-space drag becomes the right rest-space delta in every selected bone's
+/// own frame.
+fn begin_bulk_selection_drag(editor: &mut EditorState, point: Point) -> Option<BoneDrag> {
+    let selected = editor.selected_bones.clone();
+    let mut roots = Vec::new();
+    for index in selected {
+        if editor.document.bone_by_index(index).is_some() {
+            let inverse = begin_bulk_drag(editor, index);
+            roots.push((index, inverse));
+        }
+    }
+    if roots.is_empty() {
+        None
+    } else {
+        Some(BoneDrag::Bulk {
+            roots,
+            origin: point,
+            last: point,
+            started: false,
+        })
+    }
+}
+
+/// Applies one world-space drag to every selected bone.
+///
+/// Each root carries its own world-to-rest inverse, so posed bones all follow
+/// the same on-screen movement even when their frames differ.
+fn translate_selected_bones(document: &mut Asset, roots: &[(BoneIndex, Similarity)], delta: Point) {
+    for (index, inverse) in roots {
+        document.translate_bone(*index, inverse.apply_vector(delta));
+    }
+}
+
+/// Bones whose drawn head or tail falls inside the box between two corners.
+fn bones_in_box(document: &Asset, pose: &Pose, start: Point, end: Point) -> Vec<BoneIndex> {
+    let min = [start[0].min(end[0]), start[1].min(end[1])];
+    let max = [start[0].max(end[0]), start[1].max(end[1])];
+
+    let mut posed = Vec::new();
+    let mut cursor = 0;
+    capture_posed(
+        &document.bones,
+        pose,
+        None,
+        Similarity::IDENTITY,
+        &mut cursor,
+        &mut posed,
+    );
+    posed
+        .iter()
+        .enumerate()
+        .filter(|(_, ends)| inside_box(ends.head, min, max) || inside_box(ends.tail, min, max))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Pose tool: drag a bone to rotate it about its head, shift-drag to translate
@@ -1643,7 +1895,7 @@ fn handle_bone_pen(
         match editor.rig.chain.take() {
             None => {
                 // First joint of a new chain.
-                editor.selected_bone = None;
+                editor.clear_bone_selection();
                 editor.bone_renaming = None;
                 editor.rig.chain = Some(PenChain {
                     last: point,
@@ -1666,7 +1918,7 @@ fn handle_bone_pen(
                         None => Some(editor.document.add_bone(chain.last, point, name)),
                     };
                     if let Some(index) = index {
-                        editor.selected_bone = Some(index);
+                        editor.select_only_bone(index);
                         editor.structure_revision += 1;
                         editor.rig.chain = Some(PenChain {
                             last: point,
@@ -1690,13 +1942,13 @@ fn handle_bone_pen(
 // Drawing
 // ---------------------------------------------------------------------------
 
-/// Draws the skeleton over the document, highlighting the selected bone and
+/// Draws the skeleton over the document, highlighting every selected bone and
 /// previewing the next pen joint.
 pub fn draw_bone_overlay(
     scene: &mut Scene,
     document: &Asset,
     pose: &Pose,
-    selected: Option<BoneIndex>,
+    selected: &[BoneIndex],
     preview: Option<(Point, Point)>,
     view_scale: f32,
 ) {
@@ -1714,35 +1966,35 @@ pub fn draw_bone_overlay(
     );
 
     // Redraw the selection last so it is never hidden behind another bone.
-    if let Some(index) = selected
-        && let Some((rest_head, rest_tail)) = document.bone_endpoints(index)
-    {
-        let world = document.bone_world(pose, index);
-        let head = world.apply(rest_head);
-        let tail = world.apply(rest_tail);
-        draw_bone(
-            scene,
-            head,
-            tail,
-            scale,
-            &BONE_SELECTED_FILL,
-            &BONE_SELECTED_STROKE,
-            OVERLAY_BONE_SELECTED_WIDTH,
-        );
-        draw_diamond(
-            scene,
-            head,
-            scale,
-            OVERLAY_DIAMOND_SELECTED_RADIUS,
-            &BONE_SELECTED_STROKE,
-        );
-        draw_diamond(
-            scene,
-            tail,
-            scale,
-            OVERLAY_DIAMOND_SELECTED_RADIUS,
-            &BONE_SELECTED_STROKE,
-        );
+    for &index in selected {
+        if let Some((rest_head, rest_tail)) = document.bone_endpoints(index) {
+            let world = document.bone_world(pose, index);
+            let head = world.apply(rest_head);
+            let tail = world.apply(rest_tail);
+            draw_bone(
+                scene,
+                head,
+                tail,
+                scale,
+                &BONE_SELECTED_FILL,
+                &BONE_SELECTED_STROKE,
+                OVERLAY_BONE_SELECTED_WIDTH,
+            );
+            draw_diamond(
+                scene,
+                head,
+                scale,
+                OVERLAY_DIAMOND_SELECTED_RADIUS,
+                &BONE_SELECTED_STROKE,
+            );
+            draw_diamond(
+                scene,
+                tail,
+                scale,
+                OVERLAY_DIAMOND_SELECTED_RADIUS,
+                &BONE_SELECTED_STROKE,
+            );
+        }
     }
 
     // The in-progress pen bone is drawn as a kite, matching bones that have
@@ -1767,6 +2019,38 @@ pub fn draw_bone_overlay(
     }
 }
 
+/// Draws the box-selection rectangle between two document-space corners.
+pub(crate) fn draw_selection_marquee(
+    scene: &mut Scene,
+    start: Point,
+    current: Point,
+    view_scale: f32,
+) {
+    let scale = view_scale.max(f32::EPSILON);
+    let min = [start[0].min(current[0]), start[1].min(current[1])];
+    let max = [start[0].max(current[0]), start[1].max(current[1])];
+    let rect = Rect::new(
+        f64::from(min[0]),
+        f64::from(min[1]),
+        f64::from(max[0]),
+        f64::from(max[1]),
+    );
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        BONE_MARQUEE_FILL,
+        None,
+        &rect,
+    );
+    scene.stroke(
+        &KurboStroke::new(px(1.0, scale)),
+        Affine::IDENTITY,
+        BONE_MARQUEE_STROKE,
+        None,
+        &rect,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_bone_list(
     scene: &mut Scene,
@@ -1775,7 +2059,7 @@ fn draw_bone_list(
     parent_world: Similarity,
     pose: &Pose,
     cursor: &mut BoneIndex,
-    selected: Option<BoneIndex>,
+    selected: &[BoneIndex],
     scale: f32,
 ) {
     for bone in bones {
@@ -1786,8 +2070,8 @@ fn draw_bone_list(
         let world = Similarity::compose(parent_world, local);
         let head = world.apply(rest_head);
         let tail = world.apply(bone.tail);
-        // The selected bone is drawn later, on top.
-        if selected != Some(bone_index) {
+        // Selected bones are drawn later, on top.
+        if !selected.contains(&bone_index) {
             // Bones echo the muted color of their animation curves.
             let (fill, stroke) = crate::theme::bone_overlay_colors(bone_index);
             draw_bone(scene, head, tail, scale, &fill, &stroke, OVERLAY_BONE_WIDTH);
@@ -2590,9 +2874,10 @@ mod tests {
     fn selecting_a_bone_clears_any_in_progress_gesture() {
         let mut editor = EditorState::new(document_with_bones());
         editor.rig.drag = Some(BoneDrag::Bulk {
-            index: 0,
+            roots: vec![(0, Similarity::IDENTITY)],
+            origin: [0.0, 0.0],
             last: [0.0, 0.0],
-            inverse: Similarity::IDENTITY,
+            started: false,
         });
 
         editor.select_bone(Some(0));
@@ -3264,5 +3549,123 @@ mod tests {
         assert_eq!(animation.keyframes.len(), 1);
         let angle = keyed_value(animation, BoneProperty::Angle).unwrap();
         assert!((angle - std::f32::consts::FRAC_PI_4).abs() < 1e-4);
+    }
+
+    #[test]
+    fn bone_selection_adds_toggles_and_selects_all() {
+        let mut editor = EditorState::new(Asset::new());
+        editor.document.add_bone([0.0, 0.0], [1.0, 0.0], "A");
+        editor.document.add_bone([2.0, 0.0], [3.0, 0.0], "B");
+
+        editor.select_bone(Some(0));
+        assert_eq!(editor.selected_bones, vec![0]);
+
+        // Shift adds and makes the added bone primary.
+        editor.add_bone_selection(1);
+        assert_eq!(editor.selected_bones, vec![0, 1]);
+        assert_eq!(editor.selected_bone, Some(1));
+
+        // Ctrl toggles without disturbing the rest.
+        editor.toggle_bone_selection(0);
+        assert_eq!(editor.selected_bones, vec![1]);
+        assert_eq!(editor.selected_bone, Some(1));
+        editor.toggle_bone_selection(1);
+        assert!(editor.selected_bones.is_empty());
+        assert_eq!(editor.selected_bone, None);
+
+        editor.select_all_bones();
+        assert_eq!(editor.selected_bones, vec![0, 1]);
+        // Selecting a single bone replaces the multi-selection.
+        editor.select_bone(Some(1));
+        assert_eq!(editor.selected_bones, vec![1]);
+    }
+
+    #[test]
+    fn deleting_a_multi_selection_removes_every_selected_bone() {
+        let mut editor = EditorState::new(Asset::new());
+        editor.document.add_bone([0.0, 0.0], [1.0, 0.0], "A");
+        editor.document.add_bone([2.0, 0.0], [3.0, 0.0], "B");
+        editor.document.add_bone([4.0, 0.0], [5.0, 0.0], "C");
+        editor.selected_bones = vec![0, 2];
+
+        assert!(delete_selected_bone(&mut editor));
+
+        assert_eq!(editor.document.bone_count(), 1);
+        assert_eq!(editor.document.bone_name(0), Some("B"));
+        assert!(editor.selected_bones.is_empty());
+        assert!(editor.selected_bone.is_none());
+    }
+
+    #[test]
+    fn a_marquee_selects_bones_touching_the_box() {
+        let mut document = Asset::new();
+        document.add_bone([0.0, 0.0], [10.0, 0.0], "A");
+        document.add_bone([20.0, 0.0], [30.0, 0.0], "B");
+        let pose = Pose::default();
+
+        // Either endpoint counts, so a box over just the head finds the bone.
+        assert_eq!(
+            bones_in_box(&document, &pose, [-1.0, -1.0], [1.0, 1.0]),
+            vec![0]
+        );
+        assert_eq!(
+            bones_in_box(&document, &pose, [19.0, -1.0], [25.0, 1.0]),
+            vec![1]
+        );
+        // A box between two bones finds neither...
+        assert!(bones_in_box(&document, &pose, [12.0, -1.0], [18.0, 1.0]).is_empty());
+        // ...and one that covers the rig finds both.
+        assert_eq!(
+            bones_in_box(&document, &pose, [-100.0, -100.0], [100.0, 100.0]),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn dragging_a_multi_selection_moves_each_bone_once() {
+        let mut document = Asset::new();
+        document.add_bone([0.0, 0.0], [10.0, 0.0], "A");
+        document.add_bone([20.0, 0.0], [30.0, 0.0], "B");
+        let roots = vec![(0, Similarity::IDENTITY), (1, Similarity::IDENTITY)];
+
+        translate_selected_bones(&mut document, &roots, [5.0, -3.0]);
+
+        assert_eq!(
+            document.bone_endpoints(0),
+            Some(([5.0, -3.0], [15.0, -3.0]))
+        );
+        assert_eq!(
+            document.bone_endpoints(1),
+            Some(([25.0, -3.0], [35.0, -3.0]))
+        );
+    }
+
+    #[test]
+    fn a_connected_child_moves_once_when_both_bones_are_selected() {
+        // The order of the roots must not change the result.
+        for roots in [
+            vec![(0, Similarity::IDENTITY), (1, Similarity::IDENTITY)],
+            vec![(1, Similarity::IDENTITY), (0, Similarity::IDENTITY)],
+        ] {
+            let mut document = Asset::new();
+            let parent = document.add_bone([0.0, 0.0], [10.0, 0.0], "Parent");
+            let child = document
+                .add_child_bone(parent, [10.0, 0.0], [20.0, 0.0], "Child")
+                .unwrap();
+
+            translate_selected_bones(&mut document, &roots, [5.0, 0.0]);
+
+            // The moved parent detaches the connected child at the old
+            // position, and the child then moves by the same delta exactly
+            // once.
+            assert_eq!(
+                document.bone_endpoints(parent),
+                Some(([5.0, 0.0], [15.0, 0.0]))
+            );
+            assert_eq!(
+                document.bone_endpoints(child),
+                Some(([15.0, 0.0], [25.0, 0.0]))
+            );
+        }
     }
 }

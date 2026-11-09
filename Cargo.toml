@@ -15,6 +15,7 @@ repository = "https://example.invalid/viveco"
 viveco = { path = "viveco" }
 bevy = "0.19"
 bevy_vello = "0.14"
+bevy_egui = "0.41"
 vello = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

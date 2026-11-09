@@ -28,7 +28,16 @@ serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true
 
+# Used by the `animate` example's UI.
+[dev-dependencies]
+bevy_egui.workspace = true
+
 [[example]]
 name = "animate"
 path = "examples/animate.rs"
+required-features = ["bevy"]
+
+[[example]]
+name = "parallax"
+path = "examples/parallax.rs"
 required-features = ["bevy"]

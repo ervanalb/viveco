@@ -3,6 +3,16 @@
 //! The rendered document lives on the GPU as a Vello scene, so interaction is
 //! done against the CPU-side [`Asset`]: clicks are mapped from screen pixels
 //! into document space and tested against the path geometry in painting order.
+//!
+//! Draw-mode selection can span several shapes, paths, and control points.
+//! Shift-click adds an item and Ctrl-click toggles it; Ctrl+A selects every
+//! path, and dragging empty space draws a box selection. Dragging any selected
+//! item moves the whole selection, once the pointer has travelled far enough to
+//! distinguish a drag from a click. An anchor carries its attached Bézier
+//! controls unless those controls are selected too, in which case they move
+//! once as part of the selection. Shift-dragging a control point symmetrizes it
+//! (or bends a straight anchor); Alt-drag does the same without the
+//! click-versus-drag wait.
 
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
@@ -183,9 +193,16 @@ const HANDLE_HIT_RADIUS: f32 = 8.0;
 /// path outline.
 const PATH_HIT_SLACK: f32 = 3.0;
 
-/// Distance, in screen pixels, a shift-drag must travel before it decides
+/// Distance, in screen pixels, an alt-drag must travel before it decides
 /// which segment to bend.
 const BEND_THRESHOLD: f32 = 3.0;
+
+/// Distance, in screen pixels, a press must travel before it counts as a drag.
+///
+/// Below it the gesture stays a click, which lets Shift-click multi-select a
+/// point instead of nudging it, and keeps ordinary clicks from moving the
+/// selection.
+const CLICK_DRAG_THRESHOLD: f32 = 3.0;
 
 /// Accuracy passed to kurbo's nearest-point search.
 const NEAREST_ACCURACY: f64 = 0.01;
@@ -215,6 +232,10 @@ const OVERLAY_ACCENT: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xff);
 const OVERLAY_BAND: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x80);
 const OVERLAY_HANDLE_FILL: Color = Color::from_rgba8(0xff, 0xff, 0xff, 0xff);
 const OVERLAY_HANDLE_OUTLINE: Color = Color::from_rgba8(0x0b, 0x2a, 0x40, 0xff);
+
+/// Box-selection rectangle in draw mode.
+const MARQUEE_FILL: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x24);
+const MARQUEE_STROKE: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xb0);
 
 /// A node selected for editing, addressed by tree position.
 ///
@@ -284,27 +305,64 @@ pub enum Handle {
 
 #[derive(Clone, Debug)]
 enum Drag {
-    /// Dragging one control point of a path.
+    /// Dragging one control point of a path. Used for the symmetric (Alt)
+    /// handle gesture; ordinary point drags move through [`Drag::Move`].
     Handle {
         address: TreeAddress,
         handle: Handle,
-        /// Shift was held: keep the neighbouring handle symmetric around the
-        /// shared anchor.
+        /// Keep the neighbouring handle symmetric around the shared anchor.
         symmetric: bool,
     },
-    /// Shift-dragging an anchor instantiate a missing control point there.
+    /// Alt-dragging an anchor instantiate a missing control point there.
     /// `target` is chosen from the drag direction on the first movement.
     Bend {
         address: TreeAddress,
         handle: Handle,
         target: Option<BendTarget>,
     },
-    /// Dragging a whole shape by its body. The last document-space point is
-    /// remembered so each frame only applies the incremental movement.
-    Object {
-        address: TreeAddress,
+    /// Moving every selected node and point together. The last document-space
+    /// point is remembered so each frame only applies the incremental
+    /// movement.
+    Move {
+        nodes: Vec<TreeAddress>,
+        points: Vec<SelectedPoint>,
+        /// Where the press landed, used to tell a click from a drag.
+        origin: [f32; 2],
         last: [f32; 2],
+        /// Set once the pointer has moved far enough to count as a drag.
+        started: bool,
     },
+    /// A Shift-press on a control point, waiting to see whether it becomes a
+    /// click (which selects the point) or a drag (which symmetrizes it).
+    ShiftPoint {
+        point: SelectedPoint,
+        /// Where the press landed, in document space.
+        start: [f32; 2],
+        /// Whether this point can be bent into a curve.
+        endpoint: bool,
+        can_bend: bool,
+    },
+    /// A box selection over the canvas. `baseline` is the selection that
+    /// existed before the box, kept while Shift or Ctrl is held.
+    Marquee {
+        start: [f32; 2],
+        current: [f32; 2],
+        baseline_nodes: Vec<TreeAddress>,
+        baseline_points: Vec<SelectedPoint>,
+        additive: bool,
+    },
+}
+
+/// A control point selected in draw mode, qualified by the path that owns it.
+///
+/// The existing [`SelectedNode`] names a point relative to the primary node.
+/// A multi-selection can span several paths and shapes, so each point carries
+/// the full address of its path instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SelectedPoint {
+    /// Full address of the path holding the point.
+    pub(crate) path: TreeAddress,
+    pub(crate) handle: Handle,
 }
 
 /// A line segment that a bend drag will turn into a cubic.
@@ -366,17 +424,31 @@ impl PenDraft {
 #[derive(Resource)]
 pub struct EditorState {
     pub document: Asset,
-    /// The selected node, either a whole shape or one of its paths.
+    /// The primary selected node, either a whole shape or one of its paths.
+    ///
+    /// The sidebars and the style panel act on this node when several are
+    /// selected at once. Draw-mode canvas gestures use [`Self::selected_nodes`]
+    /// and [`Self::selected_points`] instead, which hold the whole selection.
     pub selected_node: Option<TreeAddress>,
-    /// The selected control point of [`Self::selected`], if any.
+    /// The primary selected control point, relative to [`Self::selected_node`].
     pub selected_handle: Option<SelectedNode>,
+    /// Whole shapes or paths selected as units in draw mode.
+    pub(crate) selected_nodes: Vec<TreeAddress>,
+    /// Individual control points selected in draw mode.
+    pub(crate) selected_points: Vec<SelectedPoint>,
     /// Incremented whenever the object tree changes shape (an item is removed
     /// or moved), so the sidebar knows to rebuild its rows.
     pub structure_revision: u64,
     /// The tree node whose name is being edited inline, if any.
     pub renaming: Option<RenameState>,
-    /// The selected bone in rig mode, if any.
+    /// The primary selected bone in rig mode, if any.
+    ///
+    /// The skeleton tree and weight-paint brush act on this bone when several
+    /// are selected at once. Rig-mode canvas gestures use
+    /// [`Self::selected_bones`] instead, which holds the whole selection.
     pub selected_bone: Option<BoneIndex>,
+    /// Bones selected as units in rig mode.
+    pub(crate) selected_bones: Vec<BoneIndex>,
     /// Index of the selected animation in animate mode, if any.
     pub selected_animation: Option<usize>,
     /// Time shown by the animate timeline, in seconds.
@@ -414,9 +486,12 @@ impl EditorState {
             document,
             selected_node: None,
             selected_handle: None,
+            selected_nodes: Vec::new(),
+            selected_points: Vec::new(),
             structure_revision: 0,
             renaming: None,
             selected_bone: None,
+            selected_bones: Vec::new(),
             selected_animation: None,
             playhead: 0.0,
             animation_renaming: None,
@@ -432,21 +507,256 @@ impl EditorState {
     /// Selects `address` (or clears the selection when it is `None`).
     ///
     /// Any in-progress drag, control-point selection, and rename are dropped,
-    /// so the selection always starts from a clean state.
+    /// so the selection always starts from a clean state. Selecting a single
+    /// node discards any multi-selection.
     pub fn select_node(&mut self, address: Option<TreeAddress>) {
-        self.selected_node = address;
+        self.selected_nodes.clear();
+        self.selected_points.clear();
+        self.selected_node = address.clone();
         self.selected_handle = None;
+        if let Some(address) = address {
+            self.selected_nodes.push(address);
+        }
         self.renaming = None;
         self.drag = None;
+    }
+
+    /// Clears the draw-mode selection and the primary node together.
+    fn clear_draw_selection(&mut self) {
+        self.selected_nodes.clear();
+        self.selected_points.clear();
+        self.selected_node = None;
+        self.selected_handle = None;
+        self.drag = None;
+    }
+
+    /// Selects exactly one node, replacing the whole selection.
+    fn select_only_node(&mut self, address: TreeAddress) {
+        self.selected_nodes.clear();
+        self.selected_points.clear();
+        self.selected_nodes.push(address.clone());
+        self.selected_node = Some(address);
+        self.selected_handle = None;
+    }
+
+    /// Selects exactly one control point, replacing the whole selection.
+    fn select_only_point(&mut self, point: SelectedPoint) {
+        self.selected_nodes.clear();
+        self.selected_points.clear();
+        self.selected_points.push(point.clone());
+        self.set_primary_point(&point);
+    }
+
+    /// Adds a node to the selection when it is not already selected.
+    fn add_node(&mut self, address: TreeAddress) {
+        if !self.node_is_selected(&address) {
+            self.selected_nodes.push(address.clone());
+        }
+        self.selected_node = Some(address);
+        self.selected_handle = None;
+    }
+
+    /// Adds or removes a node, leaving the rest of the selection intact.
+    fn toggle_node(&mut self, address: TreeAddress) {
+        if let Some(index) = self
+            .selected_nodes
+            .iter()
+            .position(|candidate| *candidate == address)
+        {
+            self.selected_nodes.remove(index);
+            self.sync_primary();
+        } else {
+            self.add_node(address);
+        }
+    }
+
+    /// Adds a control point to the selection when it is not already selected.
+    fn add_point(&mut self, point: SelectedPoint) {
+        if !self.point_is_selected(&point) {
+            self.selected_points.push(point.clone());
+        }
+        self.set_primary_point(&point);
+    }
+
+    /// Adds or removes a control point, leaving the rest of the selection
+    /// intact.
+    fn toggle_point(&mut self, point: SelectedPoint) {
+        if let Some(index) = self
+            .selected_points
+            .iter()
+            .position(|candidate| *candidate == point)
+        {
+            self.selected_points.remove(index);
+            self.sync_primary();
+        } else {
+            self.add_point(point);
+        }
+    }
+
+    fn node_is_selected(&self, address: &TreeAddress) -> bool {
+        self.selected_nodes
+            .iter()
+            .any(|candidate| candidate == address)
+    }
+
+    fn point_is_selected(&self, point: &SelectedPoint) -> bool {
+        self.selected_points
+            .iter()
+            .any(|candidate| candidate == point)
+    }
+
+    /// Makes `point`'s owning shape the primary node and the point itself the
+    /// primary handle, so the sidebars and style panel keep working.
+    fn set_primary_point(&mut self, point: &SelectedPoint) {
+        let path_index = match &point.path {
+            TreeAddress::Path { path, .. } => *path,
+            TreeAddress::Shape { .. } => return,
+        };
+        self.selected_node = Some(TreeAddress::Shape {
+            shapes: point.path.shape_chain().to_vec(),
+        });
+        self.selected_handle = Some(SelectedNode {
+            path: path_index,
+            handle: point.handle,
+        });
+    }
+
+    /// Recomputes the primary node from the current multi-selection, used after
+    /// the selected item itself is removed.
+    fn sync_primary(&mut self) {
+        if let Some(node) = self.selected_nodes.first().cloned() {
+            self.selected_node = Some(node);
+            self.selected_handle = None;
+        } else if let Some(point) = self.selected_points.first().cloned() {
+            self.set_primary_point(&point);
+        } else {
+            self.selected_node = None;
+            self.selected_handle = None;
+        }
+    }
+
+    /// The paths whose handles the draw tool should display and hit-test.
+    ///
+    /// A selected shape exposes its direct paths, a selected path exposes
+    /// itself, and every selected point exposes the path that owns it.
+    fn selected_path_addresses(&self) -> Vec<TreeAddress> {
+        let mut paths = Vec::new();
+        for node in &self.selected_nodes {
+            match node {
+                TreeAddress::Shape { shapes } => {
+                    if let Some(shape) = shape_at_chain(&self.document, shapes) {
+                        for path in 0..shape.paths.len() {
+                            push_unique(
+                                &mut paths,
+                                TreeAddress::Path {
+                                    shapes: shapes.clone(),
+                                    path,
+                                },
+                            );
+                        }
+                    }
+                }
+                TreeAddress::Path { .. } => push_unique(&mut paths, node.clone()),
+            }
+        }
+        for point in &self.selected_points {
+            push_unique(&mut paths, point.path.clone());
+        }
+        paths
+    }
+
+    /// Starts moving the current selection from `point` in document space.
+    fn start_move(&mut self, point: [f32; 2]) {
+        if self.selected_nodes.is_empty() && self.selected_points.is_empty() {
+            self.drag = None;
+            return;
+        }
+        self.drag = Some(Drag::Move {
+            nodes: self.selected_nodes.clone(),
+            points: self.selected_points.clone(),
+            origin: point,
+            last: point,
+            started: false,
+        });
+    }
+
+    /// Selects every path in the document, the draw tool's Ctrl+A.
+    fn select_all_paths(&mut self) {
+        let mut paths = Vec::new();
+        collect_path_addresses(&self.document.shapes, &mut Vec::new(), &mut paths);
+        self.selected_nodes = paths;
+        self.selected_points.clear();
+        self.drag = None;
+        self.sync_primary();
     }
 
     /// Selects a bone (or clears the bone selection).
     ///
     /// Like [`Self::select_node`], this drops any in-progress rig gesture and
-    /// rename so the selection always starts clean.
+    /// rename so the selection always starts clean. Selecting a single bone
+    /// discards any multi-selection.
     pub fn select_bone(&mut self, index: Option<BoneIndex>) {
+        self.selected_bones.clear();
+        if let Some(index) = index {
+            self.selected_bones.push(index);
+        }
         self.selected_bone = index;
         self.bone_renaming = None;
+        self.rig.cancel_editing();
+    }
+
+    /// Clears the rig selection without disturbing an in-progress gesture.
+    pub(crate) fn clear_bone_selection(&mut self) {
+        self.selected_bones.clear();
+        self.selected_bone = None;
+    }
+
+    /// Selects exactly one bone, replacing the whole selection.
+    pub(crate) fn select_only_bone(&mut self, index: BoneIndex) {
+        self.selected_bones.clear();
+        self.selected_bones.push(index);
+        self.selected_bone = Some(index);
+    }
+
+    /// Adds a bone to the selection when it is not already selected.
+    pub(crate) fn add_bone_selection(&mut self, index: BoneIndex) {
+        if !self.bone_is_selected(index) {
+            self.selected_bones.push(index);
+        }
+        self.selected_bone = Some(index);
+    }
+
+    /// Adds or removes a bone, leaving the rest of the selection intact.
+    pub(crate) fn toggle_bone_selection(&mut self, index: BoneIndex) {
+        if let Some(position) = self
+            .selected_bones
+            .iter()
+            .position(|candidate| *candidate == index)
+        {
+            self.selected_bones.remove(position);
+            self.sync_primary_bone();
+        } else {
+            self.add_bone_selection(index);
+        }
+    }
+
+    pub(crate) fn bone_is_selected(&self, index: BoneIndex) -> bool {
+        self.selected_bones.contains(&index)
+    }
+
+    /// Keeps the primary bone pointing at a selected bone after the selected
+    /// one itself is removed.
+    pub(crate) fn sync_primary_bone(&mut self) {
+        self.selected_bone = self.selected_bones.first().copied();
+        if self.selected_bone.is_none() {
+            self.bone_renaming = None;
+        }
+    }
+
+    /// Selects every bone in the document, rig mode's Ctrl+A.
+    pub(crate) fn select_all_bones(&mut self) {
+        self.selected_bones = (0..self.document.bone_count()).collect();
+        self.selected_bone = self.selected_bones.first().copied();
         self.rig.cancel_editing();
     }
 
@@ -461,7 +771,10 @@ impl EditorState {
         let buffer = node_name_at(&self.document, &address)
             .unwrap_or_default()
             .to_owned();
+        self.selected_nodes.clear();
+        self.selected_points.clear();
         self.selected_node = Some(address.clone());
+        self.selected_nodes.push(address.clone());
         self.selected_handle = None;
         self.drag = None;
         self.renaming = Some(RenameState { address, buffer });
@@ -476,8 +789,11 @@ impl EditorState {
         self.document = document;
         self.selected_node = None;
         self.selected_handle = None;
+        self.selected_nodes.clear();
+        self.selected_points.clear();
         self.renaming = None;
         self.selected_bone = None;
+        self.selected_bones.clear();
         self.selected_animation = None;
         self.playhead = 0.0;
         self.animation_renaming = None;
@@ -495,7 +811,10 @@ impl EditorState {
         ViewState {
             selected_node: self.selected_node.clone(),
             selected_handle: self.selected_handle,
+            selected_nodes: self.selected_nodes.clone(),
+            selected_points: self.selected_points.clone(),
             selected_bone: self.selected_bone,
+            selected_bones: self.selected_bones.clone(),
             selected_animation: self.selected_animation,
             playhead: self.playhead,
         }
@@ -507,16 +826,38 @@ impl EditorState {
     /// was, so the selection and playhead are restored wherever the new
     /// document still contains them.
     pub(crate) fn restore_view_state(&mut self, view: &ViewState) {
+        self.selected_nodes = view
+            .selected_nodes
+            .iter()
+            .filter(|address| node_name_at(&self.document, address).is_some())
+            .cloned()
+            .collect();
+        self.selected_points = view
+            .selected_points
+            .iter()
+            .filter(|point| point_exists(&self.document, point))
+            .cloned()
+            .collect();
         if let Some(address) = &view.selected_node
             && node_name_at(&self.document, address).is_some()
         {
             self.selected_node = Some(address.clone());
             self.selected_handle = view.selected_handle;
+        } else {
+            self.sync_primary();
         }
+        self.selected_bones = view
+            .selected_bones
+            .iter()
+            .copied()
+            .filter(|&index| self.document.bone_name(index).is_some())
+            .collect();
         if let Some(index) = view.selected_bone
             && self.document.bone_name(index).is_some()
         {
             self.selected_bone = Some(index);
+        } else {
+            self.sync_primary_bone();
         }
         if let Some(index) = view.selected_animation
             && let Some(animation) = self.document.animations.get(index)
@@ -538,7 +879,10 @@ impl EditorState {
 pub(crate) struct ViewState {
     selected_node: Option<TreeAddress>,
     selected_handle: Option<SelectedNode>,
+    selected_nodes: Vec<TreeAddress>,
+    selected_points: Vec<SelectedPoint>,
     selected_bone: Option<BoneIndex>,
+    selected_bones: Vec<BoneIndex>,
     selected_animation: Option<usize>,
     playhead: f32,
 }
@@ -807,6 +1151,52 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
 }
 
+/// True while either control key is held.
+fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
+}
+
+/// True while either alt key is held.
+fn alt_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
+}
+
+/// Appends `address` to `addresses` unless it is already present.
+fn push_unique(addresses: &mut Vec<TreeAddress>, address: TreeAddress) {
+    if !addresses.contains(&address) {
+        addresses.push(address);
+    }
+}
+
+/// Collects the address of every path in a shape list, recursing into children.
+fn collect_path_addresses(shapes: &[Shape], chain: &mut Vec<usize>, paths: &mut Vec<TreeAddress>) {
+    for (index, shape) in shapes.iter().enumerate() {
+        chain.push(index);
+        for (path, contour) in shape.paths.iter().enumerate() {
+            if !handles(contour).is_empty() {
+                push_unique(
+                    paths,
+                    TreeAddress::Path {
+                        shapes: chain.clone(),
+                        path,
+                    },
+                );
+            }
+        }
+        collect_path_addresses(&shape.children, chain, paths);
+        chain.pop();
+    }
+}
+
+/// Whether a selected point still names a point that exists in the document.
+fn point_exists(document: &Asset, point: &SelectedPoint) -> bool {
+    path_at(document, &point.path).is_some_and(|path| {
+        handles(path)
+            .iter()
+            .any(|(candidate, _)| *candidate == point.handle)
+    })
+}
+
 /// True when the cursor is over one of the editor's panels rather than the
 /// canvas.
 pub(crate) fn over_ui(cursor: Vec2, window: &Window) -> bool {
@@ -826,14 +1216,17 @@ fn handle_select_input(
     editor: &mut EditorState,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
-        editor.selected_node = None;
-        editor.selected_handle = None;
-        editor.drag = None;
+        editor.clear_draw_selection();
         return;
     }
 
     if keys.just_pressed(KeyCode::Delete) {
         delete_selected_node(editor);
+        return;
+    }
+
+    if ctrl_held(keys) && keys.just_pressed(KeyCode::KeyA) {
+        editor.select_all_paths();
         return;
     }
 
@@ -872,54 +1265,127 @@ fn handle_select_input(
         }
         editor.last_click = Some((now, cursor));
 
+        let shift = shift_held(keys);
+        let ctrl = ctrl_held(keys);
+        let alt = alt_held(keys);
+        let extend = shift || ctrl;
+        let slack = view.document_per_pixel() * HANDLE_HIT_RADIUS;
+
         // Control points of the current selection take priority over picking a
         // different path, otherwise clicking a handle next to another shape
-        // would re-select that shape.
-        let shift = shift_held(keys);
-        let mut started_drag = false;
-        if let Some(address) = editor.selected_node.clone()
-            && let Some((node, node_address, path)) = node_under(
-                &editor.document,
-                &address,
-                point,
-                view.document_per_pixel() * HANDLE_HIT_RADIUS,
-            )
-        {
-            let handle = node.handle;
-            let endpoint = matches!(handle, Handle::Start | Handle::Anchor(_));
-            let bending = shift && endpoint && !bend_candidates(path, handle).is_empty();
-            editor.drag = Some(if bending {
-                Drag::Bend {
-                    address: node_address,
-                    handle,
-                    target: None,
-                }
-            } else {
-                Drag::Handle {
-                    address: node_address,
-                    handle,
-                    symmetric: shift,
-                }
-            });
-            editor.selected_handle = Some(node);
-            started_drag = true;
-        }
+        // would re-select that shape. The borrow of the document ends before
+        // any selection changes below.
+        let point_hit = {
+            let displayed = editor.selected_path_addresses();
+            point_under(&editor.document, &displayed, point, slack).map(|(selected, path)| {
+                let handle = selected.handle;
+                let endpoint = matches!(handle, Handle::Start | Handle::Anchor(_));
+                let can_bend = endpoint && !bend_candidates(path, handle).is_empty();
+                (selected, endpoint, can_bend)
+            })
+        };
 
-        if !started_drag {
-            // Pressing a shape selects it and starts moving the whole thing;
-            // pressing empty space clears the selection.
-            let picked = pick_shape(
+        if let Some((selected, endpoint, can_bend)) = point_hit {
+            let already_selected = editor.point_is_selected(&selected);
+            let path_address = selected.path.clone();
+            let handle = selected.handle;
+
+            if alt {
+                // Alt resolves immediately, without the click-versus-drag
+                // wait: bend a straight anchor or mirror the opposing handle.
+                editor.select_only_point(selected);
+                editor.drag = Some(if endpoint && can_bend {
+                    Drag::Bend {
+                        address: path_address,
+                        handle,
+                        target: None,
+                    }
+                } else {
+                    Drag::Handle {
+                        address: path_address,
+                        handle,
+                        symmetric: true,
+                    }
+                });
+            } else if ctrl && !shift {
+                // Ctrl is unambiguous: it toggles the point immediately, and a
+                // Ctrl-drag moves whatever remains selected.
+                editor.toggle_point(selected.clone());
+                if editor.point_is_selected(&selected) {
+                    editor.start_move(point);
+                } else {
+                    editor.drag = None;
+                }
+            } else if shift {
+                // Shift is resolved on release or movement: a click adds the
+                // point to the selection, a drag symmetrizes it.
+                editor.drag = Some(Drag::ShiftPoint {
+                    point: selected,
+                    start: point,
+                    endpoint,
+                    can_bend,
+                });
+            } else if already_selected {
+                // Grabbing a selected point moves everything that is selected.
+                editor.start_move(point);
+            } else {
+                // Pressing an unselected point selects just it.
+                editor.select_only_point(selected);
+                editor.start_move(point);
+            }
+        } else {
+            let picked = pick_node(
                 &editor.document,
-                editor.selected_node.as_ref(),
+                &editor.selected_nodes,
                 point,
                 view.document_per_pixel() * PATH_HIT_SLACK,
             );
-            editor.selected_handle = None;
-            editor.drag = picked.clone().map(|address| Drag::Object {
-                address,
-                last: point,
-            });
-            editor.selected_node = picked;
+            match picked {
+                Some((address, already_selected)) => {
+                    if extend {
+                        if ctrl && !shift {
+                            editor.toggle_node(address.clone());
+                        } else {
+                            editor.add_node(address.clone());
+                        }
+                        if editor.node_is_selected(&address) {
+                            editor.start_move(point);
+                        } else {
+                            editor.drag = None;
+                        }
+                    } else if already_selected {
+                        // Grabbing a selected shape moves the whole selection.
+                        editor.start_move(point);
+                    } else {
+                        editor.select_only_node(address);
+                        editor.start_move(point);
+                    }
+                }
+                // Pressing empty space box-selects. Shift and Ctrl add the box
+                // contents to the existing selection.
+                None if !alt => {
+                    let (baseline_nodes, baseline_points) = if extend {
+                        (
+                            editor.selected_nodes.clone(),
+                            editor.selected_points.clone(),
+                        )
+                    } else {
+                        editor.selected_nodes.clear();
+                        editor.selected_points.clear();
+                        editor.selected_node = None;
+                        editor.selected_handle = None;
+                        (Vec::new(), Vec::new())
+                    };
+                    editor.drag = Some(Drag::Marquee {
+                        start: point,
+                        current: point,
+                        baseline_nodes,
+                        baseline_points,
+                        additive: extend,
+                    });
+                }
+                None => {}
+            }
         }
     }
 
@@ -971,21 +1437,99 @@ fn handle_select_input(
                         });
                     }
                 }
-                Drag::Object { address, last } => {
-                    let delta = offset(last, point);
-                    if delta != [0.0, 0.0]
-                        && let Some(shape) = shape_at_mut(&mut editor.document, &address)
-                    {
-                        translate_shape(shape, delta);
+                Drag::Move {
+                    nodes,
+                    points,
+                    origin,
+                    last,
+                    started,
+                } => {
+                    let dragging =
+                        started || drag_started(origin, point, view.document_per_pixel());
+                    if dragging {
+                        let delta = offset(last, point);
+                        if delta != [0.0, 0.0] {
+                            translate_selection(&mut editor.document, &nodes, &points, delta);
+                            editor.drag = Some(Drag::Move {
+                                nodes,
+                                points,
+                                origin,
+                                last: point,
+                                started: true,
+                            });
+                        }
                     }
-                    editor.drag = Some(Drag::Object {
-                        address,
-                        last: point,
+                }
+                Drag::ShiftPoint {
+                    point: shift_point,
+                    start,
+                    endpoint,
+                    can_bend,
+                } => {
+                    // Movement resolves the pending Shift press into the old
+                    // symmetric/bend handle gesture. Released without moving,
+                    // it becomes a Shift-click instead.
+                    if drag_started(start, point, view.document_per_pixel()) {
+                        let address = shift_point.path.clone();
+                        let handle = shift_point.handle;
+                        editor.drag = Some(if endpoint && can_bend {
+                            Drag::Bend {
+                                address,
+                                handle,
+                                target: None,
+                            }
+                        } else {
+                            Drag::Handle {
+                                address,
+                                handle,
+                                symmetric: true,
+                            }
+                        });
+                    }
+                }
+                Drag::Marquee {
+                    start,
+                    baseline_nodes,
+                    baseline_points,
+                    additive,
+                    ..
+                } => {
+                    // A box only starts selecting after the pointer has moved
+                    // far enough; a click on empty space is just a deselect.
+                    let dragging = drag_started(start, point, view.document_per_pixel());
+                    let (mut nodes, mut points) = if dragging {
+                        marquee_hits(&editor.document, start, point)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    if additive {
+                        for node in &baseline_nodes {
+                            push_unique(&mut nodes, node.clone());
+                        }
+                        for point in &baseline_points {
+                            if !points.contains(point) {
+                                points.push(point.clone());
+                            }
+                        }
+                    }
+                    editor.selected_nodes = nodes;
+                    editor.selected_points = points;
+                    editor.sync_primary();
+                    editor.drag = Some(Drag::Marquee {
+                        start,
+                        current: point,
+                        baseline_nodes,
+                        baseline_points,
+                        additive,
                     });
                 }
             }
         }
         if mouse.just_released(MouseButton::Left) {
+            // A Shift press that never became a drag is a Shift-click.
+            if let Some(Drag::ShiftPoint { point, .. }) = editor.drag.clone() {
+                editor.add_point(point);
+            }
             editor.drag = None;
         }
     }
@@ -1040,8 +1584,7 @@ fn handle_pen_input(
                 pending_out: None,
                 dragging: false,
             });
-            editor.selected_node = None;
-            editor.selected_handle = None;
+            editor.clear_draw_selection();
         } else if pen_should_close(editor, point, slack) {
             if let Some(draft) = &mut editor.pen {
                 draft.path.close();
@@ -1132,20 +1675,10 @@ fn refresh_scene(
     }
 
     if *mode == EditorMode::Draw {
-        if let Some(address) = &editor.selected_node {
-            // A whole-shape selection shows the points of every path it owns.
-            // Only the path holding the selected point highlights it.
-            for (index, path) in selection_paths(&editor.document, address) {
-                let selected_handle = editor
-                    .selected_handle
-                    .filter(|node| node.path == index)
-                    .map(|node| node.handle);
-                draw_control_overlay(&mut scene, path, scale, selected_handle);
-            }
-        }
+        draw_selection_overlay(&mut scene, &editor, scale);
 
         if let Some(draft) = &editor.pen {
-            draw_control_overlay(&mut scene, &draft.path, scale, None);
+            draw_control_overlay(&mut scene, &draft.path, scale, &[]);
 
             // Rubber band from the last anchor to the cursor while the next
             // point is being chosen.
@@ -1163,15 +1696,22 @@ fn refresh_scene(
                 );
             }
         }
+
+        if let Some(Drag::Marquee { start, current, .. }) = &editor.drag {
+            draw_marquee(&mut scene, *start, *current, scale);
+        }
     } else if *mode == EditorMode::Rig {
         crate::rig::draw_bone_overlay(
             &mut scene,
             &editor.document,
             &editor.pose,
-            editor.selected_bone,
+            &editor.selected_bones,
             editor.rig.preview(),
             scale,
         );
+        if let Some((start, current)) = editor.rig.selection_marquee() {
+            crate::rig::draw_selection_marquee(&mut scene, start, current, scale);
+        }
 
         // The weight brush overlays every point and shows the brush ring where
         // the cursor is over the canvas.
@@ -1197,7 +1737,7 @@ fn refresh_scene(
             &mut scene,
             &editor.document,
             pose,
-            editor.selected_bone,
+            editor.selected_bone.as_slice(),
             None,
             scale,
         );
@@ -1677,24 +2217,39 @@ pub fn cancel_node_rename(editor: &mut EditorState) {
 // Hit testing
 // ---------------------------------------------------------------------------
 
-/// Returns the shape under `point` that the user is most likely aiming at.
+/// Returns the node under `point` that the user is most likely aiming at, and
+/// whether that node is already selected.
 ///
-/// A selected shape is tried first with clipping ignored, so a shape that its
+/// Selected nodes are tried first with clipping ignored, so a shape that its
 /// parent clips away stays reachable while it is selected (for example after
-/// dragging it outside its parent). Trying it before the paint order also
+/// dragging it outside its parent). Trying them before the paint order also
 /// raises the selection above everything else. Every other shape is only
 /// pickable where it is actually visible.
-fn pick_shape(
+fn pick_node(
     document: &Asset,
-    selected: Option<&TreeAddress>,
+    selected: &[TreeAddress],
     point: [f32; 2],
     slack: f32,
-) -> Option<TreeAddress> {
-    if let Some(TreeAddress::Shape { shapes }) = selected
-        && let Some(shape) = shape_at_chain(document, shapes)
-        && let Some(address) = pick_shape_node(shape, point, slack, shapes, false)
-    {
-        return Some(address);
+) -> Option<(TreeAddress, bool)> {
+    // The most recently selected node is tried first.
+    for address in selected.iter().rev() {
+        match address {
+            TreeAddress::Shape { shapes } => {
+                if let Some(shape) = shape_at_chain(document, shapes)
+                    && let Some(hit) = pick_shape_node(shape, point, slack, shapes, false)
+                {
+                    return Some((hit.clone(), selected.contains(&hit)));
+                }
+            }
+            // A selected path is grabbed by its outline.
+            TreeAddress::Path { .. } => {
+                if let Some(path) = path_at(document, address)
+                    && path_distance(path, point) <= slack
+                {
+                    return Some((address.clone(), true));
+                }
+            }
+        }
     }
 
     // Later indices are painted later, so walk the paint order backwards.
@@ -1702,10 +2257,26 @@ fn pick_shape(
         if let Some(address) =
             pick_shape_node(&document.shapes[index], point, slack, &[index], true)
         {
-            return Some(address);
+            return Some((address.clone(), selected.contains(&address)));
         }
     }
     None
+}
+
+/// Backwards-compatible single-selection pick used by tests and callers that
+/// only care about the address.
+#[cfg(test)]
+fn pick_shape(
+    document: &Asset,
+    selected: Option<&TreeAddress>,
+    point: [f32; 2],
+    slack: f32,
+) -> Option<TreeAddress> {
+    let picked = match selected {
+        Some(selected) => pick_node(document, std::slice::from_ref(selected), point, slack),
+        None => pick_node(document, &[], point, slack),
+    };
+    picked.map(|(address, _)| address)
 }
 
 /// Tests one shape and its children, mirroring painting order.
@@ -1767,6 +2338,23 @@ fn shape_distance(shape: &Shape, point: [f32; 2]) -> f32 {
     let point = to_kurbo_point(point);
     shape
         .to_bez_path()
+        .segments()
+        .map(|segment| segment.nearest(point, NEAREST_ACCURACY).distance_sq)
+        .fold(f64::INFINITY, f64::min)
+        .sqrt() as f32
+}
+
+/// Whether the pointer has moved far enough from `origin` to count as a drag
+/// rather than a click. `pixel` is the length of one screen pixel in document
+/// units.
+fn drag_started(origin: [f32; 2], current: [f32; 2], pixel: f32) -> bool {
+    distance(origin, current) > pixel * CLICK_DRAG_THRESHOLD
+}
+
+/// Distance from `point` to a single path's outline.
+fn path_distance(path: &Path, point: [f32; 2]) -> f32 {
+    let point = to_kurbo_point(point);
+    path.to_bez_path()
         .segments()
         .map(|segment| segment.nearest(point, NEAREST_ACCURACY).distance_sq)
         .fold(f64::INFINITY, f64::min)
@@ -1900,12 +2488,8 @@ fn split_segment(path: &mut Path, index: usize, t: f64) -> Option<usize> {
 /// Only the outline is eligible: clicking the interior of a filled shape far
 /// from its edge does nothing. Returns `true` when a point was inserted.
 fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
-    let Some(address) = pick_shape(
-        &editor.document,
-        editor.selected_node.as_ref(),
-        point,
-        slack,
-    ) else {
+    let Some((address, _)) = pick_node(&editor.document, &editor.selected_nodes, point, slack)
+    else {
         return false;
     };
     let Some(shape) = shape_at(&editor.document, &address) else {
@@ -1935,11 +2519,17 @@ fn insert_point(editor: &mut EditorState, point: [f32; 2], slack: f32) -> bool {
         return false;
     };
 
-    editor.selected_node = Some(address);
-    editor.selected_handle = Some(SelectedNode {
-        path: path_index,
+    let point = SelectedPoint {
+        path: TreeAddress::Path {
+            shapes: address.shape_chain().to_vec(),
+            path: path_index,
+        },
         handle: Handle::Anchor(new_index),
-    });
+    };
+    editor.selected_nodes.clear();
+    editor.selected_points.clear();
+    editor.selected_points.push(point.clone());
+    editor.set_primary_point(&point);
     editor.drag = None;
     true
 }
@@ -1983,20 +2573,22 @@ fn handles(path: &Path) -> Vec<(Handle, [f32; 2])> {
     handles
 }
 
-/// Finds the selected node's control point nearest to `point`, if within
-/// `radius`.
+/// Finds the control point nearest to `point` among the paths whose handles are
+/// currently displayed, if within `radius`.
 ///
-/// A whole-shape selection can grab points from any of its direct paths, so
-/// the search spans all of them and returns the path-qualified address of the
-/// best match. A single-path selection only searches that path.
-fn node_under<'a>(
+/// `paths` holds full path addresses, so the result stays unambiguous even
+/// when the selection spans several shapes.
+fn point_under<'a>(
     document: &'a Asset,
-    address: &TreeAddress,
+    paths: &[TreeAddress],
     point: [f32; 2],
     radius: f32,
-) -> Option<(SelectedNode, TreeAddress, &'a Path)> {
-    let mut best: Option<(f32, usize, Handle, &'a Path)> = None;
-    for (path_index, path) in selection_paths(document, address) {
+) -> Option<(SelectedPoint, &'a Path)> {
+    let mut best: Option<(f32, TreeAddress, Handle, &'a Path)> = None;
+    for address in paths {
+        let Some(path) = path_at(document, address) else {
+            continue;
+        };
         for (handle, position) in handles(path) {
             let distance = distance(position, point);
             if distance <= radius
@@ -2004,22 +2596,17 @@ fn node_under<'a>(
                     .as_ref()
                     .is_none_or(|(best_distance, ..)| distance < *best_distance)
             {
-                best = Some((distance, path_index, handle, path));
+                best = Some((distance, address.clone(), handle, path));
             }
         }
     }
 
-    let (_, path_index, handle, path) = best?;
-    let drag_address = TreeAddress::Path {
-        shapes: address.shape_chain().to_vec(),
-        path: path_index,
-    };
+    let (_, address, handle, path) = best?;
     Some((
-        SelectedNode {
-            path: path_index,
+        SelectedPoint {
+            path: address,
             handle,
         },
-        drag_address,
         path,
     ))
 }
@@ -2132,7 +2719,7 @@ fn endpoint_anchor(path: &Path, handle: Handle) -> Option<[f32; 2]> {
     }
 }
 
-/// Segments that a shift-drag starting at `handle` can give a control point.
+/// Segments that an alt-drag starting at `handle` can give a control point.
 ///
 /// Only sides without a control yet are candidates. Each entry pairs the
 /// segment with the direction from the anchor to the segment's far end, so
@@ -2231,7 +2818,7 @@ fn apply_bend(path: &mut Path, target: BendTarget, point: [f32; 2]) -> bool {
     true
 }
 
-/// Mirrors the neighbouring handle of a shift-dragged control point.
+/// Mirrors the neighbouring handle of an alt-dragged control point.
 ///
 /// Symmetry only applies across a shared node: when the adjacent segment has a
 /// control at the anchor this handle meets, that control is mirrored across the
@@ -2350,6 +2937,206 @@ pub(crate) fn translate_shape(shape: &mut Shape, delta: [f32; 2]) {
     }
 }
 
+/// Moves the node named by `address` by `delta`.
+///
+/// A shape moves its whole subtree; a path moves only that contour.
+fn translate_node(document: &mut Asset, address: &TreeAddress, delta: [f32; 2]) {
+    match address {
+        TreeAddress::Shape { .. } => {
+            if let Some(shape) = shape_at_mut(document, address) {
+                translate_shape(shape, delta);
+            }
+        }
+        TreeAddress::Path { .. } => {
+            if let Some(path) = path_at_mut(document, address) {
+                translate_path(path, delta);
+            }
+        }
+    }
+}
+
+/// Whether moving `outer` also moves `inner`.
+///
+/// A shape carries its own paths and every nested child; a path carries only
+/// itself.
+fn node_covers(outer: &TreeAddress, inner: &TreeAddress) -> bool {
+    match outer {
+        TreeAddress::Shape { .. } => address_is_inside(outer, inner),
+        TreeAddress::Path { .. } => outer == inner,
+    }
+}
+
+/// Translates everything in a draw-mode selection by `delta`.
+///
+/// Nodes are moved as units and points inside a moved node are skipped, so
+/// nothing is translated twice. For the remaining points, an anchor carries
+/// its attached control points along unless those controls are selected
+/// themselves; a selected control moves with the selection instead.
+fn translate_selection(
+    document: &mut Asset,
+    nodes: &[TreeAddress],
+    points: &[SelectedPoint],
+    delta: [f32; 2],
+) {
+    // Deduplicate, then keep only the nodes no other selected node already
+    // covers. Moving a parent carries nested selections with it.
+    let mut unique: Vec<TreeAddress> = Vec::new();
+    for node in nodes {
+        push_unique(&mut unique, node.clone());
+    }
+    let moving: Vec<TreeAddress> = unique
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            !unique
+                .iter()
+                .enumerate()
+                .any(|(other, candidate)| other != *index && node_covers(candidate, node))
+        })
+        .map(|(_, node)| node.clone())
+        .collect();
+    for node in &moving {
+        translate_node(document, node, delta);
+    }
+
+    for point in points {
+        // Points inside a moved node already traveled with it.
+        if nodes.iter().any(|node| node_covers(node, &point.path)) {
+            continue;
+        }
+        let selected_here: Vec<Handle> = points
+            .iter()
+            .filter(|other| other.path == point.path)
+            .filter(|other| !nodes.iter().any(|node| node_covers(node, &other.path)))
+            .map(|other| other.handle)
+            .collect();
+        if let Some(path) = path_at_mut(document, &point.path) {
+            translate_point(path, point.handle, delta, &selected_here);
+        }
+    }
+}
+
+/// Whether a marquee corner covers `point`.
+fn inside_box(point: [f32; 2], min: [f32; 2], max: [f32; 2]) -> bool {
+    point[0] >= min[0] && point[0] <= max[0] && point[1] >= min[1] && point[1] <= max[1]
+}
+
+/// Nodes and control points enclosed by the box between two drag corners.
+///
+/// A path whose every point is inside is selected as a node. A path only
+/// partly inside contributes the individual points the box covers.
+fn marquee_hits(
+    document: &Asset,
+    start: [f32; 2],
+    end: [f32; 2],
+) -> (Vec<TreeAddress>, Vec<SelectedPoint>) {
+    let min = [start[0].min(end[0]), start[1].min(end[1])];
+    let max = [start[0].max(end[0]), start[1].max(end[1])];
+
+    let mut addresses = Vec::new();
+    collect_path_addresses(&document.shapes, &mut Vec::new(), &mut addresses);
+
+    let mut nodes = Vec::new();
+    let mut points = Vec::new();
+    for address in addresses {
+        let Some(path) = path_at(document, &address) else {
+            continue;
+        };
+        let points_on_path = handles(path);
+        if points_on_path.is_empty() {
+            continue;
+        }
+        if points_on_path
+            .iter()
+            .all(|(_, position)| inside_box(*position, min, max))
+        {
+            nodes.push(address);
+        } else {
+            for (handle, position) in points_on_path {
+                if inside_box(position, min, max) {
+                    points.push(SelectedPoint {
+                        path: address.clone(),
+                        handle,
+                    });
+                }
+            }
+        }
+    }
+    (nodes, points)
+}
+
+/// Moves one control point by `delta`.
+///
+/// An anchor or an open path's start carries the control points attached to
+/// it along, unless `selected` already lists those controls: in that case they
+/// are moved by the selection loop instead and must not be translated twice.
+fn translate_point(path: &mut Path, handle: Handle, delta: [f32; 2], selected: &[Handle]) {
+    let moves = |candidate: Handle| selected.contains(&candidate);
+
+    match handle {
+        Handle::Start => {
+            if let PathEnds::Open(start) = &mut path.ends {
+                *start = translate(*start, delta);
+            }
+            if !moves(Handle::Ctrl1(0))
+                && let Some(ctrl1) = path
+                    .segments
+                    .first_mut()
+                    .and_then(|segment| segment.ctrl1.as_mut())
+            {
+                *ctrl1 = translate(*ctrl1, delta);
+            }
+        }
+        Handle::Anchor(index) => {
+            if let Some(segment) = path.segments.get_mut(index) {
+                segment.to = translate(segment.to, delta);
+            }
+            if !moves(Handle::Ctrl2(index))
+                && let Some(ctrl2) = path
+                    .segments
+                    .get_mut(index)
+                    .and_then(|segment| segment.ctrl2.as_mut())
+            {
+                *ctrl2 = translate(*ctrl2, delta);
+            }
+            let next = if index + 1 < path.segments.len() {
+                Some(index + 1)
+            } else if path.is_closed() {
+                Some(0)
+            } else {
+                None
+            };
+            if let Some(next) = next
+                && !moves(Handle::Ctrl1(next))
+                && let Some(ctrl1) = path
+                    .segments
+                    .get_mut(next)
+                    .and_then(|segment| segment.ctrl1.as_mut())
+            {
+                *ctrl1 = translate(*ctrl1, delta);
+            }
+        }
+        Handle::Ctrl1(index) => {
+            if let Some(ctrl1) = path
+                .segments
+                .get_mut(index)
+                .and_then(|segment| segment.ctrl1.as_mut())
+            {
+                *ctrl1 = translate(*ctrl1, delta);
+            }
+        }
+        Handle::Ctrl2(index) => {
+            if let Some(ctrl2) = path
+                .segments
+                .get_mut(index)
+                .and_then(|segment| segment.ctrl2.as_mut())
+            {
+                *ctrl2 = translate(*ctrl2, delta);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pen tool
 // ---------------------------------------------------------------------------
@@ -2396,11 +3183,9 @@ pub fn finish_pen(editor: &mut EditorState, finalize: bool) {
         children: Vec::new(),
     });
 
-    editor.selected_node = Some(TreeAddress::Shape {
+    editor.select_only_node(TreeAddress::Shape {
         shapes: vec![index],
     });
-    editor.selected_handle = None;
-    editor.drag = None;
     editor.structure_revision += 1;
 }
 
@@ -2427,33 +3212,76 @@ fn path_end(path: &Path) -> [f32; 2] {
 // Deletion
 // ---------------------------------------------------------------------------
 
-/// Deletes the selected control point, or the selected object when no control
-/// point is selected.
+/// Deletes the selected control points and nodes.
+///
+/// Points are removed before nodes, and within a path higher segment indices go
+/// first so removing an anchor cannot shift the indices of points still to be
+/// deleted. Nodes are removed deepest and last-in-list first for the same
+/// reason. Points inside a removed node simply disappear with it.
 fn delete_selected_node(editor: &mut EditorState) {
-    if let Some(node) = editor.selected_handle.take() {
-        // A control point is selected: only it is deleted, even when the
-        // handle happens to sit on top of another object.
-        let node_address = editor
-            .selected_node
-            .as_ref()
-            .map(|address| node_path_address(address, node.path));
-        if let Some(node_address) = node_address
-            && let Some(path) = path_at_mut(&mut editor.document, &node_address)
-            && delete_handle(path, node.handle)
-        {
-            editor.drag = None;
+    let mut points = std::mem::take(&mut editor.selected_points);
+    let mut nodes = std::mem::take(&mut editor.selected_nodes);
+    let primary = editor.selected_node.take();
+    let primary_handle = editor.selected_handle.take();
+    editor.drag = None;
+
+    // Direct assignments to the primary fields still exist (tests and other
+    // callers), so honour them when the multi-selection is empty.
+    if points.is_empty() && nodes.is_empty() {
+        let changed = match (primary, primary_handle) {
+            (Some(address), Some(node)) => {
+                match path_at_mut(
+                    &mut editor.document,
+                    &node_path_address(&address, node.path),
+                ) {
+                    Some(path) => delete_handle(path, node.handle),
+                    None => false,
+                }
+            }
+            (Some(address), None) => remove_object(&mut editor.document, &address),
+            (None, _) => false,
+        };
+        if changed {
             editor.structure_revision += 1;
         }
         return;
     }
 
-    let Some(address) = editor.selected_node.take() else {
-        return;
-    };
-    if remove_object(&mut editor.document, &address) {
+    let mut changed = false;
+
+    // Control points first. `Reverse` puts later anchors ahead of earlier
+    // ones; a start point goes last because its removal shifts every index.
+    points.sort_by_key(|point| match point.handle {
+        Handle::Ctrl1(index) | Handle::Ctrl2(index) => (0, std::cmp::Reverse(index)),
+        Handle::Anchor(index) => (1, std::cmp::Reverse(index)),
+        Handle::Start => (2, std::cmp::Reverse(0)),
+    });
+    points.dedup();
+    for point in points {
+        if let Some(path) = path_at_mut(&mut editor.document, &point.path) {
+            changed |= delete_handle(path, point.handle);
+        }
+    }
+
+    // Nodes next. A deeper chain sorts before its ancestors, and a later
+    // sibling before an earlier one, so each removal leaves the rest valid.
+    nodes.sort_by_key(|address| std::cmp::Reverse(node_delete_key(address)));
+    nodes.dedup();
+    for address in nodes {
+        changed |= remove_object(&mut editor.document, &address);
+    }
+
+    if changed {
         editor.structure_revision += 1;
     }
-    editor.drag = None;
+}
+
+/// Ordering key for deleting nodes: deeper chains and later indices first.
+fn node_delete_key(address: &TreeAddress) -> (Vec<usize>, Option<usize>) {
+    match address {
+        TreeAddress::Shape { shapes } => (shapes.clone(), None),
+        TreeAddress::Path { shapes, path } => (shapes.clone(), Some(*path)),
+    }
 }
 
 /// The address of path `index` within the node selected at `address`.
@@ -2539,22 +3367,18 @@ fn remove_object(document: &mut Asset, address: &TreeAddress) -> bool {
 /// Draws the selected path's outline, bezier arms, and draggable points.
 ///
 /// Sizes are given in screen pixels and converted to document units so the
-/// overlay stays legible at any zoom.
-fn draw_control_overlay(
-    scene: &mut Scene,
-    path: &Path,
-    scale: f32,
-    selected_handle: Option<Handle>,
-) {
+/// overlay stays legible at any zoom. Every handle in `selected_handles` is
+/// highlighted, so a multi-selection can show points on several paths.
+fn draw_control_overlay(scene: &mut Scene, path: &Path, scale: f32, selected_handles: &[Handle]) {
     let scale = scale.max(f32::EPSILON);
     let pixels = |amount: f32| f64::from(amount / scale);
 
     draw_path_guides(scene, path, scale);
 
     for (handle, position) in handles(path) {
-        // The selected control point is the one the Delete key will remove, so
-        // make it stand out.
-        let selected = selected_handle == Some(handle);
+        // Selected control points are the ones the Delete key will remove, so
+        // make them stand out.
+        let selected = selected_handles.contains(&handle);
         let radius = pixels(if selected {
             OVERLAY_SELECTED_HANDLE_RADIUS
         } else {
@@ -2575,6 +3399,73 @@ fn draw_control_overlay(
             &circle,
         );
     }
+}
+
+/// Draws the control overlay for every path in the draw-mode selection.
+///
+/// Selected nodes contribute their paths, and selected points contribute the
+/// path that owns them, so box-selected handles stay visible even when their
+/// shape was never selected as a node.
+fn draw_selection_overlay(scene: &mut Scene, editor: &EditorState, scale: f32) {
+    // The path each overlay covers, together with the handles highlighted on
+    // it. Paths are deduplicated so overlapping node and point selections do
+    // not draw the same handles twice.
+    let mut paths: Vec<(TreeAddress, Vec<Handle>)> = Vec::new();
+    let entry = |address: TreeAddress, paths: &mut Vec<(TreeAddress, Vec<Handle>)>| {
+        if let Some(index) = paths
+            .iter()
+            .position(|(candidate, _)| *candidate == address)
+        {
+            index
+        } else {
+            paths.push((address, Vec::new()));
+            paths.len() - 1
+        }
+    };
+
+    for node in &editor.selected_nodes {
+        for (path, _) in selection_paths(&editor.document, node) {
+            entry(
+                TreeAddress::Path {
+                    shapes: node.shape_chain().to_vec(),
+                    path,
+                },
+                &mut paths,
+            );
+        }
+    }
+    for point in &editor.selected_points {
+        let index = entry(point.path.clone(), &mut paths);
+        if !paths[index].1.contains(&point.handle) {
+            paths[index].1.push(point.handle);
+        }
+    }
+
+    for (address, selected) in paths {
+        if let Some(path) = path_at(&editor.document, &address) {
+            draw_control_overlay(scene, path, scale, &selected);
+        }
+    }
+}
+
+/// Draws the box-selection rectangle between two document-space corners.
+fn draw_marquee(scene: &mut Scene, start: [f32; 2], current: [f32; 2], scale: f32) {
+    let min = [start[0].min(current[0]), start[1].min(current[1])];
+    let max = [start[0].max(current[0]), start[1].max(current[1])];
+    let rect = vello::kurbo::Rect::new(
+        f64::from(min[0]),
+        f64::from(min[1]),
+        f64::from(max[0]),
+        f64::from(max[1]),
+    );
+    scene.fill(Fill::NonZero, Affine::IDENTITY, MARQUEE_FILL, None, &rect);
+    scene.stroke(
+        &KurboStroke::new(f64::from(1.0 / scale.max(f32::EPSILON))),
+        Affine::IDENTITY,
+        MARQUEE_STROKE,
+        None,
+        &rect,
+    );
 }
 
 /// Draws a path's outline and its bezier arms, without any handles.
@@ -3028,7 +3919,7 @@ mod tests {
     }
 
     #[test]
-    fn node_under_searches_every_path_of_a_shape() {
+    fn point_under_searches_every_path_of_a_shape() {
         let document = document_of(vec![Shape {
             paths: vec![
                 Path::new([0.0, 0.0]).line_to([10.0, 0.0]),
@@ -3036,17 +3927,16 @@ mod tests {
             ],
             ..default()
         }]);
-        let address = shape_address(&[0]);
+        let paths = [path_address(&[0], 0), path_address(&[0], 1)];
 
-        let (node, node_address, _) = node_under(&document, &address, [50.0, 50.0], 1.0).unwrap();
+        let (point, _) = point_under(&document, &paths, [50.0, 50.0], 1.0).unwrap();
         assert_eq!(
-            node,
-            SelectedNode {
-                path: 1,
+            point,
+            SelectedPoint {
+                path: path_address(&[0], 1),
                 handle: Handle::Start
             }
         );
-        assert_eq!(node_address, path_address(&[0], 1));
     }
 
     #[test]
@@ -3918,5 +4808,238 @@ mod tests {
         assert!(editor.renaming.is_none());
         assert_eq!(node_name_at(&editor.document, &path), Some("Renamed"));
         assert_eq!(editor.structure_revision, 1);
+    }
+
+    fn curve() -> Path {
+        Path::new([0.0, 0.0])
+            .cubic_to([10.0, 0.0], [20.0, 10.0], [30.0, 10.0])
+            .line_to([40.0, 20.0])
+    }
+
+    #[test]
+    fn clicks_and_drags_are_distinguished_by_screen_distance() {
+        // One document unit per pixel: three pixels is the cutoff.
+        assert!(!drag_started([0.0, 0.0], [1.0, 1.0], 1.0));
+        assert!(!drag_started([0.0, 0.0], [2.0, 0.0], 1.0));
+        assert!(drag_started([0.0, 0.0], [4.0, 0.0], 1.0));
+
+        // Zoomed in, a document-space move that is only a pixel or two on
+        // screen still counts as a click.
+        assert!(!drag_started([0.0, 0.0], [0.2, 0.0], 0.1));
+        assert!(drag_started([0.0, 0.0], [0.5, 0.0], 0.1));
+    }
+
+    #[test]
+    fn marquee_selects_enclosed_paths_and_loose_points() {
+        let document = document_of(vec![
+            Shape {
+                paths: vec![
+                    Path::new([0.0, 0.0])
+                        .line_to([10.0, 0.0])
+                        .line_to([10.0, 10.0]),
+                ],
+                ..default()
+            },
+            Shape {
+                paths: vec![Path::new([100.0, 100.0]).line_to([110.0, 100.0])],
+                ..default()
+            },
+        ]);
+
+        // A box around the whole first path selects it as a node.
+        let (nodes, points) = marquee_hits(&document, [-1.0, -1.0], [11.0, 11.0]);
+        assert_eq!(nodes, vec![path_address(&[0], 0)]);
+        assert!(points.is_empty());
+
+        // A box over only its two leftmost anchors selects those points
+        // instead, leaving the rest of the path alone.
+        let (nodes, points) = marquee_hits(&document, [-1.0, -1.0], [10.0, 1.0]);
+        assert!(nodes.is_empty());
+        let handles: Vec<Handle> = points.iter().map(|point| point.handle).collect();
+        assert!(handles.contains(&Handle::Start));
+        assert!(handles.contains(&Handle::Anchor(0)));
+        assert!(!handles.contains(&Handle::Anchor(1)));
+        assert!(
+            points
+                .iter()
+                .all(|point| point.path == path_address(&[0], 0))
+        );
+    }
+
+    #[test]
+    fn moving_an_anchor_carries_its_unselected_handles_once() {
+        let address = path_address(&[0], 0);
+        let document_with = |path: Path| {
+            document_of(vec![Shape {
+                paths: vec![path],
+                ..default()
+            }])
+        };
+
+        // Moving the anchor alone carries its incoming control along.
+        let mut document = document_with(curve());
+        translate_selection(
+            &mut document,
+            &[],
+            &[SelectedPoint {
+                path: address.clone(),
+                handle: Handle::Anchor(0),
+            }],
+            [5.0, 5.0],
+        );
+        let path = &document.shapes[0].paths[0];
+        assert_eq!(path.start(), Some([0.0, 0.0]));
+        assert_eq!(path.segments[0].to, [35.0, 15.0]);
+        assert_eq!(path.segments[0].ctrl2, Some([25.0, 15.0]));
+        assert_eq!(path.segments[0].ctrl1, Some([10.0, 0.0]));
+
+        // When the control is selected as well, it moves with the selection
+        // and is not moved a second time by its anchor.
+        let mut document = document_with(curve());
+        translate_selection(
+            &mut document,
+            &[],
+            &[
+                SelectedPoint {
+                    path: address.clone(),
+                    handle: Handle::Anchor(0),
+                },
+                SelectedPoint {
+                    path: address.clone(),
+                    handle: Handle::Ctrl2(0),
+                },
+            ],
+            [5.0, 5.0],
+        );
+        let path = &document.shapes[0].paths[0];
+        assert_eq!(path.segments[0].ctrl2, Some([25.0, 15.0]));
+
+        // The open start carries the first segment's outgoing control.
+        let mut document = document_with(curve());
+        translate_selection(
+            &mut document,
+            &[],
+            &[
+                SelectedPoint {
+                    path: address.clone(),
+                    handle: Handle::Start,
+                },
+                SelectedPoint {
+                    path: address.clone(),
+                    handle: Handle::Ctrl1(0),
+                },
+            ],
+            [5.0, 5.0],
+        );
+        let path = &document.shapes[0].paths[0];
+        assert_eq!(path.start(), Some([5.0, 5.0]));
+        assert_eq!(path.segments[0].ctrl1, Some([15.0, 5.0]));
+    }
+
+    #[test]
+    fn nested_node_selections_move_only_once() {
+        let mut document = document_of(vec![Shape {
+            paths: vec![curve()],
+            children: vec![Shape {
+                paths: vec![Path::new([50.0, 50.0]).line_to([60.0, 50.0])],
+                ..default()
+            }],
+            ..default()
+        }]);
+        let parent = shape_address(&[0]);
+        let child_path = path_address(&[0, 0], 0);
+
+        translate_selection(&mut document, &[parent, child_path], &[], [5.0, 5.0]);
+
+        // The parent already carried the child; selecting both must not move
+        // the child twice.
+        assert_eq!(
+            document.shapes[0].children[0].paths[0].start(),
+            Some([55.0, 55.0])
+        );
+        assert_eq!(document.shapes[0].paths[0].start(), Some([5.0, 5.0]));
+    }
+
+    #[test]
+    fn selecting_all_paths_includes_nested_children() {
+        let mut editor = EditorState::new(document_of(vec![
+            Shape {
+                paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0])],
+                children: vec![Shape {
+                    paths: vec![Path::new([2.0, 2.0]).line_to([3.0, 3.0])],
+                    ..default()
+                }],
+                ..default()
+            },
+            Shape::default(),
+        ]));
+
+        editor.select_all_paths();
+
+        assert_eq!(
+            editor.selected_nodes,
+            vec![path_address(&[0], 0), path_address(&[0, 0], 0)]
+        );
+        assert_eq!(editor.selected_node, Some(path_address(&[0], 0)));
+    }
+
+    #[test]
+    fn toggling_a_point_never_duplicates_it() {
+        let point = SelectedPoint {
+            path: path_address(&[0], 0),
+            handle: Handle::Anchor(0),
+        };
+        let mut editor = EditorState::new(document_of(Vec::new()));
+
+        editor.add_point(point.clone());
+        editor.add_point(point.clone());
+        assert_eq!(editor.selected_points, vec![point.clone()]);
+
+        editor.toggle_point(point);
+        assert!(editor.selected_points.is_empty());
+        assert!(editor.selected_node.is_none());
+        assert!(editor.selected_handle.is_none());
+    }
+
+    #[test]
+    fn deleting_a_multi_selection_removes_nodes_and_points() {
+        let mut editor = EditorState::new(document_of(vec![
+            Shape {
+                paths: vec![
+                    Path::new([0.0, 0.0])
+                        .line_to([10.0, 0.0])
+                        .line_to([20.0, 0.0])
+                        .line_to([30.0, 0.0]),
+                ],
+                ..default()
+            },
+            Shape {
+                paths: vec![Path::new([100.0, 100.0]).line_to([110.0, 100.0])],
+                ..default()
+            },
+        ]));
+        let first_path = path_address(&[0], 0);
+        editor.selected_points = vec![
+            SelectedPoint {
+                path: first_path.clone(),
+                handle: Handle::Anchor(1),
+            },
+            SelectedPoint {
+                path: first_path,
+                handle: Handle::Anchor(2),
+            },
+        ];
+        editor.selected_nodes = vec![shape_address(&[1])];
+
+        delete_selected_node(&mut editor);
+
+        // The second shape is gone, and the two selected anchors are removed
+        // from the first path without disturbing each other.
+        assert_eq!(editor.document.shapes.len(), 1);
+        let path = &editor.document.shapes[0].paths[0];
+        assert_eq!(path.segments.len(), 1);
+        assert_eq!(path.segments[0].to, [10.0, 0.0]);
+        assert!(editor.selected_nodes.is_empty());
+        assert!(editor.selected_points.is_empty());
     }
 }
