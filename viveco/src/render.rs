@@ -86,6 +86,20 @@ impl SceneInstance {
     }
 }
 
+/// One stand-alone piece of a scene, with the Z at which to draw it.
+///
+/// A fragment owns a complete Vello scene in scene space (including any
+/// placement transform), so fragments can be sorted, stored, and appended in
+/// any order. [`SceneBuilder::into_fragments`] produces one fragment per
+/// top-level shape, which is how the Bevy integration keeps instance artwork
+/// Z-sorted against custom fragments.
+pub struct SceneFragment {
+    /// Sort key: fragments are drawn in ascending Z.
+    pub z: f32,
+    /// The fragment's complete Vello content.
+    pub scene: Scene,
+}
+
 /// One shape queued in a [`SceneBuilder`], with the placement that puts it in
 /// scene space.
 struct Placement<'a> {
@@ -171,6 +185,28 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
+    /// Sorts the collected shapes by Z and paints each one into its own
+    /// [`SceneFragment`], with the placement baked in.
+    ///
+    /// One fragment per top-level shape. Children stay grouped with their
+    /// parent. Equal Z keeps the order the shapes were added.
+    pub fn into_fragments(mut self) -> Vec<SceneFragment> {
+        self.sort();
+        self.0
+            .into_iter()
+            .map(|placement| {
+                let mut scene = Scene::new();
+                placement
+                    .shape
+                    .draw(&mut scene, placement.stroke_width, placement.transform);
+                SceneFragment {
+                    z: placement.shape.z,
+                    scene,
+                }
+            })
+            .collect()
+    }
+
     /// Stable sort by ascending Z, matching
     /// [`indices_in_paint_order`](crate::indices_in_paint_order).
     fn sort(&mut self) {
@@ -180,6 +216,16 @@ impl<'a> SceneBuilder<'a> {
 }
 
 impl Shape {
+    /// Paints this shape and its descendants into a standalone fragment.
+    ///
+    /// `stroke_width` is in this shape's local units; `transform` places it in
+    /// scene space. The fragment's Z is this shape's [`z`](Self::z).
+    pub fn to_fragment(&self, stroke_width: f32, transform: Affine) -> SceneFragment {
+        let mut scene = Scene::new();
+        self.draw(&mut scene, stroke_width, transform);
+        SceneFragment { z: self.z, scene }
+    }
+
     /// Paints this shape and its descendants into `scene`, through `transform`.
     fn draw(&self, scene: &mut Scene, stroke_width: f32, transform: Affine) {
         let path = self.to_bez_path();
@@ -488,5 +534,61 @@ mod tests {
         let mut builder = SceneBuilder::new();
         builder.add_asset(&asset, 1.).add_asset(&asset, 1.);
         builder.finish(&mut scene);
+    }
+
+    #[test]
+    fn builder_splits_one_fragment_per_shape_sorted_by_z() {
+        let shape = |z: f32, paths: usize| Shape {
+            z,
+            paths: (0..paths)
+                .map(|i| Path::new([i as f32, 0.0]).line_to([i as f32, 1.0]))
+                .collect(),
+            style: Style {
+                fill: Some(Rgba8::rgb(255, 0, 0)),
+                stroke: None,
+            },
+            ..Default::default()
+        };
+        let asset = Asset {
+            shapes: vec![shape(5.0, 1), shape(1.0, 2)],
+            ..Default::default()
+        };
+        let transform = Affine::translate((10.0, -20.0));
+
+        let mut builder = SceneBuilder::new();
+        builder.add_asset_with_transform(&asset, 1.0, transform);
+        let fragments = builder.into_fragments();
+
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments[0].z, 1.0);
+        assert_eq!(fragments[0].scene.encoding().n_paths, 1);
+        assert_eq!(fragments[1].z, 5.0);
+        assert_eq!(fragments[1].scene.encoding().n_paths, 1);
+        // The placement is baked into the fragment's encoded geometry.
+        assert!(
+            fragments[0]
+                .scene
+                .encoding()
+                .transforms
+                .iter()
+                .any(|t| t.translation == [10.0, -20.0])
+        );
+    }
+
+    #[test]
+    fn shape_to_fragment_uses_its_own_z() {
+        let shape = Shape {
+            z: 3.5,
+            paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0])],
+            style: Style {
+                fill: Some(Rgba8::rgb(255, 0, 0)),
+                stroke: None,
+            },
+            ..Default::default()
+        };
+
+        let fragment = shape.to_fragment(1.0, Affine::IDENTITY);
+        assert_eq!(fragment.z, 3.5);
+        assert_eq!(fragment.scene.encoding().n_paths, 1);
     }
 }

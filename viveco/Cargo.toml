@@ -22,6 +22,12 @@ vello = { workspace = true, optional = true }
 bevy = { workspace = true, optional = true }
 bevy_vello = { workspace = true, optional = true }
 
+# The build script shares the core model and codegen source with the library.
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+
 [[example]]
 name = "animate"
 path = "examples/animate.rs"

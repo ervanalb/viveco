@@ -6,15 +6,16 @@
 //! - [`VivecoLoader`]: an [`AssetLoader`](bevy::asset::AssetLoader) for
 //!   `.viveco` files, so they load through the
 //!   [`AssetServer`](bevy::asset::AssetServer).
-//! - [`VivecoPlugin`]: registers the loader and adds the systems that paint
-//!   every [`VivecoInstance`] into the [`VivecoScene`] named by its
-//!   [`VivecoSceneOf`] component.
+//! - [`VivecoPlugin`]: registers the loader, rebuilds every [`VivecoScene`]
+//!   from [`SceneFragment`]s each frame, and contributes the artwork of every
+//!   [`VivecoInstance`].
 //!
-//! Everything is explicit: the plugin never spawns entities. Spawn the
-//! [`VivecoScene`] entities your app needs and link instances with
-//! [`VivecoSceneOf`]. Marking one scene [`VivecoDefaultScene`] opts into a
-//! default target for instances that do not name a scene; without such a
-//! marker, unlinked instances are ignored.
+//! Everything is explicit: the plugin never spawns entities. Each
+//! [`VivecoScene`] is a per-frame buffer of fragments; the plugin clears it,
+//! the built-in instance producer and any custom producer systems add
+//! fragments, and the plugin sorts them by Z and paints them. Marking one
+//! scene [`VivecoDefaultScene`] opts into a default target for instances that
+//! do not name a scene; without such a marker, unlinked instances are ignored.
 //!
 //! # With the plugin
 //!
@@ -40,7 +41,7 @@
 //!     commands.spawn((Camera2d, VelloView));
 //!
 //!     // Viveco does not create scenes: spawn one and link instances to it.
-//!     let scene = commands.spawn(VivecoScene).id();
+//!     let scene = commands.spawn(VivecoScene::default()).id();
 //!     let character = asset_server.load::<Asset>("character.viveco");
 //!     commands.spawn((
 //!         VivecoInstance::from_animation(character, 0),
@@ -50,11 +51,64 @@
 //! ```
 //!
 //! Every instance linked to the same scene has its artwork Z-ordered against
-//! the other members, and its entity's
+//! every other fragment in that scene, and its entity's
 //! [`GlobalTransform`](bevy::prelude::GlobalTransform) is baked into scene
 //! space. Spawn several scenes for independent rendering (for example, one per
 //! camera or render layer); a scene's own transform applies to all its
 //! contents.
+//!
+//! # Custom scene content
+//!
+//! A [`VivecoScene`] is filled every frame from [`SceneFragment`]s. To draw
+//! procedural or custom Vello content, write a system in
+//! [`VivecoSceneSystems::Build`] that pushes fragments into the scene:
+//!
+//! ```no_run
+//! use bevy::prelude::*;
+//! use bevy_vello::prelude::*;
+//! use viveco::{SceneFragment, VivecoScene, VivecoSceneOf, VivecoSceneSystems, scene_affine};
+//!
+//! #[derive(Component)]
+//! struct Ring {
+//!     radius: f32,
+//!     z: f32,
+//! }
+//!
+//! fn draw_rings(
+//!     mut scenes: Query<&mut VivecoScene>,
+//!     rings: Query<(&Ring, &VivecoSceneOf, &GlobalTransform)>,
+//! ) {
+//!     for (ring, target, transform) in &rings {
+//!         let Ok(mut scene) = scenes.get_mut(target.0) else {
+//!             continue;
+//!         };
+//!         let mut fragment = vello::Scene::new();
+//!         fragment.stroke(
+//!             &vello::kurbo::Stroke::new(1.0),
+//!             scene_affine(transform),
+//!             vello::peniko::Color::from_rgba8(255, 255, 255, 255),
+//!             None,
+//!             &vello::kurbo::Circle::new((0.0, 0.0), ring.radius as f64),
+//!         );
+//!         scene.push(SceneFragment { z: ring.z, scene: fragment });
+//!     }
+//! }
+//!
+//! fn main() {
+//!     App::new().add_systems(PostUpdate, draw_rings.in_set(VivecoSceneSystems::Build));
+//! }
+//! ```
+//!
+//! Producers are independent: the plugin's instance renderer is just another
+//! producer, and adding a custom type needs no plugin changes. Fragments from
+//! every producer are sorted by Z together, so custom geometry interleaves with
+//! instance artwork at any depth. The scene is rebuilt every frame (clear,
+//! build, finalize), matching Vello's immediate-mode model; equal Z keeps the
+//! order fragments were pushed.
+//!
+//! [`SceneBuilder::into_fragments`](crate::render::SceneBuilder::into_fragments)
+//! and [`Shape::to_fragment`](crate::Shape::to_fragment) turn model geometry
+//! into fragments if you prefer the asset styling and Z semantics.
 //!
 //! # Default scene
 //!
@@ -65,7 +119,7 @@
 //! # use bevy::prelude::*;
 //! # use viveco::{Asset, VivecoDefaultScene, VivecoInstance, VivecoScene};
 //! # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
-//! commands.spawn((VivecoScene, VivecoDefaultScene));
+//! commands.spawn((VivecoScene::default(), VivecoDefaultScene));
 //! commands.spawn(VivecoInstance::from_animation(asset, 0));
 //! # }
 //! ```
@@ -91,7 +145,7 @@
 //! # use viveco::{Asset, VivecoInstance, VivecoStrokeWidthInPixels, VivecoScene, VivecoSceneOf};
 //! # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
 //! let scene = commands
-//!     .spawn((VivecoScene, VivecoStrokeWidthInPixels::new(2.0))) // two logical pixels wide
+//!     .spawn((VivecoScene::default(), VivecoStrokeWidthInPixels::new(2.0))) // two logical pixels wide
 //!     .id();
 //! commands.spawn((
 //!     VivecoInstance::from_animation(asset, 0),
@@ -154,10 +208,41 @@
 mod loader;
 mod plugin;
 
+// The asset model itself is Bevy-free (so it can be used from build scripts),
+// so its Bevy trait implementations live here instead of on the type.
+impl ::bevy::asset::Asset for crate::Asset {}
+
+impl ::bevy::asset::VisitAssetDependencies for crate::Asset {
+    fn visit_dependencies(&self, _visit: &mut impl FnMut(::bevy::asset::UntypedAssetId)) {}
+}
+
+impl ::bevy::reflect::TypePath for crate::Asset {
+    fn type_path() -> &'static str {
+        "viveco::asset::Asset"
+    }
+
+    fn short_type_path() -> &'static str {
+        "Asset"
+    }
+
+    fn type_ident() -> Option<&'static str> {
+        Some("Asset")
+    }
+
+    fn crate_name() -> Option<&'static str> {
+        Some("viveco")
+    }
+
+    fn module_path() -> Option<&'static str> {
+        Some("viveco::asset")
+    }
+}
+
+pub use crate::render::SceneFragment;
 pub use loader::VivecoLoader;
 pub use plugin::{
     VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneMembers,
-    VivecoSceneOf, VivecoStrokeWidthInPixels,
+    VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, scene_affine,
 };
 
 /// The Bevy integration's vocabulary.
@@ -167,7 +252,7 @@ pub use plugin::{
 /// `viveco` directly.
 pub mod prelude {
     pub use super::{
-        VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf,
-        VivecoStrokeWidthInPixels,
+        SceneFragment, VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene,
+        VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, scene_affine,
     };
 }

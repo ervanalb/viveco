@@ -1,6 +1,7 @@
-//! The instance component and the systems that render it.
+//! The instance component, scene content, and the systems that render them.
 
-use ::bevy::asset::AssetEvent;
+use std::cmp::Ordering;
+
 use ::bevy::camera::CameraUpdateSystems;
 use ::bevy::camera::visibility::{NoFrustumCulling, RenderLayers, VisibilitySystems};
 use ::bevy::prelude::*;
@@ -10,7 +11,7 @@ use ::vello::Scene;
 use ::vello::kurbo::Affine;
 
 use crate::AnimationInstance;
-use crate::render::{SceneBuilder, SceneInstance};
+use crate::render::{SceneBuilder, SceneFragment, SceneInstance};
 
 use super::VivecoLoader;
 
@@ -29,7 +30,7 @@ use super::VivecoLoader;
 /// # use bevy::prelude::*;
 /// # use viveco::{Asset, VivecoInstance, VivecoScene, VivecoSceneOf};
 /// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
-/// let scene = commands.spawn(VivecoScene).id();
+/// let scene = commands.spawn(VivecoScene::default()).id();
 /// commands.spawn((
 ///     VivecoInstance::from_animation(asset, 0),
 ///     VivecoSceneOf(scene),
@@ -37,8 +38,8 @@ use super::VivecoLoader;
 /// # }
 /// ```
 ///
-/// The entity's [`GlobalTransform`] is baked into scene space, and its
-/// top-level shapes are Z-ordered against the other members' shapes. Both
+/// The entity's [`GlobalTransform`] is baked into scene space, and each
+/// top-level shape is Z-ordered against every other fragment in the scene. Both
 /// non-cyclic and cyclic animations use the sampling behavior of
 /// [`Animation::sample_pose`](crate::Animation::sample_pose).
 ///
@@ -47,8 +48,9 @@ use super::VivecoLoader;
 /// the camera scales the stroke along with the artwork. Add
 /// [`VivecoStrokeWidthInPixels`] to keep an on-screen width instead.
 ///
-/// A user who wants a different pose or rendering path can spawn their own
-/// component instead: the underlying steps are ordinary library calls.
+/// A user who wants a different pose or rendering path can write their own
+/// producer system in [`VivecoSceneSystems::Build`] and push
+/// [`SceneFragment`]s; the underlying steps are ordinary library calls.
 #[derive(Component, Clone, Debug)]
 #[require(Transform, Visibility)]
 pub struct VivecoInstance {
@@ -97,7 +99,7 @@ impl VivecoInstance {
 /// # use bevy::prelude::*;
 /// # use viveco::{Asset, VivecoInstance, VivecoScene, VivecoSceneOf};
 /// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
-/// let scene = commands.spawn(VivecoScene).id();
+/// let scene = commands.spawn(VivecoScene::default()).id();
 /// commands.spawn((
 ///     VivecoInstance::from_animation(asset, 0),
 ///     VivecoSceneOf(scene),
@@ -118,10 +120,10 @@ impl VivecoInstance {
 #[relationship(relationship_target = VivecoSceneMembers)]
 pub struct VivecoSceneOf(pub Entity);
 
-/// The instances that draw into one [`VivecoScene`].
+/// The entities that draw into one [`VivecoScene`].
 ///
-/// Maintained automatically by [`VivecoSceneOf`]. A scene rebuilds when its
-/// membership changes or one of its members changes.
+/// Maintained automatically by [`VivecoSceneOf`]. The fragment-based renderer
+/// does not require it, but it stays up to date for inspection and cleanup.
 #[derive(Component, Default, Debug)]
 #[relationship_target(relationship = VivecoSceneOf)]
 pub struct VivecoSceneMembers(Vec<Entity>);
@@ -129,26 +131,65 @@ pub struct VivecoSceneMembers(Vec<Entity>);
 /// An entity that carries one Vello scene.
 ///
 /// Spawn one for every independently rendered scene. Spawning it also adds the
-/// empty [`VelloScene2d`] the plugin paints into:
+/// [`VelloScene2d`] the plugin paints into:
 ///
 /// ```
 /// # use bevy::prelude::*;
 /// # use viveco::VivecoScene;
 /// # fn spawn(commands: &mut Commands) -> Entity {
-/// commands.spawn(VivecoScene).id()
+/// commands.spawn(VivecoScene::default()).id()
 /// # }
 /// ```
 ///
-/// Every instance that refers to this scene contributes its deformed artwork,
-/// placed by its entity's [`GlobalTransform`] and sorted against the other
-/// members' shapes by Z. Viveco never spawns a scene on its own; without one,
-/// instances are simply not rendered.
+/// The scene's content is rebuilt every frame from [`SceneFragment`]s. The
+/// plugin's default producer contributes the artwork of every [`VivecoInstance`]
+/// linked to this scene; your own systems add fragments by querying `&mut
+/// VivecoScene` and running in [`VivecoSceneSystems::Build`].
 ///
-/// Leave the entity's transform at its default to display each instance at its
+/// Fragments are sorted by Z across all producers before the scene is painted,
+/// so custom geometry can be interleaved with instance artwork at any depth.
+/// Viveco never spawns a scene on its own.
+///
+/// Leave the entity's transform at its default to display each fragment at its
 /// own Bevy transform. A transform here applies to the whole scene.
-#[derive(Component)]
+#[derive(Component, Default)]
 #[require(VelloScene2d, NoFrustumCulling)]
-pub struct VivecoScene;
+pub struct VivecoScene {
+    fragments: Vec<SceneFragment>,
+}
+
+impl VivecoScene {
+    /// Appends one fragment. Fragments are sorted by Z at the end of the frame.
+    pub fn push(&mut self, fragment: SceneFragment) {
+        self.fragments.push(fragment);
+    }
+
+    /// Appends every fragment from `fragments`.
+    pub fn push_fragments(&mut self, fragments: impl IntoIterator<Item = SceneFragment>) {
+        self.fragments.extend(fragments);
+    }
+
+    /// The fragments queued for this frame, before Z sorting.
+    pub fn fragments(&self) -> &[SceneFragment] {
+        &self.fragments
+    }
+}
+
+/// The `PostUpdate` stages of the fragment-based scene pipeline.
+///
+/// Every frame the plugin clears every [`VivecoScene`] in [`Clear`](Self::Clear),
+/// lets producers add fragments in [`Build`](Self::Build), then sorts and
+/// paints them in [`Finalize`](Self::Finalize). Custom producer systems belong
+/// in [`Build`](Self::Build).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VivecoSceneSystems {
+    /// Clears every scene's fragment list. Plugin-internal.
+    Clear,
+    /// Producers push fragments into scenes.
+    Build,
+    /// Sorts fragments by Z and paints the Vello scene. Plugin-internal.
+    Finalize,
+}
 
 /// Marks the [`VivecoScene`] that instances without [`VivecoSceneOf`] join.
 ///
@@ -160,7 +201,7 @@ pub struct VivecoScene;
 /// # use bevy::prelude::*;
 /// # use viveco::{Asset, VivecoDefaultScene, VivecoInstance, VivecoScene};
 /// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
-/// commands.spawn((VivecoScene, VivecoDefaultScene));
+/// commands.spawn((VivecoScene::default(), VivecoDefaultScene));
 /// commands.spawn(VivecoInstance::from_animation(asset, 0));
 /// # }
 /// ```
@@ -168,7 +209,8 @@ pub struct VivecoScene;
 /// Linking happens once per instance; an explicit [`VivecoSceneOf`] always
 /// wins. If several scenes are marked, the one with the lowest entity ID is
 /// used. With no marked scene, instances without [`VivecoSceneOf`] are not
-/// rendered.
+/// rendered. Custom producer systems can query this marker to target the same
+/// scene.
 #[derive(Component, Default)]
 pub struct VivecoDefaultScene;
 
@@ -192,7 +234,7 @@ pub struct VivecoDefaultScene;
 /// # use viveco::{Asset, VivecoInstance, VivecoStrokeWidthInPixels, VivecoScene, VivecoSceneOf};
 /// # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
 /// let scene = commands
-///     .spawn((VivecoScene, VivecoStrokeWidthInPixels::new(2.0)))
+///     .spawn((VivecoScene::default(), VivecoStrokeWidthInPixels::new(2.0)))
 ///     .id();
 /// commands.spawn((
 ///     VivecoInstance::from_animation(asset, 0),
@@ -220,17 +262,22 @@ impl Default for VivecoStrokeWidthInPixels {
     }
 }
 
-/// Registers the asset loader and the rendering systems.
+/// Registers the asset loader and the fragment-based scene pipeline.
 ///
 /// The plugin owns no entities or resources of its own. It only:
 ///
 /// - registers [`VivecoLoader`](super::VivecoLoader) so `.viveco` files load
-///   through the [`AssetServer`](::bevy::asset::AssetServer), and
-/// - adds the `PostUpdate` systems that paint each [`VivecoInstance`] into the
-///   [`VivecoScene`] named by its [`VivecoSceneOf`].
+///   through the [`AssetServer`](::bevy::asset::AssetServer),
+/// - clears every [`VivecoScene`] each frame in
+///   [`VivecoSceneSystems::Clear`],
+/// - contributes the artwork of every [`VivecoInstance`] to its scene (or the
+///   [`VivecoDefaultScene`]) in [`VivecoSceneSystems::Build`], and
+/// - sorts the collected fragments by Z and paints them into the scene's
+///   [`VelloScene2d`] in [`VivecoSceneSystems::Finalize`].
 ///
-/// Add it after bevy_vello's `VelloPlugin`, then spawn your scenes and
-/// instances yourself. See the [module docs](crate::bevy) for a worked example
+/// Custom producers are ordinary systems in [`VivecoSceneSystems::Build`].
+/// Add the plugin after bevy_vello's `VelloPlugin`, then spawn your scenes and
+/// instances yourself. See the [module docs](crate::bevy) for worked examples
 /// and for the equivalent code without the plugin.
 pub struct VivecoPlugin;
 
@@ -238,44 +285,37 @@ impl Plugin for VivecoPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<crate::Asset>()
             .init_asset_loader::<VivecoLoader>()
-            .add_systems(
+            .configure_sets(
                 PostUpdate,
-                // `chain` so an asset event re-marks instances before the
-                // scene update reads their change ticks.
                 (
-                    attach_default_scene,
-                    normalize_viveco_stroke_widths,
-                    mark_reloaded_instances,
-                    update_viveco_scenes,
+                    VivecoSceneSystems::Clear,
+                    VivecoSceneSystems::Build,
+                    VivecoSceneSystems::Finalize,
                 )
                     .chain()
                     .after(TransformSystems::Propagate)
                     .after(VisibilitySystems::VisibilityPropagate)
                     .after(CameraUpdateSystems),
+            )
+            // Linking and stroke-width resolution must finish before producers
+            // read the instances. `chain` flushes the relationship insertion.
+            .add_systems(
+                PostUpdate,
+                (attach_default_scene, normalize_viveco_stroke_widths)
+                    .chain()
+                    .before(VivecoSceneSystems::Clear)
+                    .after(TransformSystems::Propagate)
+                    .after(VisibilitySystems::VisibilityPropagate)
+                    .after(CameraUpdateSystems),
+            )
+            .add_systems(
+                PostUpdate,
+                (
+                    clear_viveco_scenes.in_set(VivecoSceneSystems::Clear),
+                    render_viveco_instances.in_set(VivecoSceneSystems::Build),
+                    finalize_viveco_scenes.in_set(VivecoSceneSystems::Finalize),
+                ),
             );
-    }
-}
-
-/// Makes instances rebuild when their asynchronously loaded asset arrives,
-/// changes, or goes away. Change detection on the component only sees edits to
-/// the animation instances.
-fn mark_reloaded_instances(
-    mut events: MessageReader<AssetEvent<crate::Asset>>,
-    mut instances: Query<&mut VivecoInstance>,
-) {
-    for event in events.read() {
-        let id = match event {
-            AssetEvent::Added { id }
-            | AssetEvent::Modified { id }
-            | AssetEvent::Removed { id }
-            | AssetEvent::LoadedWithDependencies { id } => *id,
-            _ => continue,
-        };
-        for mut instance in &mut instances {
-            if instance.asset.id() == id {
-                instance.set_changed();
-            }
-        }
     }
 }
 
@@ -395,86 +435,68 @@ fn max_scale(transform: &GlobalTransform) -> f32 {
     scale.x.abs().max(scale.y.abs())
 }
 
-/// Rebuilds each scene from its members.
+/// Empties every scene's fragment list at the start of the frame.
+fn clear_viveco_scenes(mut scenes: Query<&mut VivecoScene>) {
+    for mut scene in &mut scenes {
+        scene.fragments.clear();
+    }
+}
+
+/// Contributes the artwork of every linked [`VivecoInstance`] to its scene.
 ///
-/// A scene is rebuilt when its membership changes, or when one of its members'
-/// instance, global transform, or inherited visibility changes. Every member is
-/// considered once a rebuild is needed, because the combined Z order depends on
-/// all of them.
-// Bevy system signatures are inherently verbose; this query is still the
-// clearest way to express the components the update needs.
-#[allow(clippy::type_complexity)]
-fn update_viveco_scenes(
-    mut scenes: Query<(&mut VelloScene2d, Option<Ref<VivecoSceneMembers>>), With<VivecoScene>>,
+/// Each top-level shape becomes one fragment carrying that shape's Z, so
+/// instance artwork interleaves with fragments from other producers.
+fn render_viveco_instances(
+    mut scenes: Query<&mut VivecoScene>,
     instances: Query<(
-        Ref<VivecoInstance>,
-        Ref<GlobalTransform>,
-        Ref<InheritedVisibility>,
+        &VivecoInstance,
+        &VivecoSceneOf,
+        &GlobalTransform,
+        &InheritedVisibility,
     )>,
     assets: Res<Assets<crate::Asset>>,
 ) {
-    for (mut scene, members) in &mut scenes {
-        let Some(members) = members else {
-            // Nothing refers to this scene. Clear geometry left over from
-            // members that were removed.
-            scene.reset();
+    for (instance, scene_of, transform, visibility) in &instances {
+        if !visibility.get() || max_scale(transform) <= f32::EPSILON {
+            continue;
+        }
+        let Some(asset) = assets.get(&instance.asset) else {
+            continue;
+        };
+        let Ok(mut scene) = scenes.get_mut(scene_of.0) else {
             continue;
         };
 
-        let changed = members.is_changed()
-            || members.iter().any(|entity| {
-                instances
-                    .get(entity)
-                    .is_ok_and(|(instance, transform, visibility)| {
-                        instance.is_changed() || transform.is_changed() || visibility.is_changed()
-                    })
-            });
-        if !changed {
-            continue;
-        }
-
-        // Sorting by entity makes equal-Z ties independent of relationship
-        // insertion order.
-        let mut members: Vec<_> = members.iter().collect();
-        members.sort_unstable();
-
-        // Instances own their deformed geometry, but the builder borrows their
-        // shapes, so they have to outlive it.
-        let mut scene_instances = Vec::new();
-        for entity in members {
-            let Ok((instance, transform, visibility)) = instances.get(entity) else {
-                continue;
-            };
-            if !visibility.get() {
-                continue;
-            }
-            let Some(asset) = assets.get(&instance.asset) else {
-                continue;
-            };
-            let scale = max_scale(&transform);
-            if scale <= f32::EPSILON {
-                continue;
-            }
-
-            scene_instances.push(
-                SceneInstance::animated(asset, &instance.mixer)
-                    .with_transform(scene_affine(&transform))
-                    .with_stroke_width(instance.stroke_width),
-            );
-        }
-
+        let deformed = SceneInstance::animated(asset, &instance.mixer)
+            .with_transform(scene_affine(transform))
+            .with_stroke_width(instance.stroke_width);
         let mut builder = SceneBuilder::new();
-        for instance in &scene_instances {
-            builder.add_instance(instance);
-        }
+        builder.add_instance(&deformed);
+        scene.push_fragments(builder.into_fragments());
+    }
+}
 
-        let mut combined = Scene::new();
-        builder.finish(&mut combined);
-        *scene = VelloScene2d::from(combined);
+/// Sorts every scene's fragments by Z and paints them into its [`VelloScene2d`].
+fn finalize_viveco_scenes(mut scenes: Query<(&mut VivecoScene, &mut VelloScene2d)>) {
+    for (mut scene, mut vello) in &mut scenes {
+        // Stable: fragments with equal Z keep the order they were pushed.
+        scene
+            .fragments
+            .sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
+
+        let mut painted = Scene::new();
+        for fragment in &scene.fragments {
+            painted.append(&fragment.scene, None);
+        }
+        *vello = VelloScene2d::from(painted);
     }
 }
 
 /// Converts a Bevy world transform into scene space.
+///
+/// Use this to place custom fragments: build geometry in the entity's local
+/// space, then store this affine in the encoded geometry or apply it when
+/// drawing.
 ///
 /// Scene geometry is Y-down, while Bevy's world is Y-up. `bevy_vello` applies
 /// that conversion itself when it places a [`VelloScene2d`]; for a transform
@@ -484,7 +506,7 @@ fn update_viveco_scenes(
 /// This matches the per-entity path for an unrotated 2D camera. A rolled
 /// camera's screen transform cannot be reproduced from an entity transform
 /// alone, because it would depend on the camera.
-fn scene_affine(transform: &GlobalTransform) -> Affine {
+pub fn scene_affine(transform: &GlobalTransform) -> Affine {
     let matrix = transform.to_matrix();
     Affine::new([
         f64::from(matrix.x_axis.x),
@@ -529,7 +551,7 @@ mod tests {
     }
 
     fn spawn_scene(app: &mut App) -> Entity {
-        app.world_mut().spawn(VivecoScene).id()
+        app.world_mut().spawn(VivecoScene::default()).id()
     }
 
     fn spawn_instance(
@@ -573,6 +595,103 @@ mod tests {
                 InheritedVisibility::VISIBLE,
             ))
             .id()
+    }
+
+    /// A stand-in for a user's custom producer: draws a line at `z`.
+    #[derive(Component)]
+    struct TestFragment {
+        z: f32,
+    }
+
+    fn push_test_fragments(
+        mut scenes: Query<&mut VivecoScene>,
+        fragments: Query<(&TestFragment, &VivecoSceneOf, &GlobalTransform)>,
+    ) {
+        for (spec, scene_of, transform) in &fragments {
+            let Ok(mut scene) = scenes.get_mut(scene_of.0) else {
+                continue;
+            };
+            let mut fragment = Scene::new();
+            fragment.stroke(
+                &vello::kurbo::Stroke::new(1.0),
+                scene_affine(transform),
+                vello::peniko::Color::from_rgba8(255, 255, 255, 255),
+                None,
+                &vello::kurbo::Line::new((0.0, 0.0), (10.0, 0.0)),
+            );
+            scene.push(SceneFragment {
+                z: spec.z,
+                scene: fragment,
+            });
+        }
+    }
+
+    fn push_one_fragment_once(mut scenes: Query<&mut VivecoScene>, mut pushed: Local<bool>) {
+        if *pushed {
+            return;
+        }
+        for mut scene in &mut scenes {
+            let mut fragment = Scene::new();
+            fragment.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::IDENTITY,
+                vello::peniko::Color::from_rgba8(255, 255, 255, 255),
+                None,
+                &vello::kurbo::Rect::new(0.0, 0.0, 1.0, 1.0),
+            );
+            scene.push(SceneFragment {
+                z: 0.0,
+                scene: fragment,
+            });
+            *pushed = true;
+        }
+    }
+
+    #[test]
+    fn custom_fragments_interleave_with_instance_shapes_by_z() {
+        let mut app = test_app();
+        app.add_systems(
+            PostUpdate,
+            push_test_fragments.in_set(VivecoSceneSystems::Build),
+        );
+        let scene = spawn_scene(&mut app);
+        let asset = add_asset(&mut app);
+
+        // The instance's shape has Z = 0; the custom fragment goes behind it.
+        spawn_instance(&mut app, scene, asset, Transform::from_xyz(10.0, 0.0, 0.0));
+        app.world_mut().spawn((
+            TestFragment { z: -1.0 },
+            VivecoSceneOf(scene),
+            Transform::from_xyz(5.0, 0.0, 0.0),
+        ));
+
+        app.update();
+
+        let mut query = app.world_mut().query::<&VelloScene2d>();
+        let vello = query.get(app.world(), scene).unwrap();
+        assert_eq!(vello.encoding().n_paths, 2);
+        let translations: Vec<[f32; 2]> = vello
+            .encoding()
+            .transforms
+            .iter()
+            .map(|transform| transform.translation)
+            .collect();
+        assert_eq!(translations, vec![[5.0, 0.0], [10.0, 0.0]]);
+    }
+
+    #[test]
+    fn fragments_do_not_persist_across_frames() {
+        let mut app = test_app();
+        app.add_systems(
+            PostUpdate,
+            push_one_fragment_once.in_set(VivecoSceneSystems::Build),
+        );
+        let scene = spawn_scene(&mut app);
+        app.update();
+        assert_eq!(scene_path_count(&mut app, scene), 1);
+
+        app.update();
+        assert_eq!(scene_path_count(&mut app, scene), 0);
     }
 
     #[test]
@@ -646,7 +765,7 @@ mod tests {
         let mut app = test_app();
         let scene = app
             .world_mut()
-            .spawn((VivecoScene, VivecoDefaultScene))
+            .spawn((VivecoScene::default(), VivecoDefaultScene))
             .id();
         let asset = add_asset(&mut app);
         let instance = spawn_unlinked_instance(&mut app, asset);
@@ -666,7 +785,7 @@ mod tests {
         let mut app = test_app();
         let default = app
             .world_mut()
-            .spawn((VivecoScene, VivecoDefaultScene))
+            .spawn((VivecoScene::default(), VivecoDefaultScene))
             .id();
         let explicit = spawn_scene(&mut app);
         let asset = add_asset(&mut app);
@@ -683,7 +802,7 @@ mod tests {
         let mut app = test_app();
         let old_default = app
             .world_mut()
-            .spawn((VivecoScene, VivecoDefaultScene))
+            .spawn((VivecoScene::default(), VivecoDefaultScene))
             .id();
         let asset = add_asset(&mut app);
         let instance = spawn_unlinked_instance(&mut app, asset);
@@ -698,7 +817,7 @@ mod tests {
 
         let replacement = app
             .world_mut()
-            .spawn((VivecoScene, VivecoDefaultScene))
+            .spawn((VivecoScene::default(), VivecoDefaultScene))
             .id();
         app.update();
 
@@ -714,11 +833,11 @@ mod tests {
         let mut app = test_app();
         let first = app
             .world_mut()
-            .spawn((VivecoScene, VivecoDefaultScene))
+            .spawn((VivecoScene::default(), VivecoDefaultScene))
             .id();
         let second = app
             .world_mut()
-            .spawn((VivecoScene, VivecoDefaultScene))
+            .spawn((VivecoScene::default(), VivecoDefaultScene))
             .id();
         let asset = add_asset(&mut app);
         spawn_unlinked_instance(&mut app, asset);
@@ -735,7 +854,7 @@ mod tests {
         let scene = app
             .world_mut()
             .spawn((
-                VivecoScene,
+                VivecoScene::default(),
                 Transform::default().with_scale(Vec3::splat(2.0)),
             ))
             .id();
@@ -764,7 +883,7 @@ mod tests {
         let scene = app
             .world_mut()
             .spawn((
-                VivecoScene,
+                VivecoScene::default(),
                 VivecoStrokeWidthInPixels::new(6.0),
                 Transform::default().with_scale(Vec3::splat(3.0)),
             ))

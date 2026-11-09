@@ -1,10 +1,12 @@
 //! Loads and animates the rigged `stick.viveco` example.
 //!
 //! The example asset lives in the workspace's `examples` directory, so the
-//! asset server root is pointed there. The demo opts into a default scene, so
-//! its instance does not need to name one, then cycles through every animation
-//! with a short crossfade, which exercises the `(index, time, weight)`
-//! instances on [`VivecoInstance`].
+//! asset server root is pointed there. `build.rs` generates animation, shape,
+//! and bone constants from that file, so the demo starts on
+//! `stick::animations::WALK` instead of a hard-coded index. The demo opts into
+//! a default scene, so its instance does not need to name one, then cycles
+//! through every animation with a short crossfade, which exercises the
+//! `(index, time, weight)` instances on [`VivecoInstance`].
 //!
 //! Run with `cargo run -p viveco --example animate --features bevy`.
 
@@ -12,12 +14,17 @@ use bevy::prelude::*;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
 
+/// Animation, shape, and bone constants generated from `stick.viveco` by `build.rs`.
+mod stick {
+    include!(concat!(env!("OUT_DIR"), "/stick.rs"));
+}
+
 /// How long each animation is shown before moving to the next one.
 const CYCLE_SECONDS: f32 = 2.5;
 /// Length of the crossfade at the start of each cycle.
 const FADE_SECONDS: f32 = 0.5;
-/// "Walk" is the second animation in stick.viveco.
-const START_ANIMATION: usize = 1;
+/// Start on the animation named "Walk".
+const START_ANIMATION: usize = stick::animations::WALK;
 
 fn main() {
     App::new()
@@ -60,7 +67,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     ));
 
     // Mark one scene as the default; for VivecoInstances without explicit `VivecoSceneOf`.
-    commands.spawn((viveco::VivecoScene, viveco::VivecoDefaultScene));
+    commands.spawn((viveco::VivecoScene::default(), viveco::VivecoDefaultScene));
 
     let handle = asset_server.load::<viveco::Asset>("stick.viveco");
     commands.spawn((
