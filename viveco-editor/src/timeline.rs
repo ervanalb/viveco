@@ -83,6 +83,8 @@ const CURVE_WIDTH: f64 = 1.75;
 const HANDLE_ARM_WIDTH: f64 = 1.0;
 
 const GRID_LINE: Color = Color::from_rgba8(0xff, 0xff, 0xff, 0x22);
+/// Horizontal guide marking value zero, so the curve's rest value is visible.
+const VALUE_AXIS: Color = Color::from_rgba8(0xff, 0xff, 0xff, 0x44);
 const KEYFRAME_OUTLINE: Color = Color::from_rgba8(0x0d, 0x10, 0x16, 0xff);
 const HANDLE_ARM: Color = Color::from_rgba8(0xff, 0xff, 0xff, 0x50);
 const HANDLE_FILL: Color = Color::from_rgba8(0xdd, 0xe1, 0xe8, 0xff);
@@ -1663,13 +1665,28 @@ fn draw_frame(
     scene.pop_layer();
 }
 
-/// Vertical gridlines at the thinned integer timesteps.
+/// Vertical gridlines at the thinned integer timesteps, plus the value-zero
+/// axis across them.
 fn draw_grid(scene: &mut Scene, view: &TimelineView, size: Vec2) {
     let height = f64::from(size.y);
     for tick in grid_ticks(view, size) {
         let line = Line::new(Point::new(tick.x, 0.0), Point::new(tick.x, height));
         scene.stroke(&Stroke::new(1.0), Affine::IDENTITY, GRID_LINE, None, &line);
     }
+    draw_value_axis(scene, view, size);
+}
+
+/// Draws the horizontal line where the animated value is zero.
+fn draw_value_axis(scene: &mut Scene, view: &TimelineView, size: Vec2) {
+    let y = view.screen_y(0.0);
+    if !y.is_finite() || y < 0.0 || y > f64::from(size.y) {
+        return;
+    }
+    let line = Line::new(
+        Point::new(TRACK_INSET, y),
+        Point::new(TRACK_INSET + f64::from(size.x), y),
+    );
+    scene.stroke(&Stroke::new(1.0), Affine::IDENTITY, VALUE_AXIS, None, &line);
 }
 
 /// One visible gridline, with the label it carries (if any).

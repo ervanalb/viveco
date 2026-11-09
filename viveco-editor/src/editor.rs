@@ -204,6 +204,12 @@ const RUBBER_BAND_WIDTH: f32 = 1.5;
 /// Default paint for a newly drawn pen path.
 const PEN_STROKE_COLOR: Rgba8 = Rgba8::rgb(0xdd, 0xe1, 0xe8);
 
+/// Faint guides marking the document's X = 0 and Y = 0 axes.
+///
+/// They sit above the artwork so the origin stays locatable even where a shape
+/// is filled, but stay translucent so they never compete with the drawing.
+const AXIS_GUIDE: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x40);
+
 /// Control overlay colors, matching the UI accent.
 const OVERLAY_ACCENT: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0xff);
 const OVERLAY_BAND: Color = Color::from_rgba8(0x4c, 0xc9, 0xf0, 0x80);
@@ -1120,6 +1126,11 @@ fn refresh_scene(
     let stroke_width = 1.0 / scale.max(f32::EPSILON);
     let mut scene = displayed.into_scene(stroke_width);
 
+    // Draw the origin axes above the artwork but below the editing overlays.
+    if let (Some(view), Some(window)) = (view, window) {
+        draw_axes(&mut scene, view, window);
+    }
+
     if *mode == EditorMode::Draw {
         if let Some(address) = &editor.selected_node {
             // A whole-shape selection shows the points of every path it owns.
@@ -1194,6 +1205,51 @@ fn refresh_scene(
 
     if let Ok(mut scene_component) = scenes.single_mut() {
         *scene_component = VelloScene2d::from(scene);
+    }
+}
+
+/// Draws guide lines where document X = 0 and Y = 0 fall in the visible area.
+///
+/// The scene is in document space, so the lines use document coordinates and
+/// clamp themselves to the portion of the window currently on screen. Their
+/// width is divided by the view scale to stay one pixel wide at any zoom.
+fn draw_axes(scene: &mut Scene, view: ViewMapping, window: &Window) {
+    let min = view.screen_to_document(Vec2::ZERO);
+    let max = view.screen_to_document(Vec2::new(window.width(), window.height()));
+    if !min.iter().chain(max.iter()).all(|value| value.is_finite()) {
+        return;
+    }
+    let width = f64::from(1.0 / view.scale.max(f32::EPSILON));
+
+    // A vertical line at x = 0, visible only when the origin column is on
+    // screen.
+    if min[0] <= 0.0 && max[0] >= 0.0 {
+        let line = KurboLine::new(
+            KurboPoint::new(0.0, f64::from(min[1])),
+            KurboPoint::new(0.0, f64::from(max[1])),
+        );
+        scene.stroke(
+            &KurboStroke::new(width),
+            Affine::IDENTITY,
+            AXIS_GUIDE,
+            None,
+            &line,
+        );
+    }
+
+    // A horizontal line at y = 0.
+    if min[1] <= 0.0 && max[1] >= 0.0 {
+        let line = KurboLine::new(
+            KurboPoint::new(f64::from(min[0]), 0.0),
+            KurboPoint::new(f64::from(max[0]), 0.0),
+        );
+        scene.stroke(
+            &KurboStroke::new(width),
+            Affine::IDENTITY,
+            AXIS_GUIDE,
+            None,
+            &line,
+        );
     }
 }
 

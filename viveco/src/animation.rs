@@ -477,8 +477,11 @@ impl Asset {
     /// The blended pose of several animation instances at once.
     ///
     /// Out-of-range indices, non-finite times, and non-positive weights are
-    /// ignored; the remaining poses are weighted-averaged. When no instance
-    /// contributes, the result is the rest pose.
+    /// ignored. The remaining poses are added together relative to rest by
+    /// [`Pose::blend`], which does not normalize weights: each instance
+    /// contributes fully at weight `1`, and weights summing to `1` behave like
+    /// a weighted average. When no instance contributes, the result is the
+    /// rest pose.
     ///
     /// Every sampled pose is re-anchored to the bone's rest head before
     /// blending, so a bone that one animation leaves at rest still blends
@@ -813,6 +816,28 @@ mod tests {
 
         assert_eq!(asset.animation_index_by_name("Walk"), Some(1));
         assert_eq!(asset.animation_index_by_name("Missing"), None);
+    }
+
+    #[test]
+    fn sample_pose_adds_instances_at_full_weight() {
+        let mut asset = Asset::new();
+        asset.bones.push(Bone {
+            name: "Arm".into(),
+            head: Some([10.0, 20.0]),
+            tail: [10.0, 40.0],
+            children: Vec::new(),
+        });
+
+        let mut first = Animation::new(1.0);
+        first.insert_keyframe(bone_keyframe(0.0, 0.2, 0, BoneProperty::Angle));
+        let mut second = Animation::new(1.0);
+        second.insert_keyframe(bone_keyframe(0.0, 0.3, 0, BoneProperty::Angle));
+        asset.animations = vec![first, second];
+
+        // Both layers contribute fully instead of being averaged.
+        let pose = asset.sample_pose(&[(0, 0.0, 1.0), (1, 0.0, 1.0)]);
+        assert!((pose.get(0).rotation - 0.5).abs() < 1e-5);
+        assert_eq!(pose.get(0).pivot, [10.0, 20.0]);
     }
 
     #[test]

@@ -233,54 +233,51 @@ impl Pose {
         self.bones.fill(BonePose::default());
     }
 
-    /// A weighted average of several poses.
+    /// Adds several weighted poses together.
     ///
-    /// Each sample pairs a pose with a weight; the result has `bone_count`
-    /// entries and every entry is divided by the total weight. Non-finite and
-    /// non-positive weights are ignored, and if nothing remains the result is
-    /// the rest pose.
+    /// The result starts at the rest pose and each sample contributes its
+    /// offset from rest, scaled by its weight: rotations and translations add,
+    /// and scales add their deviation from `1`. Weights are not normalized, so
+    /// two full-weight layers both contribute fully; weights that sum to `1`
+    /// behave like a weighted average.
     ///
-    /// Samples are averaged field by field, so they must share a pivot for
-    /// each bone or their rotations and translations will refer to different
-    /// origins. [`Asset::sample_pose`](crate::Asset::sample_pose) produces
-    /// such poses.
+    /// Non-finite and non-positive weights are ignored, and if nothing remains
+    /// the result is the rest pose.
+    ///
+    /// Samples must share a pivot for each bone, or their rotations and
+    /// translations will refer to different origins; the first sample's pivot
+    /// is used. [`Asset::sample_pose`](crate::Asset::sample_pose) produces such
+    /// poses.
     pub fn blend(bone_count: usize, samples: &[(&Pose, f32)]) -> Self {
-        // Accumulators start at zero, including scale (whose identity is 1),
-        // so dividing by the total weight recovers the weighted average.
-        let zero = BonePose {
-            scale: 0.0,
-            ..Default::default()
-        };
-        let mut bones = vec![zero; bone_count];
-        let mut total_weight = 0.0;
+        let mut bones = vec![BonePose::default(); bone_count];
+        let mut sampled = false;
 
         for (pose, weight) in samples {
             if !weight.is_finite() || *weight <= 0.0 {
                 continue;
             }
             let weight = *weight;
+
+            if !sampled {
+                // Pivots are shared by construction, so take them from the
+                // first contributing pose.
+                for (index, bone) in bones.iter_mut().enumerate() {
+                    bone.pivot = pose.get(index).pivot;
+                }
+                sampled = true;
+            }
+
             for (index, accumulated) in bones.iter_mut().enumerate() {
                 let bone = pose.get(index);
                 accumulated.rotation += bone.rotation * weight;
                 accumulated.translation[0] += bone.translation[0] * weight;
                 accumulated.translation[1] += bone.translation[1] * weight;
-                accumulated.scale += bone.scale * weight;
-                accumulated.pivot[0] += bone.pivot[0] * weight;
-                accumulated.pivot[1] += bone.pivot[1] * weight;
+                accumulated.scale += (bone.scale - 1.0) * weight;
             }
-            total_weight += weight;
         }
 
-        if total_weight <= f32::EPSILON {
+        if !sampled {
             return Self::new(bone_count);
-        }
-        for bone in &mut bones {
-            bone.rotation /= total_weight;
-            bone.translation[0] /= total_weight;
-            bone.translation[1] /= total_weight;
-            bone.scale /= total_weight;
-            bone.pivot[0] /= total_weight;
-            bone.pivot[1] /= total_weight;
         }
         Self { bones }
     }
@@ -685,5 +682,50 @@ mod tests {
 
         assert_eq!(pose.get(0), BonePose::default());
         assert!((pose.get(1).rotation - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn blend_adds_full_weight_layers_without_normalizing() {
+        let first = Pose::new(1);
+        let second = Pose::new(1);
+
+        // Two rest poses must stay at rest rather than doubling the scale.
+        let blended = Pose::blend(1, &[(&first, 1.0), (&second, 1.0)]);
+        assert!(blended.is_identity());
+
+        let mut rotated = Pose::new(1);
+        rotated.set(
+            0,
+            BonePose {
+                rotation: 0.2,
+                translation: [3.0, 4.0],
+                scale: 1.5,
+                pivot: [10.0, 20.0],
+            },
+        );
+        let mut other = Pose::new(1);
+        other.set(
+            0,
+            BonePose {
+                rotation: 0.3,
+                translation: [-1.0, 2.0],
+                scale: 0.5,
+                pivot: [10.0, 20.0],
+            },
+        );
+
+        let blended = Pose::blend(1, &[(&rotated, 1.0), (&other, 1.0)]);
+        let bone = blended.get(0);
+        assert!((bone.rotation - 0.5).abs() < 1e-6);
+        assert_eq!(bone.translation, [2.0, 6.0]);
+        // Scale contributions are deltas from the rest scale of 1.
+        assert!((bone.scale - 1.0).abs() < 1e-6);
+        // Pivots are shared, so the first pose's pivot is kept.
+        assert_eq!(bone.pivot, [10.0, 20.0]);
+
+        // Weights summing to 1 still behave like a weighted average.
+        let blended = Pose::blend(1, &[(&rotated, 0.25), (&Pose::new(1), 0.75)]);
+        assert!((blended.get(0).rotation - 0.05).abs() < 1e-6);
+        assert!((blended.get(0).scale - 1.125).abs() < 1e-6);
     }
 }
