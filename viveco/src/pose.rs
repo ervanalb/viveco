@@ -11,6 +11,11 @@
 //! transform composed with its own, so rotating a parent carries its children
 //! along.
 //!
+//! [`Pose`] stores those local transforms. [`WorldPose`] resolves them into one
+//! world transform per bone, which is what the renderer skins with at draw
+//! time. Bones are stored in topological order, so that resolution is a single
+//! linear pass over the flat [`BoneIndex`] order.
+//!
 //! The artwork is moved with linear blend skinning. A curve point weighted to
 //! several bones moves to the blend of where each bone's world transform puts
 //! it, with the point's unused weight `1 - sum` keeping it in place.
@@ -281,6 +286,80 @@ impl Pose {
         }
         Self { bones }
     }
+
+    /// Resolves this pose into the world-space transforms of `asset`'s bones.
+    ///
+    /// This is the representation the renderer skins geometry with.
+    pub fn to_world(&self, asset: &Asset) -> WorldPose {
+        WorldPose::new(asset, self)
+    }
+}
+
+/// Every bone's world-space transform under a [`Pose`].
+///
+/// The transforms are ordered by [`BoneIndex`]. Assets store their bones in
+/// topological order, with every parent before its children, so building this
+/// value composes each bone on top of its already-resolved parent in one
+/// linear pass; no bone is looked up by searching the skeleton.
+///
+/// Unlike [`Pose`], which is local editing state, a `WorldPose` is the
+/// resolved input to skinning. [`WorldPose::deform`] can therefore move a
+/// point without consulting the asset, which lets the renderer skin geometry
+/// while it draws instead of cloning and deforming the whole asset first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorldPose {
+    worlds: Vec<Similarity>,
+}
+
+impl WorldPose {
+    /// Every bone's world transform under `pose`.
+    pub fn new(asset: &Asset, pose: &Pose) -> Self {
+        Self {
+            worlds: asset.bone_worlds(pose),
+        }
+    }
+
+    /// Every bone at its rest world transform in `asset`.
+    pub fn rest(asset: &Asset) -> Self {
+        Self {
+            worlds: vec![Similarity::IDENTITY; asset.bone_count()],
+        }
+    }
+
+    /// Wraps an already resolved list of bone world transforms, ordered by
+    /// [`BoneIndex`].
+    ///
+    /// This is the escape hatch for callers that compute world transforms
+    /// themselves (a custom solver, for example) rather than through a
+    /// [`Pose`].
+    pub fn from_worlds(worlds: Vec<Similarity>) -> Self {
+        Self { worlds }
+    }
+
+    /// The world transforms, ordered by [`BoneIndex`].
+    pub fn worlds(&self) -> &[Similarity] {
+        &self.worlds
+    }
+
+    /// A bone's world transform, or the identity when it has none.
+    pub fn get(&self, index: BoneIndex) -> Similarity {
+        self.worlds
+            .get(index)
+            .copied()
+            .unwrap_or(Similarity::IDENTITY)
+    }
+
+    /// Whether every bone is at its rest world transform.
+    pub fn is_identity(&self) -> bool {
+        self.worlds
+            .iter()
+            .all(|world| *world == Similarity::IDENTITY)
+    }
+
+    /// Skins one weighted point with this pose.
+    pub fn deform(&self, weights: &Weights, position: Point) -> Point {
+        weights.deform(position, &self.worlds)
+    }
 }
 
 /// The world transform of the bone at `target` under `pose`.
@@ -328,36 +407,60 @@ fn world_at(asset: &Asset, pose: &Pose, target: BoneIndex) -> Similarity {
 impl Asset {
     /// The world transform of every bone under `pose`, ordered by
     /// [`BoneIndex`].
+    ///
+    /// The flat [`BoneIndex`] order is depth-first pre-order, so it is
+    /// topological: a bone's parent is always resolved before the bone itself.
+    /// This walks that order once with an explicit stack, composing each bone
+    /// from its parent's finished world transform. It never recurses and never
+    /// searches for a parent.
     pub fn bone_worlds(&self, pose: &Pose) -> Vec<Similarity> {
-        fn walk(
-            bones: &[Bone],
+        struct Frame<'a> {
+            bones: &'a [Bone],
+            next: usize,
             parent_world: Similarity,
             parent_tail: Option<Point>,
-            pose: &Pose,
-            cursor: &mut usize,
-            worlds: &mut [Similarity],
-        ) {
-            for bone in bones {
-                let index = *cursor;
-                *cursor += 1;
-                let rest_head = bone.head_with_parent(parent_tail);
-                let local = pose.get(index).local(rest_head, bone.head.is_none());
-                let world = Similarity::compose(parent_world, local);
-                worlds[index] = world;
-                walk(&bone.children, world, Some(bone.tail), pose, cursor, worlds);
-            }
         }
 
         let mut worlds = vec![Similarity::IDENTITY; self.bone_count()];
-        let mut cursor = 0;
-        walk(
-            &self.bones,
-            Similarity::IDENTITY,
-            None,
-            pose,
-            &mut cursor,
-            &mut worlds,
-        );
+        let mut stack = vec![Frame {
+            bones: &self.bones,
+            next: 0,
+            parent_world: Similarity::IDENTITY,
+            parent_tail: None,
+        }];
+        let mut index = 0;
+
+        while !stack.is_empty() {
+            let (bone, parent_world, parent_tail) = {
+                let frame = stack.last_mut().expect("the stack is not empty");
+                let Some(bone) = frame.bones.get(frame.next) else {
+                    stack.pop();
+                    continue;
+                };
+                frame.next += 1;
+                (bone, frame.parent_world, frame.parent_tail)
+            };
+
+            let rest_head = bone.head_with_parent(parent_tail);
+            let local = pose.get(index).local(rest_head, bone.head.is_none());
+            let world = Similarity::compose(parent_world, local);
+            // The tree's pre-order gives every bone the next flat index, and
+            // parents are always visited first.
+            debug_assert!(index < worlds.len(), "bones are stored topologically");
+            worlds[index] = world;
+            index += 1;
+
+            if !bone.children.is_empty() {
+                stack.push(Frame {
+                    bones: &bone.children,
+                    next: 0,
+                    parent_world: world,
+                    parent_tail: Some(bone.tail),
+                });
+            }
+        }
+
+        debug_assert_eq!(index, worlds.len(), "every bone gets one entry");
         worlds
     }
 
@@ -412,10 +515,10 @@ impl Asset {
         if pose.is_identity() {
             return self.clone();
         }
-        let worlds = self.bone_worlds(pose);
+        let world = WorldPose::new(self, pose);
         let mut deformed = self.clone();
         for shape in &mut deformed.shapes {
-            deform_shape(shape, &worlds);
+            deform_shape(shape, world.worlds());
         }
         deformed
     }
@@ -618,6 +721,27 @@ mod tests {
         let path = &deformed.shapes[0].paths[0];
         assert_point(path.start().unwrap(), [0.0, 0.0]);
         assert_point(path.segments[0].to, [15.0, 10.0]);
+    }
+
+    #[test]
+    fn world_poses_resolve_every_bone_in_one_linear_pass() {
+        let asset = rigged_asset(&[], &[(1, 1.0)]);
+        let mut pose = Pose::default();
+        pose.set(
+            0,
+            BonePose {
+                rotation: std::f32::consts::FRAC_PI_2,
+                ..Default::default()
+            },
+        );
+
+        let world = pose.to_world(&asset);
+        assert!(!world.is_identity());
+        assert_eq!(world.worlds().len(), 2);
+        // The child inherits the parent's world transform even though only the
+        // parent is posed.
+        assert_point(world.get(1).apply([10.0, 10.0]), [-10.0, 10.0]);
+        assert!(WorldPose::rest(&asset).is_identity());
     }
 
     #[test]

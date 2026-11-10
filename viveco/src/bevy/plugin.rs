@@ -79,6 +79,15 @@ impl VivecoInstance {
         }
     }
 
+    /// Creates an instance that renders `asset` at rest, with no animations.
+    ///
+    /// This is the static path: the mixer is empty, so the plugin samples no
+    /// animation and allocates no world pose. It is purely for ergonomics;
+    /// [`VivecoInstance::new`] with an empty mixer behaves identically.
+    pub fn from_asset(asset: Handle<crate::Asset>) -> Self {
+        Self::new(asset, Vec::new())
+    }
+
     /// Sets the stroke width, in the asset's local units.
     pub fn with_stroke_width(mut self, stroke_width: f32) -> Self {
         self.stroke_width = stroke_width;
@@ -467,11 +476,11 @@ fn render_viveco_instances(
             continue;
         };
 
-        let deformed = SceneInstance::animated(asset, &instance.mixer)
+        let posed = SceneInstance::animated(asset, &instance.mixer)
             .with_transform(scene_affine(transform))
             .with_stroke_width(instance.stroke_width);
         let mut builder = SceneBuilder::new();
-        builder.add_instance(&deformed);
+        builder.add_instance(&posed);
         scene.push_fragments(builder.into_fragments());
     }
 }

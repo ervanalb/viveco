@@ -122,6 +122,11 @@ pub struct Asset {
 
     /// Top-level bones of the rig, in tree order. Empty for an unrigged
     /// asset.
+    ///
+    /// Tree order is topological: the flat [`BoneIndex`] is depth-first
+    /// pre-order, so every parent precedes its descendants and each subtree
+    /// occupies a contiguous index range. Skinning relies on this to resolve
+    /// world-space bone transforms in one linear pass.
     pub bones: Vec<Bone>,
 
     /// Animations stored in the asset.

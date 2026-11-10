@@ -195,11 +195,14 @@
 //!
 //! Add one `SceneInstance` per instance (with its own
 //! [`Affine`](vello::kurbo::Affine) placement and stroke width) to Z-order
-//! several of them in one scene. For a single asset,
-//! [`Asset::into_scene`](crate::Asset::into_scene) does the same in one call;
-//! [`Asset::sample_pose`](crate::Asset::sample_pose) and
-//! [`Asset::deformed`](crate::Asset::deformed) are the blending and skinning
-//! steps underneath. Write the result to a
+//! several of them in one scene. A `SceneInstance` borrows its asset and
+//! resolves the sample with [`Pose::to_world`](crate::Pose::to_world), so
+//! skinning happens while geometry is drawn rather than by cloning the asset.
+//! For a single unposed asset, [`Asset::into_scene`](crate::Asset::into_scene)
+//! does the same in one call. The owned
+//! [`Asset::deformed`](crate::Asset::deformed) form remains available when a
+//! caller needs a deformed document (the editor's rig view, for example).
+//! Write the result to a
 //! [`VelloScene2d`](bevy_vello::prelude::VelloScene2d) from your own system,
 //! for example in `PostUpdate` after transform propagation, and run it when
 //! the instance's mixer changes.

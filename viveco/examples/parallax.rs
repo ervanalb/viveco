@@ -96,13 +96,13 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         ))
         .id();
 
-    // Static artwork: an empty mixer samples the rest pose.
+    // Static artwork: no animations to sample.
     let back = asset_server.load::<viveco::Asset>("landscape_back.viveco");
     let middle = asset_server.load::<viveco::Asset>("landscape_mid.viveco");
     let front = asset_server.load::<viveco::Asset>("landscape_front.viveco");
-    commands.spawn((VivecoInstance::new(back, Vec::new()), VivecoSceneOf(far)));
-    commands.spawn((VivecoInstance::new(middle, Vec::new()), VivecoSceneOf(mid)));
-    commands.spawn((VivecoInstance::new(front, Vec::new()), VivecoSceneOf(near)));
+    commands.spawn((VivecoInstance::from_asset(back), VivecoSceneOf(far)));
+    commands.spawn((VivecoInstance::from_asset(middle), VivecoSceneOf(mid)));
+    commands.spawn((VivecoInstance::from_asset(front), VivecoSceneOf(near)));
 }
 
 /// Pans the orthographic camera so the parallax layers have something to react to.

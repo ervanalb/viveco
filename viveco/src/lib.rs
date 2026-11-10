@@ -8,7 +8,8 @@
 //!   addressing.
 //! - shapes: [`Shape`], [`Path`], [`Segment`], styling, and vertex weights.
 //! - bones: [`Bone`], the skeleton tree, and rig editing.
-//! - poses: [`Pose`] and the linear-blend skinning it applies to artwork.
+//! - poses: [`Pose`], its resolved [`WorldPose`], and the linear-blend
+//!   skinning they apply to artwork.
 //! - animation: [`Animation`], [`AnimationInstance`], keyframes, and sampling.
 //! - rendering: [`render`] converts assets into Vello scenes when the
 //!   `vello` feature is enabled.

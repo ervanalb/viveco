@@ -1,16 +1,20 @@
 //! Converts [`Asset`]s into a Vello [`Scene`].
 //!
 //! This module is enabled by the crate's `vello` feature. It is the rendering
-//! half of the pipeline: callers decide which [`Pose`](crate::Pose) to apply
-//! (for example, with [`Asset::deformed`](crate::Asset::deformed) or the
-//! animation sampler) and then paint the result with [`SceneBuilder`] or
-//! [`Asset::into_scene`].
+//! half of the pipeline: callers decide which [`Pose`](crate::Pose) to apply,
+//! resolve it once with [`WorldPose`], and then paint the untouched asset
+//! with [`SceneBuilder`] or [`Asset::into_scene`].
+//!
+//! Skinning happens while the geometry is converted to Vello paths, not by
+//! cloning the asset and rewriting every point. A `SceneInstance` therefore
+//! borrows its asset and only carries the small list of bone world
+//! transforms.
 //!
 //! [`SceneBuilder`] combines several assets into one scene and sorts their
 //! top-level shapes by Z together. Each asset may be added with its own
 //! [`Affine`] placement, which is baked into the emitted geometry.
-//! [`SceneInstance`] bundles a deformed document with that placement and its
-//! stroke width.
+//! [`SceneInstance`] bundles a borrowed asset, its optional world pose, that
+//! placement, and its stroke width.
 
 use std::cmp::Ordering;
 
@@ -18,7 +22,8 @@ use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point as KurboPoint, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
-use crate::{AnimationInstance, Asset, Path, Rgba8, Shape, Style};
+use crate::pose::{Pose, WorldPose};
+use crate::{AnimationInstance, Asset, Path, PathEnds, Point, Rgba8, Shape, Style, Weights};
 
 impl Asset {
     /// Builds a Vello scene containing this asset.
@@ -34,7 +39,9 @@ impl Asset {
     /// no paths acts as an unclipped group.
     ///
     /// Use [`SceneBuilder`] to combine several assets in one scene and sort their
-    /// top-level shapes against each other.
+    /// top-level shapes against each other. To paint a posed asset, resolve its
+    /// [`Pose`] with [`WorldPose`] and add it with
+    /// [`SceneBuilder::add_asset_with_world_pose`].
     pub fn into_scene(&self, stroke_width: f32) -> Scene {
         let mut builder = SceneBuilder::new();
         builder.add_asset(self, stroke_width);
@@ -44,33 +51,68 @@ impl Asset {
     }
 }
 
-/// An instance of a document, sampled and placed for rendering into a scene.
+/// An instance of a document, posed and placed for rendering into a scene.
 ///
-/// It owns its deformed geometry, so the animation instances, the scene-space
-/// placement, and the stroke width travel together as one value.
-/// Build one from animation instances with [`SceneInstance::animated`], then
-/// adjust it with the `with_*` methods. Add it to a [`SceneBuilder`] with
-/// [`SceneBuilder::add_instance`].
-pub struct SceneInstance {
-    /// The deformed document to paint.
-    pub asset: Asset,
+/// It borrows the asset and owns only the resolved bone transforms, so posing
+/// an instance never clones its shapes or paths. Build one with
+/// [`SceneInstance::new`], [`SceneInstance::posed`], or
+/// [`SceneInstance::animated`], then adjust it with the `with_*` methods. Add
+/// it to a [`SceneBuilder`] with [`SceneBuilder::add_instance`].
+pub struct SceneInstance<'a> {
+    /// The document to paint.
+    pub asset: &'a Asset,
+    /// The resolved bone transforms to skin the document with.
+    ///
+    /// `None` paints the asset's rest geometry without skinning.
+    pub world_pose: Option<WorldPose>,
     /// Where the document sits in scene space.
     pub transform: Affine,
     /// Stroke width in the document's local units.
     pub stroke_width: f32,
 }
 
-impl SceneInstance {
-    /// Samples `asset` at `animations` and deforms it into a new instance.
+impl<'a> SceneInstance<'a> {
+    /// Renders `asset` at its rest pose.
     ///
     /// The instance starts at the identity placement with one-unit strokes.
-    pub fn animated(asset: &Asset, animations: &[AnimationInstance]) -> Self {
-        let pose = asset.sample_pose(animations);
+    pub fn new(asset: &'a Asset) -> Self {
         Self {
-            asset: asset.deformed(&pose),
+            asset,
+            world_pose: None,
             transform: Affine::IDENTITY,
             stroke_width: 1.0,
         }
+    }
+
+    /// Renders `asset` under `pose`.
+    ///
+    /// The pose is resolved once, here. An identity pose stores no skin at all,
+    /// so the asset is painted directly from its rest geometry.
+    pub fn posed(asset: &'a Asset, pose: &Pose) -> Self {
+        Self {
+            asset,
+            world_pose: (!pose.is_identity()).then(|| pose.to_world(asset)),
+            transform: Affine::IDENTITY,
+            stroke_width: 1.0,
+        }
+    }
+
+    /// Samples `asset` with `animations` and renders it under the blended pose.
+    ///
+    /// The instance starts at the identity placement with one-unit strokes.
+    pub fn animated(asset: &'a Asset, animations: &[AnimationInstance]) -> Self {
+        if animations.is_empty() {
+            return Self::new(asset);
+        }
+        Self::posed(asset, &asset.sample_pose(animations))
+    }
+
+    /// Sets the resolved bone transforms directly.
+    ///
+    /// `None` returns the instance to the asset's rest geometry.
+    pub fn with_world_pose(mut self, world_pose: Option<WorldPose>) -> Self {
+        self.world_pose = world_pose;
+        self
     }
 
     /// Sets the scene-space placement.
@@ -79,7 +121,7 @@ impl SceneInstance {
         self
     }
 
-    /// Sets the stroke width in the deformed document's local units.
+    /// Sets the stroke width in the document's local units.
     pub fn with_stroke_width(mut self, stroke_width: f32) -> Self {
         self.stroke_width = stroke_width;
         self
@@ -104,6 +146,7 @@ pub struct SceneFragment {
 /// scene space.
 struct Placement<'a> {
     shape: &'a Shape,
+    world_pose: Option<&'a WorldPose>,
     stroke_width: f32,
     transform: Affine,
 }
@@ -127,8 +170,13 @@ impl<'a> SceneBuilder<'a> {
     }
 
     /// Adds every top-level shape of `instance`.
-    pub fn add_instance(&mut self, instance: &'a SceneInstance) -> &mut Self {
-        self.add_asset_with_transform(&instance.asset, instance.stroke_width, instance.transform)
+    pub fn add_instance(&mut self, instance: &'a SceneInstance<'a>) -> &mut Self {
+        self.add_asset_with_pose(
+            instance.asset,
+            instance.world_pose.as_ref(),
+            instance.stroke_width,
+            instance.transform,
+        )
     }
 
     /// Adds every top-level shape of `asset` with an identity placement.
@@ -146,8 +194,35 @@ impl<'a> SceneBuilder<'a> {
         stroke_width: f32,
         transform: Affine,
     ) -> &mut Self {
+        self.add_asset_with_pose(asset, None, stroke_width, transform)
+    }
+
+    /// Adds every top-level shape of `asset`, skinned by `world_pose` and
+    /// placed by `transform`.
+    ///
+    /// The pose is resolved by the caller (usually with
+    /// [`Pose::to_world`](crate::Pose::to_world)) and shared by every
+    /// shape added in this call.
+    pub fn add_asset_with_world_pose(
+        &mut self,
+        asset: &'a Asset,
+        world_pose: &'a WorldPose,
+        stroke_width: f32,
+        transform: Affine,
+    ) -> &mut Self {
+        self.add_asset_with_pose(asset, Some(world_pose), stroke_width, transform)
+    }
+
+    fn add_asset_with_pose(
+        &mut self,
+        asset: &'a Asset,
+        world_pose: Option<&'a WorldPose>,
+        stroke_width: f32,
+        transform: Affine,
+    ) -> &mut Self {
         self.0.extend(asset.shapes.iter().map(|shape| Placement {
             shape,
+            world_pose,
             stroke_width,
             transform,
         }));
@@ -168,6 +243,25 @@ impl<'a> SceneBuilder<'a> {
     ) -> &mut Self {
         self.0.push(Placement {
             shape,
+            world_pose: None,
+            stroke_width,
+            transform,
+        });
+        self
+    }
+
+    /// Adds a single top-level shape, skinned by `world_pose` and placed by
+    /// `transform`.
+    pub fn add_shape_with_world_pose(
+        &mut self,
+        shape: &'a Shape,
+        world_pose: &'a WorldPose,
+        stroke_width: f32,
+        transform: Affine,
+    ) -> &mut Self {
+        self.0.push(Placement {
+            shape,
+            world_pose: Some(world_pose),
             stroke_width,
             transform,
         });
@@ -179,9 +273,12 @@ impl<'a> SceneBuilder<'a> {
     pub fn finish(mut self, scene: &mut Scene) {
         self.sort();
         for placement in &self.0 {
-            placement
-                .shape
-                .draw(scene, placement.stroke_width, placement.transform);
+            placement.shape.draw(
+                scene,
+                placement.stroke_width,
+                placement.transform,
+                placement.world_pose,
+            );
         }
     }
 
@@ -196,9 +293,12 @@ impl<'a> SceneBuilder<'a> {
             .into_iter()
             .map(|placement| {
                 let mut scene = Scene::new();
-                placement
-                    .shape
-                    .draw(&mut scene, placement.stroke_width, placement.transform);
+                placement.shape.draw(
+                    &mut scene,
+                    placement.stroke_width,
+                    placement.transform,
+                    placement.world_pose,
+                );
                 SceneFragment {
                     z: placement.shape.z,
                     scene,
@@ -221,14 +321,43 @@ impl Shape {
     /// `stroke_width` is in this shape's local units; `transform` places it in
     /// scene space. The fragment's Z is this shape's [`z`](Self::z).
     pub fn to_fragment(&self, stroke_width: f32, transform: Affine) -> SceneFragment {
+        self.to_fragment_with_pose(None, stroke_width, transform)
+    }
+
+    /// Paints this shape and its descendants into a standalone fragment,
+    /// skinned by `world_pose`.
+    ///
+    /// The pose moves every weighted point while the paths are emitted, so the
+    /// shape itself is never copied or modified.
+    pub fn to_fragment_with_world_pose(
+        &self,
+        world_pose: &WorldPose,
+        stroke_width: f32,
+        transform: Affine,
+    ) -> SceneFragment {
+        self.to_fragment_with_pose(Some(world_pose), stroke_width, transform)
+    }
+
+    fn to_fragment_with_pose(
+        &self,
+        world_pose: Option<&WorldPose>,
+        stroke_width: f32,
+        transform: Affine,
+    ) -> SceneFragment {
         let mut scene = Scene::new();
-        self.draw(&mut scene, stroke_width, transform);
+        self.draw(&mut scene, stroke_width, transform, world_pose);
         SceneFragment { z: self.z, scene }
     }
 
     /// Paints this shape and its descendants into `scene`, through `transform`.
-    fn draw(&self, scene: &mut Scene, stroke_width: f32, transform: Affine) {
-        let path = self.to_bez_path();
+    fn draw(
+        &self,
+        scene: &mut Scene,
+        stroke_width: f32,
+        transform: Affine,
+        world_pose: Option<&WorldPose>,
+    ) {
+        let path = self.to_bez_path_with_pose(world_pose);
         draw_fill(scene, &self.style, &path, transform);
 
         if !self.children.is_empty() {
@@ -239,7 +368,7 @@ impl Shape {
                 scene.push_clip_layer(Fill::NonZero, transform, &path);
             }
             for index in self.child_indices_in_paint_order() {
-                self.children[index].draw(scene, stroke_width, transform);
+                self.children[index].draw(scene, stroke_width, transform, world_pose);
             }
             if clipped {
                 scene.pop_layer();
@@ -258,9 +387,19 @@ impl Shape {
     /// contours, which is what produces holes for oppositely-wound inner
     /// contours.
     pub fn to_bez_path(&self) -> BezPath {
+        self.to_bez_path_with_pose(None)
+    }
+
+    /// Like [`Self::to_bez_path`], but every weighted point is skinned by
+    /// `world_pose` as it is emitted.
+    pub fn to_bez_path_with_world_pose(&self, world_pose: &WorldPose) -> BezPath {
+        self.to_bez_path_with_pose(Some(world_pose))
+    }
+
+    fn to_bez_path_with_pose(&self, world_pose: Option<&WorldPose>) -> BezPath {
         let mut bez = BezPath::new();
         for path in &self.paths {
-            path.append_to(&mut bez, false);
+            path.append_to(&mut bez, false, world_pose);
         }
         bez
     }
@@ -272,7 +411,7 @@ impl Shape {
     pub fn to_fill_bez_path(&self) -> BezPath {
         let mut bez = BezPath::new();
         for path in &self.paths {
-            path.append_to(&mut bez, true);
+            path.append_to(&mut bez, true, None);
         }
         bez
     }
@@ -309,36 +448,70 @@ impl Path {
     /// Omitted control points are resolved to their endpoints. Segments with no
     /// controls are emitted as lines so strokes keep sharp joins.
     pub fn to_bez_path(&self) -> BezPath {
+        self.to_bez_path_with_pose(None)
+    }
+
+    /// Like [`Self::to_bez_path`], but every weighted point is skinned by
+    /// `world_pose` as it is emitted.
+    pub fn to_bez_path_with_world_pose(&self, world_pose: &WorldPose) -> BezPath {
+        self.to_bez_path_with_pose(Some(world_pose))
+    }
+
+    fn to_bez_path_with_pose(&self, world_pose: Option<&WorldPose>) -> BezPath {
         let mut bez = BezPath::new();
-        self.append_to(&mut bez, false);
+        self.append_to(&mut bez, false, world_pose);
         bez
     }
 
     /// Appends this path to `bez`, optionally forcing a closing edge.
-    fn append_to(&self, bez: &mut BezPath, force_close: bool) {
+    fn append_to(&self, bez: &mut BezPath, force_close: bool, world_pose: Option<&WorldPose>) {
         let Some(start_point) = self.start() else {
             return;
+        };
+        let start_point = match self.ends {
+            PathEnds::Open(_) => deform_point(world_pose, &self.start_weights, start_point),
+            // A closed loop has no separate start anchor; its start is the last
+            // segment's end point, and that is where its weights live.
+            PathEnds::Closed => match self.segments.last() {
+                Some(last) => deform_point(world_pose, &last.to_weights, start_point),
+                None => start_point,
+            },
         };
         bez.move_to(to_kurbo_point(start_point));
 
         let mut previous = start_point;
         for segment in &self.segments {
-            let ctrl1 = segment.ctrl1.unwrap_or(previous);
-            let ctrl2 = segment.ctrl2.unwrap_or(segment.to);
+            let to = deform_point(world_pose, &segment.to_weights, segment.to);
+            let ctrl1 = segment.ctrl1.map_or(previous, |ctrl1| {
+                deform_point(world_pose, &segment.ctrl1_weights, ctrl1)
+            });
+            let ctrl2 = match segment.ctrl2 {
+                Some(ctrl2) => deform_point(world_pose, &segment.ctrl2_weights, ctrl2),
+                None => to,
+            };
             if segment.is_line() {
-                bez.line_to(to_kurbo_point(segment.to));
+                bez.line_to(to_kurbo_point(to));
             } else {
                 bez.curve_to(
                     to_kurbo_point(ctrl1),
                     to_kurbo_point(ctrl2),
-                    to_kurbo_point(segment.to),
+                    to_kurbo_point(to),
                 );
             }
-            previous = segment.to;
+            previous = to;
         }
         if self.is_closed() || force_close {
             bez.close_path();
         }
+    }
+}
+
+/// Skins one point when a pose is present, leaving rest geometry untouched
+/// otherwise.
+fn deform_point(world_pose: Option<&WorldPose>, weights: &Weights, point: Point) -> Point {
+    match world_pose {
+        Some(pose) => pose.deform(weights, point),
+        None => point,
     }
 }
 
@@ -355,7 +528,102 @@ pub fn to_color(color: Rgba8) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Bone, BonePose, Pose};
     use vello::kurbo::{PathEl, Shape as _};
+
+    fn assert_point(actual: KurboPoint, expected: KurboPoint) {
+        assert!(
+            (actual.x - expected.x).abs() < 1e-4 && (actual.y - expected.y).abs() < 1e-4,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    /// A root bone from the origin to [10, 0] with a connected child ending at
+    /// [10, 10]. The path's start is weighted to the root and its end to the
+    /// child.
+    fn rigged_asset() -> Asset {
+        let child = Bone {
+            name: "Child".into(),
+            head: None,
+            tail: [10.0, 10.0],
+            children: Vec::new(),
+        };
+        let parent = Bone {
+            name: "Parent".into(),
+            head: Some([0.0, 0.0]),
+            tail: [10.0, 0.0],
+            children: vec![child],
+        };
+        let mut path = Path::new([0.0, 0.0]).line_to([10.0, 10.0]);
+        path.start_weights.set(0, 1.0);
+        path.segments[0].to_weights.set(1, 1.0);
+        Asset {
+            shapes: vec![Shape {
+                paths: vec![path],
+                ..Default::default()
+            }],
+            bones: vec![parent],
+            animations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_rest_instance_needs_no_world_pose() {
+        let asset = rigged_asset();
+
+        let rest = SceneInstance::animated(&asset, &[]);
+        assert!(rest.world_pose.is_none());
+
+        let mut pose = Pose::default();
+        pose.set(
+            0,
+            BonePose {
+                rotation: 0.5,
+                ..Default::default()
+            },
+        );
+        let posed = SceneInstance::posed(&asset, &pose);
+        assert!(posed.world_pose.is_some());
+    }
+
+    #[test]
+    fn world_pose_skins_points_while_drawing() {
+        let asset = rigged_asset();
+        let mut pose = Pose::default();
+        pose.set(
+            0,
+            BonePose {
+                rotation: std::f32::consts::FRAC_PI_2,
+                ..Default::default()
+            },
+        );
+
+        let world = WorldPose::new(&asset, &pose);
+        let drawn = asset.shapes[0].to_bez_path_with_world_pose(&world);
+
+        // The deformed asset produces the same geometry, but by cloning and
+        // rewriting every point first.
+        let deformed = asset.deformed(&pose);
+        let expected = deformed.shapes[0].to_bez_path();
+
+        let drawn: Vec<PathEl> = drawn.elements().to_vec();
+        let expected: Vec<PathEl> = expected.elements().to_vec();
+        assert_eq!(drawn.len(), expected.len());
+        for (drawn, expected) in drawn.iter().zip(&expected) {
+            match (drawn, expected) {
+                (PathEl::MoveTo(a), PathEl::MoveTo(b)) | (PathEl::LineTo(a), PathEl::LineTo(b)) => {
+                    assert_point(*a, *b)
+                }
+                _ => panic!("unexpected path difference: {drawn:?} vs {expected:?}"),
+            }
+        }
+
+        // A quarter turn about the root head maps [10, 10] to [-10, 10].
+        assert!(matches!(drawn[0], PathEl::MoveTo(p) if p == KurboPoint::new(0.0, 0.0)));
+        assert!(
+            matches!(drawn[1], PathEl::LineTo(p) if (p.x + 10.0).abs() < 1e-4 && (p.y - 10.0).abs() < 1e-4)
+        );
+    }
 
     #[test]
     fn open_contours_only_close_for_fill_tests() {
