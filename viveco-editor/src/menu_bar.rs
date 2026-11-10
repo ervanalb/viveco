@@ -58,6 +58,7 @@ impl Plugin for MenuBarPlugin {
 enum EditorAction {
     New,
     Open,
+    ImportSvg,
     Save,
     SaveAs,
     Undo,
@@ -124,6 +125,7 @@ fn spawn_menu_bar(mut commands: Commands) {
                 &[
                     ("New", EditorAction::New, "Ctrl+N"),
                     ("Open...", EditorAction::Open, "Ctrl+O"),
+                    ("Import SVG...", EditorAction::ImportSvg, "Ctrl+I"),
                     ("Save", EditorAction::Save, "Ctrl+S"),
                     ("Save As...", EditorAction::SaveAs, "Ctrl+Shift+S"),
                 ],
@@ -282,6 +284,9 @@ fn run_action(
         }
         EditorAction::Open => {
             dialogs.open(start_directory(file));
+        }
+        EditorAction::ImportSvg => {
+            dialogs.import_svg(start_directory(file));
         }
         EditorAction::Save => match save_to_current(editor, file) {
             Some(result) => report_save(result, file),

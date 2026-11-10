@@ -6,11 +6,17 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["bevy"] # XXX
+# SVG import is on by default so the `convert` binary can import SVG files.
+default = ["bevy", "svg"] # XXX
 # Adds `viveco::render`, which converts assets into Vello scenes.
 vello = ["dep:vello"]
 # Adds the Bevy asset loader, animator component, and rendering plugin.
 bevy = ["dep:bevy", "dep:bevy_vello", "vello"]
+# Adds `viveco::svg`, which imports the shapes of an SVG document.
+#
+# This is deliberately independent of `bevy`: enabling the Bevy plugin does
+# not compile `usvg`, and SVG import can be enabled without Bevy either.
+svg = ["dep:usvg"]
 # Link Bevy dynamically: much faster incremental builds for development.
 dynamic_linking = ["bevy", "bevy/dynamic_linking"]
 
@@ -19,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true
 vello = { workspace = true, optional = true }
+usvg = { workspace = true, optional = true }
 bevy = { workspace = true, optional = true }
 bevy_vello = { workspace = true, optional = true }
 
@@ -31,6 +38,11 @@ postcard.workspace = true
 # Used by the `animate` example's UI.
 [dev-dependencies]
 bevy_egui.workspace = true
+
+[[bin]]
+name = "viveco-convert"
+path = "src/bin/convert.rs"
+required-features = ["svg"]
 
 [[example]]
 name = "animate"

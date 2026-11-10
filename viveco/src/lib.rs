@@ -12,6 +12,9 @@
 //! - animation: [`Animation`], [`AnimationInstance`], keyframes, and sampling.
 //! - rendering: [`render`] converts assets into Vello scenes when the
 //!   `vello` feature is enabled.
+//! - SVG import: [`svg`] imports the shapes of an SVG document when the `svg`
+//!   feature is enabled. It is independent of `bevy`, so the Bevy plugin does
+//!   not compile `usvg`.
 //! - Bevy: the `bevy` feature adds an asset loader, an immediate-mode scene
 //!   built from Z-sorted fragments, a producer for animated instances, and a
 //!   rendering plugin (see [`bevy`]).
@@ -30,6 +33,9 @@ pub mod codegen;
 
 #[cfg(feature = "vello")]
 pub mod render;
+
+#[cfg(feature = "svg")]
+pub mod svg;
 
 #[cfg(feature = "bevy")]
 pub mod bevy;

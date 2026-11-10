@@ -12,7 +12,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::bounds::bounds_for;
 use crate::dialogs::FileDialogs;
-use crate::editor::{DocumentBounds, EditorState, Viewport};
+use crate::editor::{DocumentBounds, EditorState, TreeAddress, Viewport};
 use crate::history::History;
 use viveco::Asset;
 
@@ -126,6 +126,59 @@ pub fn open_document(
     }
 }
 
+/// Imports the shapes of the SVG at `path` into the current document.
+///
+/// The shapes are appended above every existing top-level shape, and the first
+/// imported shape becomes the selection. The import is recorded as one undo
+/// step. Returns `false` when the file cannot be read or has no shapes.
+pub fn import_svg_document(
+    editor: &mut EditorState,
+    bounds: &mut DocumentBounds,
+    history: &mut History,
+    path: &Path,
+) -> bool {
+    let imported = match Asset::load_svg_from_file(path) {
+        Ok(asset) => asset,
+        Err(err) => {
+            eprintln!("failed to import {}: {err}", path.display());
+            return false;
+        }
+    };
+    if imported.shapes.is_empty() {
+        eprintln!("no importable shapes in {}", path.display());
+        return false;
+    }
+
+    // New top-level shapes go above every existing one, preserving the SVG's
+    // own painting order among themselves.
+    let highest = editor
+        .document
+        .shapes
+        .iter()
+        .map(|shape| shape.z)
+        .filter(|z| z.is_finite())
+        .fold(f32::NEG_INFINITY, f32::max);
+    let base_z = if highest.is_finite() {
+        highest + 1.0
+    } else {
+        0.0
+    };
+
+    let first_imported = editor.document.shapes.len();
+    for (index, mut shape) in imported.shapes.into_iter().enumerate() {
+        shape.z = base_z + index as f32;
+        editor.document.shapes.push(shape);
+    }
+
+    *bounds = DocumentBounds(bounds_for(&editor.document));
+    editor.structure_revision += 1;
+    editor.select_node(Some(TreeAddress::Shape {
+        shapes: vec![first_imported],
+    }));
+    history.observe(&editor.document, false);
+    true
+}
+
 /// Writes the document to `path`, creating parent directories as needed, and
 /// adopts it as the current file.
 pub fn save_document_to(
@@ -188,6 +241,8 @@ fn handle_file_shortcuts(
         );
     } else if keys.just_pressed(KeyCode::KeyO) {
         dialogs.open(start_directory(&file));
+    } else if keys.just_pressed(KeyCode::KeyI) {
+        dialogs.import_svg(start_directory(&file));
     } else if keys.just_pressed(KeyCode::KeyS) {
         if shift_held(&keys) {
             dialogs.save_as(start_directory(&file), suggested_file_name(&file));
@@ -265,6 +320,50 @@ mod tests {
         assert_eq!(editor.document, document);
         assert_eq!(viewport, Viewport::default());
         assert!(!history.undo(&mut editor));
+    }
+
+    #[test]
+    fn importing_an_svg_appends_shapes_and_is_undoable() {
+        let path = std::env::temp_dir().join(format!(
+            "viveco_editor_import_test_{}.svg",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+                  <rect x="1" y="2" width="3" height="4" fill="#ff0000"/>
+                </svg>"##,
+        )
+        .unwrap();
+
+        let mut document = Asset::new();
+        document.shapes.push(Shape {
+            z: 5.0,
+            ..default()
+        });
+        let mut editor = EditorState::new(document.clone());
+        let mut bounds = DocumentBounds(EMPTY_BOUNDS);
+        let mut history = History::new(document);
+
+        assert!(import_svg_document(
+            &mut editor,
+            &mut bounds,
+            &mut history,
+            &path
+        ));
+
+        assert_eq!(editor.document.shapes.len(), 2);
+        // Imported shapes sit above the existing top-level shape.
+        assert_eq!(editor.document.shapes[1].z, 6.0);
+        assert_eq!(
+            editor.selected_node,
+            Some(TreeAddress::Shape { shapes: vec![1] })
+        );
+
+        assert!(history.undo(&mut editor));
+        assert_eq!(editor.document.shapes.len(), 1);
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
