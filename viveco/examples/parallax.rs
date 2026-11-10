@@ -1,13 +1,15 @@
 //! Demonstrates parallax with several Viveco scenes at different depths.
 //!
-//! Every layer renders under one orthographic `Camera2d`. A zero-sized
-//! [`ParallaxLayer`] marker opts a vello scene into a pre-render system that derives
-//! its scale and offset from the layer's Z and the camera's position, emulating
-//! the way a perspective camera would treat planes at different depths.
+//! Every layer renders under one orthographic `Camera2d`. The library's
+//! zero-sized [`ParallaxLayer`] marker opts a vello scene into
+//! [`apply_parallax`], which derives its scale and offset from the layer's Z
+//! and the camera's position, emulating the way a perspective camera would
+//! treat planes at different depths.
 //!
-//! The layers are the landscape artwork in `landscape_back.viveco`,
-//! `landscape_mid.viveco`, and `landscape_front.viveco`. [`VivecoStrokeWidthInPixels`]
-//! keeps their strokes two logical pixels wide regardless of parallax scale.
+//! The layers are the landscape artwork converted from `landscape.svg` by
+//! `build.rs` into `landscape_back.viveco`, `landscape_mid.viveco`, and
+//! `landscape_front.viveco`. [`VivecoStrokeWidthInPixels`] keeps their strokes
+//! two logical pixels wide regardless of parallax scale.
 //!
 //! Run with `cargo run -p viveco --example parallax --features bevy`.
 
@@ -15,7 +17,13 @@ use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
-use viveco::{VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf, VivecoStrokeWidthInPixels};
+use viveco::{
+    ParallaxLayer, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf,
+    VivecoStrokeWidthInPixels, apply_parallax,
+};
+
+/// Where `build.rs` writes the converted landscape layers.
+const ASSET_ROOT: &str = concat!(env!("OUT_DIR"), "/assets");
 
 /// World-space center and maximum extent of the camera's view.
 const CAMERA_Z: f32 = 10.;
@@ -32,14 +40,10 @@ const FAR_Z: f32 = -3.0;
 const MID_Z: f32 = 0.0;
 const NEAR_Z: f32 = 3.0;
 
-/// Opts a scene entity into depth-based parallax. The entity's Z is the depth.
-#[derive(Component, Default)]
-struct ParallaxLayer;
-
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(AssetPlugin {
-            file_path: "examples/assets".to_owned(),
+            file_path: ASSET_ROOT.to_owned(),
             ..default()
         }))
         .add_plugins(VelloPlugin::default())
@@ -62,7 +66,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             },
             ..OrthographicProjection::default_2d()
         }),
-        Transform::from_translation(CAMERA),
+        Transform::default(),
     ));
 
     // Strokes stay two logical pixels wide despite the parallax scaling.
@@ -112,29 +116,5 @@ fn pan_camera(
         camera.translation.x = CAMERA.x + pan.x;
         camera.translation.y = CAMERA.y + pan.y;
         camera.translation.z = CAMERA_Z;
-    }
-}
-
-/// Scales and offsets each layer as a perspective camera at [`EYE_Z`] would.
-fn apply_parallax(
-    camera: Query<&Transform, (With<Camera2d>, With<VelloView>)>,
-    mut layers: Query<&mut Transform, (With<ParallaxLayer>, Without<Camera2d>)>,
-) {
-    let Ok(camera) = camera.single() else {
-        return;
-    };
-
-    for mut layer in &mut layers {
-        let depth = camera.translation.z - layer.translation.z;
-        if depth < f32::EPSILON {
-            continue;
-        }
-        let scale = camera.translation.z / depth;
-
-        // Content is authored around the layer origin, so this both scales it
-        // about the camera's view center and makes far layers follow the camera.
-        layer.translation.x = camera.translation.x * (1.0 - scale);
-        layer.translation.y = camera.translation.y * (1.0 - scale);
-        layer.scale = Vec3::splat(scale);
     }
 }

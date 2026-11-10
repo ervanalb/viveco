@@ -9,13 +9,14 @@
 //! When converting an SVG, `--group <name>` imports only the objects inside
 //! the top-level `<g>` with that name. Groups are named by their
 //! `inkscape:label` when they have one, and by their `id` otherwise.
+//!
+//! The conversion itself lives in [`viveco::convert`], so build scripts can
+//! run it too.
 
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use viveco::Asset;
-use viveco::svg::SvgImportOptions;
+use viveco::convert::{self, ConvertOptions};
 
 fn main() -> ExitCode {
     let args = match Args::parse(std::env::args_os().skip(1)) {
@@ -109,72 +110,18 @@ impl Args {
 }
 
 fn convert(args: &Args) -> Result<(), String> {
-    let bytes = std::fs::read(&args.input)
-        .map_err(|err| format!("failed to read {}: {err}", args.input.display()))?;
     let output = args
         .output
         .clone()
-        .unwrap_or_else(|| default_output(&args.input));
-
-    let asset = if is_svg(&args.input, &bytes) {
-        let options = SvgImportOptions {
-            group: args.group.clone(),
-        };
-        Asset::from_svg_bytes_with_options(&bytes, &options)
-            .map_err(|err| format!("failed to import {}: {err}", args.input.display()))?
-    } else {
-        if args.group.is_some() {
-            return Err("--group only applies to SVG input".to_owned());
-        }
-        Asset::from_bytes(&bytes)
-            .map_err(|err| format!("failed to load {}: {err}", args.input.display()))?
+        .unwrap_or_else(|| convert::default_output(&args.input));
+    let options = ConvertOptions {
+        group: args.group.clone(),
     };
 
-    asset
-        .save_to_file(&output)
-        .map_err(|err| format!("failed to write {}: {err}", output.display()))?;
+    convert::convert_file(&args.input, &output, &options).map_err(|err| err.to_string())?;
 
     println!("wrote {}", output.display());
     Ok(())
-}
-
-/// Whether the input is an SVG document.
-///
-/// The extension is trusted for `.svg` and `.svgz`; otherwise the contents are
-/// inspected, so SVG input works under another name. A Viveco asset can never
-/// be mistaken for one because its encodings start with `{` or a binary magic.
-fn is_svg(input: &Path, bytes: &[u8]) -> bool {
-    let extension_is_svg = input
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("svg") || extension.eq_ignore_ascii_case("svgz")
-        });
-    extension_is_svg || looks_like_svg(bytes)
-}
-
-/// Whether the beginning of `bytes` is an XML document containing `<svg>`.
-fn looks_like_svg(bytes: &[u8]) -> bool {
-    let head = &bytes[..bytes.len().min(4096)];
-    let text = String::from_utf8_lossy(head);
-    let text = text.trim_start_matches('\u{feff}').trim_start();
-    text.starts_with('<') && text.contains("<svg")
-}
-
-/// The output path used when the caller does not name one.
-///
-/// JSON and SVG inputs are converted to the binary Viveco format; anything
-/// else is written as JSON.
-fn default_output(input: &Path) -> PathBuf {
-    let source_encoding = input
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("json")
-                || extension.eq_ignore_ascii_case("svg")
-                || extension.eq_ignore_ascii_case("svgz")
-        });
-    input.with_extension(if source_encoding { "viveco" } else { "json" })
 }
 
 fn usage() {
@@ -198,44 +145,6 @@ fn usage() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_output_flips_the_encoding() {
-        assert_eq!(
-            default_output(Path::new("art.json")),
-            PathBuf::from("art.viveco")
-        );
-        assert_eq!(
-            default_output(Path::new("art.JSON")),
-            PathBuf::from("art.viveco")
-        );
-        assert_eq!(
-            default_output(Path::new("art.viveco")),
-            PathBuf::from("art.json")
-        );
-        assert_eq!(default_output(Path::new("art")), PathBuf::from("art.json"));
-    }
-
-    #[test]
-    fn svg_input_defaults_to_the_binary_format() {
-        assert_eq!(
-            default_output(Path::new("art.svg")),
-            PathBuf::from("art.viveco")
-        );
-        assert_eq!(
-            default_output(Path::new("art.svgz")),
-            PathBuf::from("art.viveco")
-        );
-    }
-
-    #[test]
-    fn detects_svg_by_extension_or_contents() {
-        let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
-        assert!(is_svg(Path::new("art.svg"), b""));
-        assert!(is_svg(Path::new("art"), svg));
-        assert!(!is_svg(Path::new("art.viveco"), b"\xff\xfe"));
-        assert!(!is_svg(Path::new("art.json"), br#"{"shapes":[]}"#));
-    }
 
     #[test]
     fn parses_options_in_any_position() {

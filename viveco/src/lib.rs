@@ -15,9 +15,11 @@
 //! - SVG import: [`svg`] imports the shapes of an SVG document when the `svg`
 //!   feature is enabled. It is independent of `bevy`, so the Bevy plugin does
 //!   not compile `usvg`.
+//! - conversion: [`convert`] imports SVG documents and rewrites assets in
+//!   either encoding, including from build scripts.
 //! - Bevy: the `bevy` feature adds an asset loader, an immediate-mode scene
-//!   built from Z-sorted fragments, a producer for animated instances, and a
-//!   rendering plugin (see [`bevy`]).
+//!   built from Z-sorted fragments, a producer for animated instances, a
+//!   parallax system, and a rendering plugin (see [`bevy`]).
 //! - build scripts: [`codegen`] emits animation indices and shape/bone name
 //!   constants from an asset file at build time.
 //!
@@ -37,6 +39,9 @@ pub mod render;
 #[cfg(feature = "svg")]
 pub mod svg;
 
+#[cfg(feature = "svg")]
+pub mod convert;
+
 #[cfg(feature = "bevy")]
 pub mod bevy;
 
@@ -48,6 +53,7 @@ pub use shape::*;
 
 #[cfg(feature = "bevy")]
 pub use self::bevy::{
-    SceneFragment, VivecoDefaultScene, VivecoInstance, VivecoLoader, VivecoPlugin, VivecoScene,
-    VivecoSceneMembers, VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, scene_affine,
+    ParallaxLayer, SceneFragment, VivecoDefaultScene, VivecoInstance, VivecoLoader, VivecoPlugin,
+    VivecoScene, VivecoSceneMembers, VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels,
+    apply_parallax, scene_affine,
 };

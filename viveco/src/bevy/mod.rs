@@ -1,6 +1,6 @@
 //! Bevy integration for Viveco assets.
 //!
-//! This module is enabled by the crate's `bevy` feature. It provides two
+//! This module is enabled by the crate's `bevy` feature. It provides three
 //! independent pieces:
 //!
 //! - [`VivecoLoader`]: an [`AssetLoader`](bevy::asset::AssetLoader) for
@@ -9,6 +9,8 @@
 //! - [`VivecoPlugin`]: registers the loader, rebuilds every [`VivecoScene`]
 //!   from [`SceneFragment`]s each frame, and contributes the artwork of every
 //!   [`VivecoInstance`].
+//! - [`ParallaxLayer`] and [`apply_parallax`]: a system that scales and offsets
+//!   marked entities by depth, emulating a perspective camera.
 //!
 //! Everything is explicit: the plugin never spawns entities. Each
 //! [`VivecoScene`] is a per-frame buffer of fragments; the plugin clears it,
@@ -206,6 +208,7 @@
 //! systems; the manual path does not need them.
 
 mod loader;
+mod parallax;
 mod plugin;
 
 // The asset model itself is Bevy-free (so it can be used from build scripts),
@@ -240,6 +243,7 @@ impl ::bevy::reflect::TypePath for crate::Asset {
 
 pub use crate::render::SceneFragment;
 pub use loader::VivecoLoader;
+pub use parallax::{ParallaxLayer, apply_parallax};
 pub use plugin::{
     VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneMembers,
     VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, scene_affine,
@@ -252,7 +256,8 @@ pub use plugin::{
 /// `viveco` directly.
 pub mod prelude {
     pub use super::{
-        SceneFragment, VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene,
-        VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, scene_affine,
+        ParallaxLayer, SceneFragment, VivecoDefaultScene, VivecoInstance, VivecoPlugin,
+        VivecoScene, VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, apply_parallax,
+        scene_affine,
     };
 }
