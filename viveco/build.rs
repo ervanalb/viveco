@@ -32,13 +32,13 @@ pub use shape::*;
 mod codegen;
 
 fn main() {
-    emit_animate_constants();
+    emit_stick_constants();
     convert_landscape_layers();
 }
 
 /// Generates the animation, shape, and bone constants used by
-/// `examples/animate.rs`.
-fn emit_animate_constants() {
+/// `examples/compound.rs`.
+fn emit_stick_constants() {
     let asset = "examples/assets/stick.viveco";
     println!("cargo:rerun-if-changed={asset}");
 

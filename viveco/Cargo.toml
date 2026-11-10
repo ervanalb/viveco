@@ -37,7 +37,7 @@ serde_json.workspace = true
 postcard.workspace = true
 usvg.workspace = true
 
-# Used by the `animate` example's UI.
+# Used by the `compound` example's UI.
 [dev-dependencies]
 bevy_egui.workspace = true
 
@@ -47,8 +47,8 @@ path = "src/bin/convert.rs"
 required-features = ["svg"]
 
 [[example]]
-name = "animate"
-path = "examples/animate.rs"
+name = "compound"
+path = "examples/compound.rs"
 required-features = ["bevy"]
 
 [[example]]

@@ -2,9 +2,9 @@
 //! for use from build scripts.
 //!
 //! Animation indices are positions in [`Asset::animations`], so hard-coding
-//! them breaks when animations are reordered. Shape and bone names are also
-//! easy to misspell. This module resolves all of that once, at build time, and
-//! emits three modules:
+//! them breaks when animations are reordered. Durations are likewise copied
+//! from the asset, and shape and bone names are easy to misspell. This module
+//! resolves all of that once, at build time, and emits three modules:
 //!
 //! ```no_run
 //! // build.rs
@@ -21,6 +21,7 @@
 //! }
 //!
 //! // stick::animations::WALK is the index of the "Walk" animation.
+//! // stick::animations::WALK_DURATION is its length in seconds.
 //! // stick::shapes::HEAD and stick::bones::HEAD are their names.
 //! ```
 //!
@@ -39,7 +40,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::{Asset, Bone, Shape};
+use crate::{Animation, Asset, Bone, Shape};
 
 /// Reads a Viveco asset, generates its constants source, and writes the source
 /// to `$OUT_DIR/{module}.rs`.
@@ -79,10 +80,11 @@ pub fn emit_asset_constants(
 /// Returns the generated Rust source for `asset`.
 ///
 /// The source defines `animations`, `shapes`, and `bones` modules. Animation
-/// constants are indices; shape and bone constants are their names. Entries are
-/// emitted in tree order, unnamed entries and repeated names are skipped, and
-/// names that sanitize to the same identifier are disambiguated with `_2`,
-/// `_3`, and so on.
+/// constants are indices, and each animation also gets a `{NAME}_DURATION`
+/// constant; shape and bone constants are their names. Entries are emitted in
+/// tree order, unnamed entries and repeated names are skipped, and names that
+/// sanitize to the same identifier are disambiguated with `_2`, `_3`, and so
+/// on.
 pub fn asset_constants_source(asset: &Asset) -> String {
     let animations = named_entries(
         asset
@@ -90,18 +92,19 @@ pub fn asset_constants_source(asset: &Asset) -> String {
             .iter()
             .enumerate()
             .map(|(index, animation)| (index, animation.name.as_str())),
+        &["_DURATION"],
     );
 
     let mut shape_names = Vec::new();
     visit_shapes(&asset.shapes, &mut shape_names);
-    let shapes = named_entries(shape_names.into_iter().enumerate());
+    let shapes = named_entries(shape_names.into_iter().enumerate(), &[]);
 
     let mut bone_names = Vec::new();
     visit_bones(&asset.bones, &mut bone_names);
-    let bones = named_entries(bone_names.into_iter().enumerate());
+    let bones = named_entries(bone_names.into_iter().enumerate(), &[]);
 
     let mut out = String::new();
-    write_animations(&mut out, &animations);
+    write_animations(&mut out, &animations, &asset.animations);
     out.push('\n');
     write_names(&mut out, "shapes", "shape", "shape_index_by_name", &shapes);
     out.push('\n');
@@ -117,7 +120,13 @@ struct NamedEntry {
 }
 
 /// Deduplicates names in traversal order and assigns unique identifiers.
-fn named_entries<'a>(names: impl IntoIterator<Item = (usize, &'a str)>) -> Vec<NamedEntry> {
+///
+/// Each identifier also reserves `suffixes` appended to it, so constants
+/// derived from an identifier cannot collide with another entry's constants.
+fn named_entries<'a>(
+    names: impl IntoIterator<Item = (usize, &'a str)>,
+    suffixes: &[&str],
+) -> Vec<NamedEntry> {
     let mut seen_names = HashSet::new();
     let mut used_identifiers = HashSet::new();
     let mut entries = Vec::new();
@@ -132,7 +141,22 @@ fn named_entries<'a>(names: impl IntoIterator<Item = (usize, &'a str)>) -> Vec<N
 
         let mut identifier = base.clone();
         let mut suffix = 1;
-        while !used_identifiers.insert(identifier.clone()) {
+        loop {
+            let mut candidates = vec![identifier.clone()];
+            candidates.extend(
+                suffixes
+                    .iter()
+                    .map(|suffix| format!("{identifier}{suffix}")),
+            );
+
+            if candidates
+                .iter()
+                .all(|candidate| !used_identifiers.contains(candidate))
+            {
+                used_identifiers.extend(candidates);
+                break;
+            }
+
             suffix += 1;
             identifier = format!("{base}_{suffix}");
         }
@@ -161,13 +185,25 @@ fn visit_bones<'a>(bones: &'a [Bone], out: &mut Vec<&'a str>) {
     }
 }
 
-fn write_animations(out: &mut String, entries: &[NamedEntry]) {
+fn write_animations(out: &mut String, entries: &[NamedEntry], animations: &[Animation]) {
     out.push_str("pub mod animations {\n");
     for entry in entries {
         let (name, identifier, index) = (&entry.name, &entry.identifier, entry.index);
+        let duration = float_literal(animations[index].duration);
         let _ = writeln!(out, "    /// Index of the animation named {name:?}.");
         let _ = writeln!(out, "    #[allow(dead_code)]");
         let _ = writeln!(out, "    pub const {identifier}: usize = {index};");
+        out.push('\n');
+
+        let _ = writeln!(
+            out,
+            "    /// Duration of the animation named {name:?}, in seconds."
+        );
+        let _ = writeln!(out, "    #[allow(dead_code)]");
+        let _ = writeln!(
+            out,
+            "    pub const {identifier}_DURATION: f32 = {duration};"
+        );
         out.push('\n');
     }
 
@@ -183,7 +219,8 @@ fn write_animations(out: &mut String, entries: &[NamedEntry]) {
     out.push_str("];\n\n");
 
     out.push_str(
-        "    /// Panics in debug builds if the loaded asset no longer matches these constants.\n\
+        "    /// Panics in debug builds if the loaded asset no longer has these\n\
+         \x20   /// animations at these indices.\n\
          \x20   #[allow(dead_code)]\n\
          \x20   pub fn debug_assert_matches(asset: &::viveco::Asset) {\n\
          \x20       for &(name, index) in NAMES {\n\
@@ -196,6 +233,19 @@ fn write_animations(out: &mut String, entries: &[NamedEntry]) {
          \x20   }\n\
          }\n",
     );
+}
+
+/// Formats an `f32` as a Rust literal that is valid for every value.
+fn float_literal(value: f32) -> String {
+    if value.is_nan() {
+        "f32::NAN".to_owned()
+    } else if value == f32::INFINITY {
+        "f32::INFINITY".to_owned()
+    } else if value == f32::NEG_INFINITY {
+        "f32::NEG_INFINITY".to_owned()
+    } else {
+        format!("{value:?}")
+    }
 }
 
 /// Writes a module of string constants for shape or bone names.
@@ -325,9 +375,25 @@ mod tests {
     }
 
     #[test]
-    fn emits_animation_indices() {
+    fn emits_animation_indices_and_durations() {
         let source = asset_constants_source(&Asset {
-            animations: animations(&["Wave", "Walk", "Arm Swing"]),
+            animations: vec![
+                Animation {
+                    name: "Wave".into(),
+                    duration: 1.0,
+                    ..Default::default()
+                },
+                Animation {
+                    name: "Walk".into(),
+                    duration: 2.0,
+                    ..Default::default()
+                },
+                Animation {
+                    name: "Arm Swing".into(),
+                    duration: 2.0,
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         });
 
@@ -335,10 +401,57 @@ mod tests {
         assert!(source.contains("pub const WAVE: usize = 0;"));
         assert!(source.contains("pub const WALK: usize = 1;"));
         assert!(source.contains("pub const ARM_SWING: usize = 2;"));
+        assert!(source.contains("pub const WAVE_DURATION: f32 = 1.0;"));
+        assert!(source.contains("pub const WALK_DURATION: f32 = 2.0;"));
+        assert!(source.contains("pub const ARM_SWING_DURATION: f32 = 2.0;"));
         assert!(source.contains(
             r#"pub const NAMES: &[(&str, usize)] = &[("Wave", 0), ("Walk", 1), ("Arm Swing", 2), ];"#
         ));
         assert!(source.contains("pub fn debug_assert_matches(asset: &::viveco::Asset)"));
+    }
+
+    #[test]
+    fn formats_non_finite_durations_as_valid_literals() {
+        let source = asset_constants_source(&Asset {
+            animations: vec![
+                Animation {
+                    name: "Broken".into(),
+                    duration: f32::NAN,
+                    ..Default::default()
+                },
+                Animation {
+                    name: "Endless".into(),
+                    duration: f32::INFINITY,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        assert!(source.contains("pub const BROKEN_DURATION: f32 = f32::NAN;"));
+        assert!(source.contains("pub const ENDLESS_DURATION: f32 = f32::INFINITY;"));
+    }
+
+    #[test]
+    fn duration_constants_do_not_collide_with_animation_names() {
+        let source = asset_constants_source(&Asset {
+            animations: vec![
+                Animation {
+                    name: "Walk".into(),
+                    duration: 2.0,
+                    ..Default::default()
+                },
+                Animation {
+                    name: "Walk Duration".into(),
+                    duration: 1.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        assert!(source.contains("pub const WALK_DURATION: f32 = 2.0;"));
+        assert!(source.contains("pub const WALK_DURATION_2: usize = 1;"));
     }
 
     #[test]

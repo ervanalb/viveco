@@ -11,6 +11,8 @@
 //! - poses: [`Pose`], its resolved [`WorldPose`], and the linear-blend
 //!   skinning they apply to artwork.
 //! - animation: [`Animation`], [`AnimationInstance`], keyframes, and sampling.
+//! - playback: [`AccelEasing`], a speed- and acceleration-limited scalar for
+//!   blend weights.
 //! - rendering: [`render`] converts assets into Vello scenes when the
 //!   `vello` feature is enabled.
 //! - SVG import: [`svg`] imports the shapes of an SVG document when the `svg`
@@ -29,6 +31,7 @@
 mod animation;
 mod asset;
 mod bone;
+mod playback;
 mod pose;
 mod shape;
 
@@ -49,6 +52,7 @@ pub mod bevy;
 pub use animation::*;
 pub use asset::*;
 pub use bone::*;
+pub use playback::*;
 pub use pose::*;
 pub use shape::*;
 
