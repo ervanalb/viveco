@@ -55,3 +55,8 @@ required-features = ["bevy"]
 name = "parallax"
 path = "examples/parallax.rs"
 required-features = ["bevy"]
+
+[[example]]
+name = "planet"
+path = "examples/planet.rs"
+required-features = ["bevy"]

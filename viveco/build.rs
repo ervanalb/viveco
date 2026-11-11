@@ -33,6 +33,7 @@ mod codegen;
 
 fn main() {
     emit_stick_constants();
+    emit_planet_constants();
     convert_landscape_layers();
 }
 
@@ -48,6 +49,20 @@ fn emit_stick_constants() {
     }
 
     codegen::emit_asset_constants(asset, "stick").expect("failed to generate asset constants");
+}
+
+/// Generates the animation, shape, and bone constants used by
+/// `examples/planet.rs`.
+fn emit_planet_constants() {
+    let asset = "examples/assets/planet.viveco";
+    println!("cargo:rerun-if-changed={asset}");
+
+    // Packages built without the example assets still build normally.
+    if !std::path::Path::new(asset).exists() {
+        return;
+    }
+
+    codegen::emit_asset_constants(asset, "planet").expect("failed to generate asset constants");
 }
 
 /// Converts the landscape artwork into one asset per layer for
