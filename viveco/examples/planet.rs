@@ -52,11 +52,7 @@ fn main() {
         .run();
 }
 
-/// The planet's orbit playhead.
-///
-/// This is attached beside the [`viveco::VivecoInstance`]. Each frame
-/// [`animate`] advances the playhead, then rebuilds the instance's mixer from
-/// it, so the mixer is always a fresh description of this frame's blend.
+/// The planet animation state (just one t value)
 #[derive(Component, Default)]
 struct Orbit {
     /// Playhead position in seconds, always in `0..ORBIT_DURATION`.
@@ -83,7 +79,11 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // The instance starts at rest; `animate` supplies the mixer from the
     // `Orbit` state every frame.
     let handle = asset_server.load::<viveco::Asset>("planet.viveco");
-    commands.spawn((viveco::VivecoInstance::from_asset(handle), Orbit::default()));
+    commands.spawn((
+        viveco::VivecoInstance::from_asset(handle),
+        Orbit::default(),
+        viveco::VivecoStrokeWidthInPixels::default(),
+    ));
 }
 
 /// Advances each orbit's playhead and rebuilds its instance's mixer every frame.
