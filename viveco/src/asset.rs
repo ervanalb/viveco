@@ -14,14 +14,11 @@ use crate::shape::{Shape, ShapeIndex, Weights};
 /// Identifier written to and expected in an asset's `type` field.
 pub const FORMAT_TYPE: &str = "viveco";
 
-/// Oldest asset version this build can load.
-pub const MIN_FORMAT_VERSION: u32 = 5;
-
 /// Version written to and expected by this build of the format.
 ///
-/// Version 6 added shape-property animation targets (starting with Z). Version
-/// 5 files remain readable because they cannot contain such targets.
-pub const FORMAT_VERSION: u32 = 6;
+/// Only this exact version is accepted; older files must be converted before
+/// they can be loaded.
+pub const FORMAT_VERSION: u32 = 0;
 
 /// Bytes every binary asset begins with.
 ///
@@ -173,9 +170,9 @@ impl<'de> Deserialize<'de> for Asset {
                 wire.kind
             )));
         }
-        if !(MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&wire.version) {
+        if wire.version != FORMAT_VERSION {
             return Err(de::Error::custom(format!(
-                "unsupported viveco version {} (supported {MIN_FORMAT_VERSION}..={FORMAT_VERSION})",
+                "unsupported viveco version {} (expected {FORMAT_VERSION})",
                 wire.version
             )));
         }
@@ -553,7 +550,7 @@ mod tests {
 
         let json = r#"{
             "type": "viveco",
-            "version": 6,
+            "version": 0,
             "shapes": [{}],
             "animations": [{
                 "duration": 1.0,
@@ -627,8 +624,8 @@ mod tests {
     }
 
     #[test]
-    fn version_five_assets_remain_readable() {
+    fn old_version_assets_are_rejected() {
         let json = r#"{"type": "viveco", "version": 5}"#;
-        assert!(Asset::from_json_str(json).is_ok());
+        assert!(Asset::from_json_str(json).is_err());
     }
 }

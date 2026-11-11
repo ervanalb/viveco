@@ -1075,7 +1075,7 @@ mod tests {
     fn loading_animations_normalizes_their_keyframes() {
         let json = r#"{
             "type": "viveco",
-            "version": 5,
+            "version": 0,
             "animations": [{
                 "duration": 4.0,
                 "cyclic": true,

@@ -3,11 +3,6 @@ name = "viveco-editor"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-# Link Bevy dynamically: much faster incremental builds for development.
-# Enable with `cargo run --features dynamic_linking`.
-dynamic_linking = ["bevy/dynamic_linking"]
-
 [dependencies]
 viveco = { workspace = true, features = ["vello", "svg"] }
 bevy = "0.19"
