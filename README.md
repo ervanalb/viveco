@@ -1,11 +1,11 @@
 # Viveco
 
-Viveco is a 2D vector-art format and a small Rust toolkit for it. A document is a
-tree of shapes made of cubic paths and solid colors, optionally rigged to a bone
-skeleton and animated with keyframe curves. Skinning is linear blend skinning,
-and rendering goes through [Vello](https://github.com/linebender/vello). The
-crate integrates with [Bevy](https://bevyengine.org/) through an asset loader and
-a render plugin. This repository also contains an editor application for viveco files.
+Viveco is an animated 2D vector-art format and a small Rust toolkit for it.
+A viveco document consists of shapes made of cubic Bézier paths stroked and filled with solid colors,
+optionally rigged to a skeleton with linear blend skinning, and animated with keyframes.
+Designed to be rendered with [Vello](https://github.com/linebender/vello)
+and integrated into [Bevy](https://bevyengine.org/) games using a provided asset loader and a renderer.
+This repository also contains an editor application for authoring viveco files.
 
 ## Repository layout
 
@@ -17,51 +17,64 @@ a render plugin. This repository also contains an editor application for viveco 
 | `examples/` | Example viveco assets |
 | `viveco-editor/` | The desktop editor for drawing, rigging, and animating. |
 
-## Running things
+## Running
+
+### Examples
+Bevy is not a default feature, so enable it explicitly
 
 ```sh
-# Examples (Bevy is not a default feature, so enable it explicitly)
 cargo run -p viveco --features bevy --example planet    # A simple example showing a single looping animation
 cargo run -p viveco --features bevy --example compound  # A more complex example showing blended animations
-cargo run -p viveco --features bevy --example parallax  # A non-animated scene multi-layer parallax
-
-# Editor
-cargo run -p viveco-editor
+cargo run -p viveco --features bevy --example parallax  # A non-animated scene with multi-layer parallax, sourced from a SVG
 ```
 
-The editor and examples open windows and need a working GPU/display. For faster
-incremental builds, enable Bevy's own `dynamic_linking` feature directly:
-`cargo run -p viveco-editor --features bevy/dynamic_linking`.
+### Editor
+
+```sh
+# Installs the `viveco-editor` executable
+cargo install --path viveco-editor
+
+# If you don't want to install it, you can use:
+# cargo run -p viveco-editor
+```
 
 ### Converter
 
 Viveco files can be binary or JSON. Binary is recommended for smaller file sizes and quicker loading.
 
 The `viveco-convert` command-line tool can convert files from binary to JSON and vice-versa,
-as well as converting SVG to non-animated viveco.
+as well as converting SVG files to non-animated viveco.
 
 ```sh
-# SVG -> binary .viveco (the output extension selects the encoding)
-cargo run -p viveco --bin viveco-convert -- art.svg art.viveco
+# Installs the `viveco-convert` executable
+cargo install --path viveco
 
-# Convert one named top-level SVG group, as Inkscape layers are
-cargo run -p viveco --bin viveco-convert -- --group Front art.svg front.viveco
+# If you don't want to install it, you can use:
+# cargo run -p viveco --bin viveco-convert --
+```
+
+```sh
+# SVG -> binary .viveco
+viveco-convert art.svg art.viveco
+
+# Convert one named top-level SVG group, e.g. an Inkscape layer
+viveco-convert --group Front art.svg front.viveco
 
 # Binary -> JSON
-cargo run -p viveco --bin viveco-convert -- art.viveco art.json
+viveco-convert art.viveco art.json
 ```
 
 ## The Format
 
 ### Coordinates and geometry
 
-- The origin is at the top-left and Y points down. There are no "units" or canvas size.
+- The origin is at the top-left and Y points down. There are no real-world units or canvas size.
 - A shape is made of `paths`. The shape is filled according to a non-zero winding rule,
   allowing for holes.
-- Paths may be open or closed, and are cubic bezier splines.
+- Paths may be open or closed, and are cubic Bézier splines.
 - Shapes may be filled and/or stroked with a solid color & opacity.
 - Stroke width is left unspecified--this allows setting a resolution-dependent stroke width at render time.
-  If a constant stroke width is desired, it must be baked into the file as a filled shape (à la "stroke to path" in inkscape)
+  If a constant stroke width is desired, it must be baked into the file as a filled shape (à la "stroke to path" in Inkscape)
 - Shapes have a `z` coordinate, which sets render order among siblings.
 - Shapes are arranged in a tree. Child shapes are clipped to their parent's interior
   and paint on top of the parent's fill but below its stroke.
@@ -107,32 +120,78 @@ Core operations:
 use vello::Scene;
 use vello::kurbo::Affine;
 use viveco::Asset;
-use viveco::render::SceneBuilder;
+use viveco::render::{SceneBuilder, SceneInstance};
 
-let asset = Asset::load_from_file("art.viveco")?;
+let asset = Asset::load_from_file("character.viveco")?;
 
-// Sample animation[0] at t = 1.5 s with full weight, then resolve the skin.
-let pose = asset.sample_pose(&[(0, 1.5, 1.0)]);
-let world = pose.to_world(&asset);
+// Draw the asset, with a pose defined by animation[0] at t=1.5 with full weight (1.0).
+// Draw at (120, 40) with a stroke width of 2.
+let instance = SceneInstance::animated(&asset, &[(0, 1.5, 1.0)])
+    .with_transform(Affine::translate((120.0, 40.0)))
+    .with_stroke_width(2.0);
 
-// Paint the skinned asset. `stroke_width` is in asset units.
 let mut scene = Scene::new();
 let mut builder = SceneBuilder::new();
-builder.add_asset_with_world_pose(&asset, &world, 1.0, Affine::IDENTITY);
+builder.add_instance(&instance);
 builder.finish(&mut scene);
 ```
 
-`Asset::sample_pose` takes `AnimationInstance` values, i.e.
-`(animation_index, time_seconds, weight)`. `SceneBuilder` is the lower-level API
-for combining several assets and poses into one Vello scene; `Asset::into_scene`
-is a shortcut for painting an asset at its rest pose.
+### Bevy features
 
 For Bevy, `VivecoPlugin` registers the `.viveco` asset loader and draws
 `VivecoInstance`s onto a `VivecoScene` for rendering.
-Each instance specifies its animation mix.
+Each instance specifies its animation mix,
+and the renderer abides by the built-in `Transform` and `Visibility` components.
+
+```rust
+use bevy::prelude::*;
+use bevy_vello::prelude::VelloView;
+use bevy_vello::VelloPlugin;
+use viveco::{Asset, VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene};
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugins(VelloPlugin::default())
+        .add_plugins(VivecoPlugin)
+        .add_systems(Startup, setup)
+        .run();
+}
+
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.spawn((Camera2d, VelloView));
+
+    // Spawn a default viveco scene
+    commands.spawn((VivecoScene::default(), VivecoDefaultScene));
+
+    // Load the asset
+    let asset = asset_server.load::<Asset>("character.viveco");
+
+    // animation[0] at t=1.5 with full weight (1.0), stroke width 2,
+    // placed at (120, 40).
+    commands.spawn((
+        VivecoInstance::new(asset, vec![(0, 1.5, 1.0)]).with_stroke_width(2.0),
+        Transform::from_xyz(120.0, 40.0, 0.0),
+    ));
+}
+```
+
+The mixer sets which animation(s) are active and how they are blended.
+Animations do not advance automatically; each animation's `t` must be driven forward each frame.
+
+`VivecoInstance::stroke_width` is in the asset's local units and scales with the
+instance, its scene, and the camera.
+If you want to specify a stroke width in pixels, add `VivecoStrokeWidthInPixels::new(2.0)`.
+This component will undo the instance, scene & camera scales to produce a stroke width that stays constant
+through scaling & zooming. In this case it would stay at 2 pixels wide.
+
+For blending multiple animations, you may find `AccelEasing` useful for setting weights.
+`AccelEasing` eases a weight toward a target with bounded speed and acceleration.
+Call `easing.step(target_weight, delta_seconds)` each frame and use `easing.value` as
+the weight. See the `compound` example for more details.
 
 Optionally, `ParallaxLayer` and `apply_parallax` add depth-based
-scaling. See the crate documentation and the examples for complete setups.
+scaling. See the `parallax` example for more details.
 
 ### Build-script helpers
 
