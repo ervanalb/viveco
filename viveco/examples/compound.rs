@@ -237,7 +237,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         viveco::VivecoInstance::from_asset(handle),
         StickAnimation::default(),
-        viveco::VivecoStrokeWidthInPixels::default(),
+        viveco::VivecoStrokeWidthInPixels::new(3.0),
     ));
 }
 
