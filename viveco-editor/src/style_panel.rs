@@ -10,12 +10,14 @@
 //! [`RelativeCursorPosition`]) with a fill bar and a thumb. Dragging the track
 //! maps the cursor position onto the slider's range.
 
+use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::ui::{RelativeCursorPosition, Val2};
 
 use crate::editor::{
     BOTTOM_BAR_HEIGHT, EditorMode, EditorState, SIDEBAR_WIDTH, TOOLBAR_WIDTH, TreeAddress,
-    path_closed_at, set_path_closed, style_at, style_at_mut,
+    path_closed_at, set_path_closed, shape_at, shape_at_mut, style_at, style_at_mut,
 };
 use crate::theme;
 use viveco::{Rgba8, StrokeStyle, Style};
@@ -34,6 +36,7 @@ impl Plugin for StylePanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StylePanelState>()
             .init_resource::<ActiveSlider>()
+            .init_resource::<ZEdit>()
             .add_systems(Startup, spawn_panel)
             .add_systems(
                 Update,
@@ -42,8 +45,11 @@ impl Plugin for StylePanelPlugin {
                     drag_sliders,
                     handle_toggles,
                     handle_closed_checkbox,
+                    handle_z_press,
+                    handle_z_input,
                     apply_edits,
                     update_visuals,
+                    sync_z_label,
                     sync_visibility,
                 )
                     .chain(),
@@ -174,11 +180,17 @@ struct StylePanelState {
     stroke_enabled: bool,
     /// Whether the selected node's paths are closed.
     closed: bool,
+    /// The selected shape's authored Z order.
+    z: f32,
     /// Whether the selection has a style the panel can edit. Empty selections
     /// do not.
     editable: bool,
     /// The selection the panel currently mirrors; used to detect changes.
     synced: Option<TreeAddress>,
+    /// The structure revision the panel last mirrored. Structural edits (such
+    /// as reordering, which rewrites Z) refresh the values without changing
+    /// the selection.
+    synced_revision: u64,
     /// Set when the panel has edits that still need writing to the document.
     dirty: bool,
 }
@@ -191,8 +203,10 @@ impl Default for StylePanelState {
             fill_enabled: false,
             stroke_enabled: false,
             closed: false,
+            z: 0.0,
             editable: false,
             synced: None,
+            synced_revision: 0,
             dirty: false,
         }
     }
@@ -274,6 +288,34 @@ impl StylePanelState {
 #[derive(Resource, Default)]
 struct ActiveSlider(Option<SliderKind>);
 
+/// The Z text edit in progress, if any.
+#[derive(Resource, Default)]
+pub(crate) struct ZEdit {
+    /// The text typed so far, or `None` when the field does not own the
+    /// keyboard.
+    buffer: Option<String>,
+}
+
+impl ZEdit {
+    /// Whether the Z field currently owns the keyboard.
+    pub(crate) fn is_editing(&self) -> bool {
+        self.buffer.is_some()
+    }
+
+    /// Abandons the edit in progress, if any.
+    fn cancel(&mut self) {
+        self.buffer = None;
+    }
+}
+
+/// The button that starts or commits the Z edit.
+#[derive(Component)]
+struct ZFieldButton;
+
+/// The text showing or editing the shape's Z value.
+#[derive(Component)]
+struct ZText;
+
 /// A slider's clickable track.
 #[derive(Component, Clone, Copy)]
 struct SliderTrack {
@@ -336,12 +378,19 @@ fn spawn_panel(mut commands: Commands) {
 }
 
 /// Hides the shape style panel while the graphic is locked in rig mode.
-fn sync_visibility(mode: Res<EditorMode>, mut panels: Query<&mut Node, With<StylePanelRoot>>) {
+fn sync_visibility(
+    mode: Res<EditorMode>,
+    mut panels: Query<&mut Node, With<StylePanelRoot>>,
+    mut z_edit: ResMut<ZEdit>,
+) {
     let display = if *mode == EditorMode::Draw {
         Display::Flex
     } else {
         Display::None
     };
+    if *mode != EditorMode::Draw {
+        z_edit.cancel();
+    }
     for mut node in &mut panels {
         if node.display != display {
             node.display = display;
@@ -354,7 +403,7 @@ fn spawn_shape_group(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn(Node {
             flex_direction: FlexDirection::Column,
-            width: Val::Px(96.0),
+            width: Val::Px(132.0),
             row_gap: Val::Px(6.0),
             ..default()
         })
@@ -397,6 +446,49 @@ fn spawn_shape_group(parent: &mut ChildSpawnerCommands) {
                         TextFont::from_font_size(13.0),
                         TextColor(theme::TEXT),
                     ));
+                });
+
+            group
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    height: Val::Px(18.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Text::new("Z"),
+                        TextFont::from_font_size(11.0),
+                        TextColor(theme::MUTED),
+                        Node {
+                            width: Val::Px(12.0),
+                            ..default()
+                        },
+                    ));
+                    row.spawn((
+                        Button,
+                        ZFieldButton,
+                        Node {
+                            flex_grow: 1.0,
+                            height: Val::Px(18.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            border: UiRect::all(Val::Px(1.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(theme::BUTTON_BG),
+                        BorderColor::all(theme::BORDER_FAINT),
+                    ))
+                    .with_children(|field| {
+                        field.spawn((
+                            Text::new("0.00"),
+                            TextFont::from_font_size(11.0),
+                            TextColor(theme::TEXT),
+                            ZText,
+                        ));
+                    });
                 });
         });
 }
@@ -562,16 +654,19 @@ fn spawn_slider(row: &mut ChildSpawnerCommands, kind: SliderKind) {
 /// Mirrors the selected shape's style into the panel when the selection
 /// changes.
 fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelState>) {
-    if panel.synced == editor.selected_node {
+    let same_selection = panel.synced.as_ref() == editor.selected_node.as_ref();
+    if same_selection && panel.synced_revision == editor.structure_revision {
         return;
     }
     panel.synced = editor.selected_node.clone();
+    panel.synced_revision = editor.structure_revision;
     panel.dirty = false;
 
     let Some(address) = editor.selected_node.as_ref() else {
         panel.fill_enabled = false;
         panel.stroke_enabled = false;
         panel.closed = false;
+        panel.z = 0.0;
         panel.editable = false;
         return;
     };
@@ -581,10 +676,12 @@ fn sync_from_selection(editor: Res<EditorState>, mut panel: ResMut<StylePanelSta
         panel.fill_enabled = false;
         panel.stroke_enabled = false;
         panel.closed = false;
+        panel.z = 0.0;
         panel.editable = false;
         return;
     };
     panel.editable = true;
+    panel.z = shape_at(&editor.document, address).map_or(0.0, |shape| shape.z);
 
     // Keep the last color when a paint is currently off, so switching it back
     // on restores a sensible value.
@@ -673,8 +770,106 @@ fn handle_closed_checkbox(
     }
 }
 
-/// Writes pending panel edits into the selected shape's style and closed
-/// state.
+/// Starts or commits the Z edit when its field is clicked.
+fn handle_z_press(
+    buttons: Query<&Interaction, (With<ZFieldButton>, Changed<Interaction>)>,
+    mut panel: ResMut<StylePanelState>,
+    mut edit: ResMut<ZEdit>,
+) {
+    if !panel.editable {
+        return;
+    }
+    for interaction in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if edit.is_editing() {
+            commit_z(&mut panel, &mut edit);
+        } else {
+            edit.buffer = Some(format!("{:.2}", panel.z));
+        }
+        return;
+    }
+}
+
+/// Types into, commits, or cancels the Z field.
+fn handle_z_input(
+    mode: Res<EditorMode>,
+    mut events: MessageReader<KeyboardInput>,
+    mut panel: ResMut<StylePanelState>,
+    mut edit: ResMut<ZEdit>,
+) {
+    if *mode != EditorMode::Draw || edit.buffer.is_none() || !panel.editable {
+        edit.cancel();
+        for _ in events.read() {}
+        return;
+    }
+
+    let mut commit = false;
+    let mut cancel = false;
+    if let Some(buffer) = &mut edit.buffer {
+        for event in events.read() {
+            if event.state != ButtonState::Pressed {
+                continue;
+            }
+            match event.key_code {
+                KeyCode::Enter => commit = true,
+                KeyCode::Escape => cancel = true,
+                KeyCode::Backspace => {
+                    buffer.pop();
+                }
+                _ => {
+                    if let Some(text) = &event.text {
+                        for ch in text.chars() {
+                            if ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+') {
+                                buffer.push(ch);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cancel {
+        edit.cancel();
+    } else if commit {
+        commit_z(&mut panel, &mut edit);
+    }
+}
+
+/// Parses and applies the Z value being edited, ignoring invalid input.
+fn commit_z(panel: &mut StylePanelState, edit: &mut ZEdit) {
+    let Some(text) = edit.buffer.take() else {
+        return;
+    };
+    if let Ok(value) = text.trim().parse::<f32>()
+        && value.is_finite()
+    {
+        panel.z = value;
+        panel.dirty = true;
+    }
+}
+
+/// Mirrors the Z value, or the edit buffer, into the field's text.
+fn sync_z_label(
+    panel: Res<StylePanelState>,
+    edit: Res<ZEdit>,
+    mut texts: Query<&mut Text, With<ZText>>,
+) {
+    let label = match &edit.buffer {
+        Some(buffer) => format!("{buffer}|"),
+        None => format!("{:.2}", panel.z),
+    };
+    for mut text in &mut texts {
+        if text.0 != label {
+            text.0 = label.clone();
+        }
+    }
+}
+
+/// Writes pending panel edits into the selected shape's style, closed state,
+/// and Z order.
 fn apply_edits(mut editor: ResMut<EditorState>, mut panel: ResMut<StylePanelState>) {
     if !panel.dirty {
         return;
@@ -692,6 +887,15 @@ fn apply_edits(mut editor: ResMut<EditorState>, mut panel: ResMut<StylePanelStat
         panel.write_to(style);
     }
     set_path_closed(&mut editor.document, &address, closed);
+
+    // Z changes the paint order, so the object tree (and this panel) resync.
+    let z = panel.z;
+    if let Some(shape) = shape_at_mut(&mut editor.document, &address)
+        && shape.z != z
+    {
+        shape.z = z;
+        editor.structure_revision += 1;
+    }
 }
 
 /// A cheap summary of everything the widgets display, used to avoid per-frame

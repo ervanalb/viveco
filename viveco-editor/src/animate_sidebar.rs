@@ -16,9 +16,11 @@ use crate::animate::{
     commit_animation_rename, delete_selected_animation,
 };
 use crate::animate_panel::{DurationEdit, SpeedEdit};
-use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH};
+use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH, TreeAddress};
 use crate::theme;
 use crate::timeline::{TimelineEdit, TimelineInput};
+use crate::tree::label;
+use viveco::{Shape, indices_in_paint_order};
 
 /// Longest gap between two presses that still counts as a double-click, in
 /// seconds.
@@ -38,10 +40,13 @@ impl Plugin for AnimateSidebarPlugin {
                 handle_rename_input,
                 handle_delete_key.before(TimelineInput),
                 handle_add,
+                handle_shape_row_press,
                 commit_on_empty_press,
                 rebuild_list,
+                rebuild_shape_list,
                 sync_labels,
                 paint_rows,
+                paint_shape_rows,
                 sync_visibility,
             )
                 .chain(),
@@ -68,6 +73,16 @@ struct AnimationRow(usize);
 /// The text of an animation row, kept in step with the name and rename buffer.
 #[derive(Component, Clone, Copy)]
 struct AnimationRowLabel(usize);
+
+/// The column holding selectable shape rows.
+#[derive(Component)]
+struct AnimateShapeList;
+
+/// One selectable shape row, addressed by its chain of sibling indices.
+#[derive(Component, Clone)]
+struct AnimateShapeRow {
+    chain: Vec<usize>,
+}
 
 fn spawn_sidebar(mut commands: Commands) {
     commands
@@ -113,11 +128,32 @@ fn spawn_sidebar(mut commands: Commands) {
                     flex_direction: FlexDirection::Column,
                     width: Val::Percent(100.0),
                     flex_grow: 1.0,
+                    flex_basis: Val::Px(0.0),
                     overflow: Overflow::clip_y(),
                     row_gap: Val::Px(2.0),
                     ..default()
                 },
                 AnimationList,
+            ));
+
+            // Shapes are selectable here so animate mode can target their
+            // properties without leaving the page.
+            panel.spawn((
+                Text::new("Shapes"),
+                TextFont::from_font_size(16.0),
+                TextColor(theme::TEXT),
+            ));
+            panel.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    width: Val::Percent(100.0),
+                    flex_grow: 1.0,
+                    flex_basis: Val::Px(0.0),
+                    overflow: Overflow::clip_y(),
+                    row_gap: Val::Px(2.0),
+                    ..default()
+                },
+                AnimateShapeList,
             ));
         });
 }
@@ -337,6 +373,150 @@ fn commit_on_empty_press(
     }
 
     commit_animation_rename(&mut editor);
+}
+
+/// Selects the shape row that was pressed.
+///
+/// Paths are not listed here: animate mode addresses whole shapes, so a shape
+/// row selects the shape itself.
+fn handle_shape_row_press(
+    mode: Res<EditorMode>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    rows: Query<(&Interaction, &AnimateShapeRow), Changed<Interaction>>,
+    mut editor: ResMut<EditorState>,
+) {
+    if *mode != EditorMode::Animate || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    for (interaction, row) in &rows {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        commit_animation_rename(&mut editor);
+        editor.select_node(Some(TreeAddress::Shape {
+            shapes: row.chain.clone(),
+        }));
+        // A shape target is the focus of the animate page.
+        editor.select_bone(None);
+        return;
+    }
+}
+
+/// One flat shape row: its address, display label, and indent depth.
+struct ShapeRow {
+    chain: Vec<usize>,
+    label: String,
+    depth: usize,
+}
+
+/// Collects shapes in paint order, matching the object tree's row order.
+fn collect_shape_rows(
+    shapes: &[Shape],
+    chain: &mut Vec<usize>,
+    depth: usize,
+    rows: &mut Vec<ShapeRow>,
+) {
+    for index in indices_in_paint_order(shapes) {
+        let shape = &shapes[index];
+        chain.push(index);
+        rows.push(ShapeRow {
+            chain: chain.clone(),
+            label: label(&shape.name, &format!("Shape {}", index + 1)),
+            depth,
+        });
+        collect_shape_rows(&shape.children, chain, depth + 1, rows);
+        chain.pop();
+    }
+}
+
+/// Rebuilds the selectable shape list when the hierarchy or selection changes.
+fn rebuild_shape_list(
+    mut commands: Commands,
+    editor: Res<EditorState>,
+    list: Query<Entity, With<AnimateShapeList>>,
+    mut last: Local<Option<(u64, Option<TreeAddress>)>>,
+) {
+    let signature = (editor.structure_revision, editor.selected_node.clone());
+    if last.as_ref() == Some(&signature) {
+        return;
+    }
+    *last = Some(signature);
+
+    let Ok(list) = list.single() else {
+        return;
+    };
+    let selected = editor.selected_node.as_ref().map(TreeAddress::shape_chain);
+
+    let mut rows = Vec::new();
+    collect_shape_rows(&editor.document.shapes, &mut Vec::new(), 0, &mut rows);
+
+    commands.entity(list).despawn_children();
+    commands.entity(list).with_children(|parent| {
+        if rows.is_empty() {
+            parent.spawn((
+                Text::new("No shapes"),
+                TextFont::from_font_size(12.0),
+                TextColor(theme::MUTED),
+            ));
+            return;
+        }
+        for entry in rows {
+            let is_selected = selected == Some(entry.chain.as_slice());
+            spawn_shape_row(parent, entry, is_selected);
+        }
+    });
+}
+
+fn spawn_shape_row(parent: &mut ChildSpawnerCommands, entry: ShapeRow, selected: bool) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect {
+                    left: Val::Px(8.0 + entry.depth as f32 * 14.0),
+                    right: Val::Px(8.0),
+                    top: Val::Px(3.0),
+                    bottom: Val::Px(3.0),
+                },
+                align_items: AlignItems::Center,
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(if selected {
+                theme::ACCENT_SELECTED
+            } else {
+                Color::NONE
+            }),
+            AnimateShapeRow { chain: entry.chain },
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new(entry.label),
+                TextFont::from_font_size(13.0),
+                TextColor(theme::TEXT),
+            ));
+        });
+}
+
+/// Highlights the selected shape row and hovered rows.
+fn paint_shape_rows(
+    editor: Res<EditorState>,
+    mut rows: Query<(&AnimateShapeRow, &Interaction, &mut BackgroundColor)>,
+) {
+    let selected = editor.selected_node.as_ref().map(TreeAddress::shape_chain);
+    for (row, interaction, mut background) in &mut rows {
+        let color = if selected == Some(row.chain.as_slice()) {
+            theme::ACCENT_SELECTED
+        } else if *interaction != Interaction::None {
+            theme::ACCENT_FAINT
+        } else {
+            Color::NONE
+        };
+        if background.0 != color {
+            background.0 = color;
+        }
+    }
 }
 
 /// Rebuilds the row list when the document's animations or the selection

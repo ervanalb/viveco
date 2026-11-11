@@ -33,14 +33,6 @@ mod planet {
     include!(concat!(env!("OUT_DIR"), "/planet.rs"));
 }
 
-// The example frames the artwork with fixed constants (asset space is Y-down)
-// rather than measuring geometry at runtime. The projections are large enough
-// to contain the planet and the moon's whole orbit with a margin.
-/// The camera's world-space center.
-///
-/// The artwork is centered near (6.5, 8.6) in asset space, where Y points
-/// down; the camera's world is Y-up, so the Y coordinate is negated.
-const CAMERA_CENTER: Vec2 = Vec2::new(6.5, -8.6);
 /// Minimum world-space area the camera shows.
 const MIN_VIEW_WIDTH: f32 = 420.0;
 const MIN_VIEW_HEIGHT: f32 = 300.0;
@@ -53,7 +45,7 @@ fn main() {
         }))
         .add_plugins(VelloPlugin::default())
         .add_plugins(viveco::VivecoPlugin)
-        .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.02)))
         .add_systems(Startup, setup)
         // Build this frame's mixer before the plugin poses the instance.
         .add_systems(Update, animate.before(viveco::VivecoSceneSystems::Build))
@@ -82,7 +74,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             },
             ..OrthographicProjection::default_2d()
         }),
-        Transform::from_xyz(CAMERA_CENTER.x, CAMERA_CENTER.y, 100.0),
+        Transform::default(),
     ));
 
     // Mark one scene as the default; for VivecoInstances without explicit `VivecoSceneOf`.

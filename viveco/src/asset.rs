@@ -18,7 +18,10 @@ pub const FORMAT_TYPE: &str = "viveco";
 pub const MIN_FORMAT_VERSION: u32 = 5;
 
 /// Version written to and expected by this build of the format.
-pub const FORMAT_VERSION: u32 = 5;
+///
+/// Version 6 added shape-property animation targets (starting with Z). Version
+/// 5 files remain readable because they cannot contain such targets.
+pub const FORMAT_VERSION: u32 = 6;
 
 /// Bytes every binary asset begins with.
 ///
@@ -545,20 +548,87 @@ mod tests {
     }
 
     #[test]
-    fn shape_keyframes_have_no_properties_yet() {
-        // `ShapeProperty` is uninhabited, so a shape-targeted keyframe cannot
-        // be constructed or deserialized.
+    fn shape_z_keyframes_are_supported() {
+        use crate::animation::{Animation, Keyframe, KeyframeTarget, ShapeProperty};
+
         let json = r#"{
             "type": "viveco",
-            "version": 5,
+            "version": 6,
+            "shapes": [{}],
             "animations": [{
                 "duration": 1.0,
                 "keyframes": [
-                    {"timestamp": 0.0, "value": 0.0,
-                     "target": {"shape": {"shape": 0, "property": "x"}}}
+                    {"timestamp": 0.0, "value": 3.0,
+                     "target": {"shape": {"shape": 0, "property": "z"}}}
                 ]
             }]
         }"#;
-        assert!(Asset::from_json_str(json).is_err());
+        let asset = Asset::from_json_str(json).unwrap();
+        assert_eq!(asset.animations[0].keyframes.len(), 1);
+        assert_eq!(asset.sample_shape_pose(&[(0, 0.0, 1.0)]).get(0), 3.0);
+
+        // Unknown shape properties are still rejected.
+        let json = json.replace("\"z\"", "\"scale\"");
+        assert!(Asset::from_json_str(&json).is_err());
+
+        // Shape targets survive a binary round trip.
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(Keyframe::new(
+            0.0,
+            2.0,
+            KeyframeTarget::Shape {
+                shape: 0,
+                property: ShapeProperty::Z,
+            },
+        ));
+        let asset = Asset {
+            shapes: vec![Shape::default()],
+            animations: vec![animation],
+            ..Default::default()
+        };
+        let bytes = asset.to_postcard_vec().unwrap();
+        assert_eq!(Asset::from_postcard_slice(&bytes).unwrap(), asset);
+    }
+
+    #[test]
+    fn applying_a_shape_map_updates_animation_targets() {
+        use crate::animation::{Animation, Keyframe, KeyframeTarget, ShapeProperty};
+        use crate::bone::move_map;
+
+        let mut animation = Animation::new(1.0);
+        for shape in [0, 2] {
+            animation.insert_keyframe(Keyframe::new(
+                shape as f32 * 0.1,
+                0.0,
+                KeyframeTarget::Shape {
+                    shape,
+                    property: ShapeProperty::Z,
+                },
+            ));
+        }
+        let mut asset = Asset {
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        // Move flat shape 0 to index 2: everything shifts left, then the block
+        // lands at the end.
+        asset.apply_shape_map(&move_map(4, 0, 1, 2));
+
+        let shapes: Vec<_> = asset.animations[0]
+            .keyframes
+            .iter()
+            .map(|keyframe| match &keyframe.target {
+                KeyframeTarget::Shape { shape, .. } => *shape,
+                KeyframeTarget::Bone { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(shapes, vec![2, 1]);
+    }
+
+    #[test]
+    fn version_five_assets_remain_readable() {
+        let json = r#"{"type": "viveco", "version": 5}"#;
+        assert!(Asset::from_json_str(json).is_ok());
     }
 }

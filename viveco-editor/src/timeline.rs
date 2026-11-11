@@ -48,7 +48,7 @@ use crate::animate::{effective_handle_in, effective_handle_out, selected_animati
 use crate::animate_panel::{DurationEdit, SpeedEdit};
 use crate::editor::{EditorMode, EditorState};
 use crate::theme;
-use viveco::{Animation, BoneIndex, Keyframe, KeyframeTarget};
+use viveco::{Animation, BoneIndex, Keyframe, KeyframeTarget, ShapeIndex};
 
 /// Amount one wheel notch multiplies the zoom by.
 const ZOOM_STEP: f32 = 1.1;
@@ -388,8 +388,8 @@ impl TimelineView {
     }
 
     /// Frames the animation's duration and values with a small margin,
-    /// optionally limiting the value range to one bone's curves.
-    fn fit(&mut self, animation: &Animation, size: Vec2, bone: Option<BoneIndex>) {
+    /// optionally limiting the value range to one target's curves.
+    fn fit(&mut self, animation: &Animation, size: Vec2, focus: Option<CurveFocus>) {
         if size.x <= 0.0 || size.y <= 0.0 {
             return;
         }
@@ -411,15 +411,15 @@ impl TimelineView {
         self.time_per_pixel = ((span_end - span_start + 2.0 * time_pad) / size.x)
             .clamp(MIN_TIME_PER_PIXEL, MAX_TIME_PER_PIXEL);
 
-        self.fit_value(animation, size, bone);
+        self.fit_value(animation, size, focus);
     }
 
     /// Frames only the value axis, leaving the time axis untouched.
-    fn fit_value(&mut self, animation: &Animation, size: Vec2, bone: Option<BoneIndex>) {
+    fn fit_value(&mut self, animation: &Animation, size: Vec2, focus: Option<CurveFocus>) {
         if size.y <= 0.0 {
             return;
         }
-        let (mut low, mut high) = value_bounds(animation, bone);
+        let (mut low, mut high) = value_bounds(animation, focus);
         if (high - low).abs() < f32::EPSILON {
             low -= 0.5;
             high += 0.5;
@@ -472,28 +472,65 @@ struct FitKey {
     width: f32,
     height: f32,
     scale: f32,
+    focus: Option<CurveFocus>,
 }
 
 /// What the current value-axis fit was computed for.
 ///
-/// The value axis depends on the focused bone as well as the curves, so it is
-/// tracked separately: selecting a bone refits the values without touching the
-/// time axis.
+/// The value axis depends on the focused target as well as the curves, so it is
+/// tracked separately: selecting a bone or shape refits the values without
+/// touching the time axis.
 #[derive(Clone, PartialEq)]
 struct ValueFitKey {
-    /// The focused bone, if any.
-    bone: Option<BoneIndex>,
+    /// The focused bone or shape, if any.
+    focus: Option<CurveFocus>,
     /// Number of keyframes whose values the fit covers.
     keyframes: usize,
 }
 
-/// The index of the selected bone, when it still resolves.
+/// The target the timeline focuses on, if any.
 ///
-/// The timeline focuses on this bone's curves, dimming the rest.
+/// Selecting a bone or shape dims every curve that belongs to another target,
+/// and the value axis refits to the focused curves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CurveFocus {
+    Bone(BoneIndex),
+    Shape(ShapeIndex),
+}
+
+/// The index of the selected bone, when it still resolves.
 fn selected_bone_index(editor: &EditorState) -> Option<BoneIndex> {
     editor
         .selected_bone
         .filter(|&index| editor.document.bone_by_index(index).is_some())
+}
+
+/// The target to focus the timeline on.
+///
+/// A selected shape wins when the animation actually has curves for it. This
+/// keeps the timeline on a shape the user is keying without hiding every curve
+/// when they select a shape that has none yet. A bone selection is the
+/// fallback.
+fn selected_focus(editor: &EditorState, animation: &Animation) -> Option<CurveFocus> {
+    if let Some(shape) = crate::editor::selected_shape_index(editor)
+        && animation.keyframes.iter().any(|keyframe| {
+            matches!(
+                &keyframe.target,
+                KeyframeTarget::Shape { shape: target, .. } if *target == shape
+            )
+        })
+    {
+        return Some(CurveFocus::Shape(shape));
+    }
+    selected_bone_index(editor).map(CurveFocus::Bone)
+}
+
+/// The target a keyframe drives.
+fn keyframe_focus(keyframe: &Keyframe) -> CurveFocus {
+    match &keyframe.target {
+        KeyframeTarget::Bone { bone, .. } => CurveFocus::Bone(*bone),
+        KeyframeTarget::Shape { shape, .. } => CurveFocus::Shape(*shape),
+    }
 }
 
 /// The bone a keyframe drives, if it drives a bone at all.
@@ -504,11 +541,11 @@ fn keyframe_bone(keyframe: &Keyframe) -> Option<BoneIndex> {
     }
 }
 
-/// Whether a grouped curve drives `bone`.
-fn group_is_bone(group: &[&Keyframe], bone: BoneIndex) -> bool {
+/// Whether a grouped curve drives `focus`.
+fn group_is_focused(group: &[&Keyframe], focus: CurveFocus) -> bool {
     group
         .first()
-        .is_some_and(|keyframe| keyframe_bone(keyframe) == Some(bone))
+        .is_some_and(|keyframe| keyframe_focus(keyframe) == focus)
 }
 
 /// Logical size of a UI node. `ComputedNode` sizes are in physical pixels;
@@ -553,7 +590,7 @@ fn fit_timeline(
         view.fitted_values = None;
         return;
     };
-    let bone = selected_bone_index(&editor);
+    let focus = selected_focus(&editor, animation);
     let key = FitKey {
         selected: editor.selected_animation,
         duration: animation.duration,
@@ -561,27 +598,28 @@ fn fit_timeline(
         width: area.x,
         height: area.y,
         scale: node.inverse_scale_factor,
+        focus,
     };
     let values = ValueFitKey {
-        keyframes: match bone {
-            Some(bone) => animation
+        keyframes: match focus {
+            Some(focus) => animation
                 .keyframes
                 .iter()
-                .filter(|keyframe| keyframe_bone(keyframe) == Some(bone))
+                .filter(|keyframe| keyframe_focus(keyframe) == focus)
                 .count(),
             None => animation.keyframes.len(),
         },
-        bone,
+        focus,
     };
 
     // Re-framing both axes when the animation or view changes; otherwise only
-    // the values are refitted, so selecting a bone never rescales time.
+    // the values are refitted, so selecting a target never rescales time.
     if view.fitted.as_ref() != Some(&key) {
-        view.fit(animation, area, bone);
+        view.fit(animation, area, focus);
         view.fitted = Some(key);
         view.fitted_values = Some(values);
     } else if view.fitted_values.as_ref() != Some(&values) {
-        view.fit_value(animation, area, bone);
+        view.fit_value(animation, area, focus);
         view.fitted_values = Some(values);
     }
 }
@@ -1555,14 +1593,16 @@ fn draw_timeline(
     let size = logical_size(node);
     let mut scene = Scene::new();
     if *mode == EditorMode::Animate && size.x > 0.0 && size.y > 0.0 {
+        let animation = selected_animation(&editor);
+        let focus = animation.and_then(|animation| selected_focus(&editor, animation));
         draw_frame(
             &mut scene,
-            selected_animation(&editor),
+            animation,
             &view,
             size,
             editor.playhead,
             &edit,
-            selected_bone_index(&editor),
+            focus,
         );
     }
     *component = UiVelloScene::from(scene);
@@ -1576,7 +1616,7 @@ fn draw_frame(
     size: Vec2,
     playhead: f32,
     edit: &TimelineEdit,
-    focus: Option<BoneIndex>,
+    focus: Option<CurveFocus>,
 ) {
     // The panel and track backgrounds live in the scene because Bevy UI is
     // composited over Vello UI scenes.
@@ -1614,7 +1654,7 @@ fn draw_frame(
 
         let groups = animation.curve_groups();
         for (index, group) in groups.iter().enumerate() {
-            let dimmed = focus.is_some_and(|bone| !group_is_bone(group, bone));
+            let dimmed = focus.is_some_and(|focus| !group_is_focused(group, focus));
             // Curves take their bone's color so a bone looks the same in every
             // animation, regardless of how its curves are ordered.
             let color = if dimmed {
@@ -2153,11 +2193,11 @@ fn draw_handle(
 
 /// Lowest and highest value reached by the keyframes and their handles,
 /// optionally limited to one bone's curves.
-fn value_bounds(animation: &Animation, bone: Option<BoneIndex>) -> (f32, f32) {
+fn value_bounds(animation: &Animation, focus: Option<CurveFocus>) -> (f32, f32) {
     let mut low = f32::INFINITY;
     let mut high = f32::NEG_INFINITY;
     for keyframe in &animation.keyframes {
-        if bone.is_some_and(|bone| keyframe_bone(keyframe) != Some(bone)) {
+        if focus.is_some_and(|focus| keyframe_focus(keyframe) != focus) {
             continue;
         }
         for value in [
@@ -2214,9 +2254,15 @@ mod tests {
         let animation = two_bone_animation();
 
         assert_eq!(value_bounds(&animation, None), (-500.0, 500.0));
-        assert_eq!(value_bounds(&animation, Some(0)), (0.0, 100.0));
+        assert_eq!(
+            value_bounds(&animation, Some(CurveFocus::Bone(0))),
+            (0.0, 100.0)
+        );
         // A bone with no curves has no range to frame.
-        assert_eq!(value_bounds(&animation, Some(2)), (-1.0, 1.0));
+        assert_eq!(
+            value_bounds(&animation, Some(CurveFocus::Bone(2))),
+            (-1.0, 1.0)
+        );
     }
 
     #[test]
@@ -2228,7 +2274,7 @@ mod tests {
         let time_per_pixel = view.time_per_pixel;
         let whole = view.value_per_pixel;
 
-        view.fit_value(&animation, size, Some(0));
+        view.fit_value(&animation, size, Some(CurveFocus::Bone(0)));
 
         // The time axis is untouched, while the values frame Arm's range.
         assert_eq!(view.time0, time0);
@@ -2239,15 +2285,28 @@ mod tests {
     }
 
     #[test]
-    fn groups_are_matched_to_their_bone() {
+    fn groups_are_matched_to_their_target() {
         let animation = two_bone_animation();
         let groups = animation.curve_groups();
 
-        assert!(group_is_bone(&groups[0], 0));
-        assert!(!group_is_bone(&groups[0], 1));
-        assert!(!group_is_bone(&groups[1], 0));
-        assert!(group_is_bone(&groups[1], 1));
-        assert!(!group_is_bone(&[], 0));
+        assert!(group_is_focused(&groups[0], CurveFocus::Bone(0)));
+        assert!(!group_is_focused(&groups[0], CurveFocus::Bone(1)));
+        assert!(!group_is_focused(&groups[1], CurveFocus::Bone(0)));
+        assert!(group_is_focused(&groups[1], CurveFocus::Bone(1)));
+        assert!(!group_is_focused(&[], CurveFocus::Bone(0)));
+
+        let mut with_shape = two_bone_animation();
+        with_shape.insert_keyframe(Keyframe::new(
+            0.0,
+            2.0,
+            KeyframeTarget::Shape {
+                shape: 3,
+                property: viveco::ShapeProperty::Z,
+            },
+        ));
+        let groups = with_shape.curve_groups();
+        assert!(group_is_focused(&groups[2], CurveFocus::Shape(3)));
+        assert!(!group_is_focused(&groups[2], CurveFocus::Bone(0)));
     }
 
     #[test]

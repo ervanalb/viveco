@@ -19,10 +19,14 @@
 //! The artwork is moved with linear blend skinning. A curve point weighted to
 //! several bones moves to the blend of where each bone's world transform puts
 //! it, with the point's unused weight `1 - sum` keeping it in place.
+//!
+//! [`ShapePose`] is the non-bone counterpart: it carries the offsets animation
+//! curves add to shape properties. For now that is a Z offset, which changes a
+//! shape's painting order rather than its geometry.
 
 use crate::asset::Asset;
 use crate::bone::{Bone, BoneIndex};
-use crate::shape::{Path, PathEnds, Point, Shape, Weights};
+use crate::shape::{Path, PathEnds, Point, Shape, ShapeIndex, Weights};
 
 /// A uniform scale, rotation, and translation.
 ///
@@ -292,6 +296,100 @@ impl Pose {
     /// This is the representation the renderer skins geometry with.
     pub fn to_world(&self, asset: &Asset) -> WorldPose {
         WorldPose::new(asset, self)
+    }
+}
+
+/// Animation-driven shape offsets, ordered by [`ShapeIndex`].
+///
+/// A shape pose stores only deltas from the shapes' authored values. For now
+/// the only offset is [`z`](Self::z_offsets), added to
+/// [`Shape::z`](crate::Shape::z) when shapes are painted. Like [`Pose`], this
+/// is transient sampling state rather than document data: it is produced by
+/// [`Animation::sample_shape_pose`](crate::Animation::sample_shape_pose) and
+/// never saved.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShapePose {
+    z: Vec<f32>,
+}
+
+impl ShapePose {
+    /// An all-rest shape pose with one entry per shape.
+    pub fn new(shape_count: usize) -> Self {
+        Self {
+            z: vec![0.0; shape_count],
+        }
+    }
+
+    /// The Z offset of the indexed shape, or zero when it has no entry.
+    pub fn get(&self, index: ShapeIndex) -> f32 {
+        self.z.get(index).copied().unwrap_or(0.0)
+    }
+
+    /// Stores a shape's Z offset.
+    ///
+    /// A pose set beyond the current length grows the vector so the entry is
+    /// never silently lost.
+    pub fn set(&mut self, index: ShapeIndex, z: f32) {
+        if index >= self.z.len() {
+            self.z.resize(index + 1, 0.0);
+        }
+        self.z[index] = z;
+    }
+
+    /// The Z offsets, ordered by [`ShapeIndex`].
+    pub fn z_offsets(&self) -> &[f32] {
+        &self.z
+    }
+
+    /// Whether every shape is at its authored Z.
+    pub fn is_identity(&self) -> bool {
+        const EPSILON: f32 = 1e-6;
+        self.z.iter().all(|z| z.abs() <= EPSILON)
+    }
+
+    /// Returns every shape to its authored Z, keeping one entry per shape.
+    pub fn clear(&mut self) {
+        self.z.fill(0.0);
+    }
+
+    /// Rewrites every entry through `map`, dropping entries for shapes the map
+    /// deletes.
+    pub fn apply_shape_map(&mut self, map: &[Option<ShapeIndex>]) {
+        let mut remapped = vec![0.0; map.iter().flatten().count()];
+        for (old, new) in map.iter().enumerate() {
+            if let Some(new) = *new
+                && let Some(z) = self.z.get(old)
+            {
+                remapped[new] = *z;
+            }
+        }
+        self.z = remapped;
+    }
+
+    /// Adds several weighted shape poses together.
+    ///
+    /// Each sample contributes its offset scaled by its weight, so weights
+    /// summing to `1` behave like a weighted average. Non-finite and
+    /// non-positive weights are ignored, and if nothing remains the result is
+    /// a rest pose.
+    pub fn blend(shape_count: usize, samples: &[(&ShapePose, f32)]) -> Self {
+        let mut z = vec![0.0; shape_count];
+        let mut sampled = false;
+
+        for (pose, weight) in samples {
+            if !weight.is_finite() || *weight <= 0.0 {
+                continue;
+            }
+            sampled = true;
+            for (index, offset) in z.iter_mut().enumerate() {
+                *offset += pose.get(index) * *weight;
+            }
+        }
+
+        if !sampled {
+            return Self::new(shape_count);
+        }
+        Self { z }
     }
 }
 
@@ -851,5 +949,38 @@ mod tests {
         let blended = Pose::blend(1, &[(&rotated, 0.25), (&Pose::new(1), 0.75)]);
         assert!((blended.get(0).rotation - 0.05).abs() < 1e-6);
         assert!((blended.get(0).scale - 1.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shape_poses_store_offsets_and_blend_by_weight() {
+        let mut first = ShapePose::new(2);
+        first.set(1, 4.0);
+        let mut second = ShapePose::new(2);
+        second.set(0, 8.0);
+
+        let blended = ShapePose::blend(2, &[(&first, 0.25), (&second, 0.75)]);
+        assert!((blended.get(0) - 6.0).abs() < 1e-6);
+        assert!((blended.get(1) - 1.0).abs() < 1e-6);
+        assert!(!blended.is_identity());
+
+        // Two rest poses stay at rest rather than accumulating offsets.
+        let blended = ShapePose::blend(2, &[(&ShapePose::new(2), 1.0); 2]);
+        assert!(blended.is_identity());
+
+        // With nothing contributing the result is a rest pose.
+        assert!(ShapePose::blend(2, &[]).is_identity());
+    }
+
+    #[test]
+    fn shape_poses_remap_and_drop_offsets() {
+        let mut pose = ShapePose::new(3);
+        pose.set(0, 1.0);
+        pose.set(2, 3.0);
+
+        // Remove shape 0; shape 2 shifts down to index 1.
+        pose.apply_shape_map(&crate::bone::removal_map(3, 0, 1));
+
+        assert_eq!(pose.get(0), 0.0);
+        assert_eq!(pose.get(1), 3.0);
     }
 }

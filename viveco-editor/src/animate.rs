@@ -8,8 +8,8 @@
 //! sampled) is document data handled by the `viveco` crate; this module only
 //! edits the properties exposed by the animate panel.
 
-use crate::editor::{AnimationRename, EditorState};
-use viveco::Animation;
+use crate::editor::{AnimationRename, EditorState, selected_shape_index};
+use viveco::{Animation, ShapeProperty};
 
 // Effective Bézier handles are free helpers over a keyframe slice, so the
 // editor re-exports them for the timeline that draws them.
@@ -129,6 +129,30 @@ pub fn set_cyclic(editor: &mut EditorState, index: usize, cyclic: bool) {
     if let Some(animation) = editor.document.animations.get_mut(index) {
         animation.cyclic = cyclic;
     }
+}
+
+/// Adds or updates a Z keyframe for the selected shape at the playhead.
+///
+/// The keyed value is the Z offset the selected animation's curve already has
+/// there, so keying without changing the curve never moves the shape. The
+/// curve's values are added to the shape's authored Z when it is painted.
+/// Returns `false` when no shape or animation is selected.
+pub fn add_shape_z_keyframe(editor: &mut EditorState) -> bool {
+    let Some(animation_index) = editor.selected_animation else {
+        return false;
+    };
+    let Some(shape) = selected_shape_index(editor) else {
+        return false;
+    };
+    let time = editor.playhead;
+    let value = editor.document.animations[animation_index]
+        .sample_shape_pose(&editor.document, time)
+        .get(shape);
+    let Some(animation) = editor.document.animations.get_mut(animation_index) else {
+        return false;
+    };
+    animation.set_shape_keyframe(shape, ShapeProperty::Z, time, value);
+    true
 }
 
 #[cfg(test)]
@@ -276,5 +300,42 @@ mod tests {
 
         set_cyclic(&mut editor, 0, false);
         assert!(!editor.document.animations[0].cyclic);
+    }
+
+    #[test]
+    fn adding_a_shape_z_keyframe_uses_the_current_offset() {
+        use crate::editor::TreeAddress;
+        use viveco::{Shape, ShapeProperty};
+
+        let mut editor = EditorState::new(Asset {
+            shapes: vec![Shape::default(), Shape::default()],
+            ..Default::default()
+        });
+        add_animation(&mut editor);
+        editor.playhead = 1.0;
+        editor.selected_node = Some(TreeAddress::Shape { shapes: vec![1] });
+
+        // With no curve yet, keying captures a zero offset.
+        assert!(add_shape_z_keyframe(&mut editor));
+        let animation = &editor.document.animations[0];
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(
+            animation.keyframes[0].target,
+            KeyframeTarget::Shape {
+                shape: 1,
+                property: ShapeProperty::Z,
+            }
+        );
+        assert_eq!(animation.keyframes[0].value, 0.0);
+
+        // An existing curve keeps its value when keyed again.
+        editor.document.animations[0].keyframes[0].value = 3.0;
+        assert!(add_shape_z_keyframe(&mut editor));
+        assert_eq!(editor.document.animations[0].keyframes.len(), 1);
+        assert_eq!(editor.document.animations[0].keyframes[0].value, 3.0);
+
+        // Without a selected shape there is nothing to key.
+        editor.selected_node = None;
+        assert!(!add_shape_z_keyframe(&mut editor));
     }
 }

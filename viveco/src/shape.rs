@@ -445,6 +445,31 @@ impl Asset {
         self.shape_by_index(index).map(Shape::subtree_len)
     }
 
+    /// The flat pre-order index of the shape at `chain`.
+    ///
+    /// `chain` is a path of sibling indices from the root, like the one the
+    /// editor's tree addresses use: `[i]` names `shapes[i]`, `[i, j]` names
+    /// its `children[j]`, and so on.
+    pub fn shape_index_of_chain(&self, chain: &[usize]) -> Option<ShapeIndex> {
+        fn find(shapes: &[Shape], chain: &[usize], base: ShapeIndex) -> Option<ShapeIndex> {
+            let (&index, rest) = chain.split_first()?;
+            let mut flat = base;
+            for (position, shape) in shapes.iter().enumerate() {
+                if position == index {
+                    return if rest.is_empty() {
+                        Some(flat)
+                    } else {
+                        find(&shape.children, rest, flat + 1)
+                    };
+                }
+                flat += shape.subtree_len();
+            }
+            None
+        }
+
+        find(&self.shapes, chain, 0)
+    }
+
     /// The pre-order index of the first shape named `name`.
     ///
     /// Names are descriptive and need not be unique, so this returns the first
@@ -934,5 +959,13 @@ mod tests {
         assert_eq!(asset.shape_index_by_name("Inner"), Some(1));
         assert_eq!(asset.shape_index_by_name("Sibling"), Some(2));
         assert_eq!(asset.shape_index_by_name("Missing"), None);
+
+        // Chains resolve to the same flat pre-order indices.
+        assert_eq!(asset.shape_index_of_chain(&[0]), Some(0));
+        assert_eq!(asset.shape_index_of_chain(&[0, 0]), Some(1));
+        assert_eq!(asset.shape_index_of_chain(&[1]), Some(2));
+        assert_eq!(asset.shape_index_of_chain(&[2]), None);
+        assert_eq!(asset.shape_index_of_chain(&[0, 1]), None);
+        assert_eq!(asset.shape_index_of_chain(&[]), None);
     }
 }

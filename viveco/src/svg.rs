@@ -233,7 +233,7 @@ impl Asset {
                 if let Some(node) = tree.node_by_id(&group.id) {
                     append_node(node, 1.0, &mut shapes, &resolver);
                 }
-                assign_z(&mut shapes);
+                reset_z(&mut shapes);
                 shapes
             }
         };
@@ -471,7 +471,7 @@ fn collect_clip_node(node: &usvg::Node, transform: usvg::Transform, geometry: &m
 fn shapes_from_children(group: &usvg::Group, opacity: f32, resolver: &ClipResolver) -> Vec<Shape> {
     let mut shapes = Vec::new();
     append_children(group, opacity, &mut shapes, resolver);
-    assign_z(&mut shapes);
+    reset_z(&mut shapes);
     shapes
 }
 
@@ -486,11 +486,12 @@ fn append_children(
     }
 }
 
-/// SVG paints siblings in document order. Z orders them the same way while
-/// keeping the tree structure intact.
-fn assign_z(shapes: &mut [Shape]) {
-    for (index, shape) in shapes.iter_mut().enumerate() {
-        shape.z = index as f32;
+/// SVG paints siblings in document order, which the shape vector already
+/// records. Keep every imported shape at the default Z of zero so painting can
+/// rely on stable Z sorting, and leave Z free for animation offsets.
+fn reset_z(shapes: &mut [Shape]) {
+    for shape in shapes {
+        shape.z = 0.0;
     }
 }
 
@@ -536,7 +537,7 @@ fn append_group(
     if children.is_empty() {
         return;
     }
-    assign_z(&mut children);
+    reset_z(&mut children);
 
     let clip = clip_geometry(clip, group, resolver);
 
@@ -1145,9 +1146,10 @@ mod tests {
         let asset = Asset::from_svg_str_with_options(GROUPED_SVG, &options).unwrap();
 
         assert_eq!(shape_names(&asset), ["front-rect", "detail-rect"]);
-        // Z is reassigned for just the imported shapes.
+        // Every imported shape keeps the default Z; vector order paints them
+        // in the SVG's order.
         assert_eq!(asset.shapes[0].z, 0.0);
-        assert_eq!(asset.shapes[1].z, 1.0);
+        assert_eq!(asset.shapes[1].z, 0.0);
     }
 
     #[test]

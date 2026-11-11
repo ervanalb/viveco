@@ -254,7 +254,7 @@ pub enum TreeAddress {
 
 impl TreeAddress {
     /// The chain of shape indices leading to the addressed node.
-    fn shape_chain(&self) -> &[usize] {
+    pub(crate) fn shape_chain(&self) -> &[usize] {
         match self {
             Self::Shape { shapes } | Self::Path { shapes, .. } => shapes,
         }
@@ -1095,10 +1095,16 @@ fn handle_input(
     mode: Res<EditorMode>,
     mut tool: ResMut<ToolState>,
     menu: Option<Res<MenuState>>,
+    z_edit: Option<Res<crate::style_panel::ZEdit>>,
     mut editor: ResMut<EditorState>,
 ) {
     // Rig mode locks the graphic. Bone editing has its own input system.
     if *mode != EditorMode::Draw {
+        return;
+    }
+
+    // The Z field owns the keyboard while it is being edited.
+    if z_edit.is_some_and(|edit| edit.is_editing()) {
         return;
     }
 
@@ -1649,14 +1655,19 @@ fn refresh_scene(
     // The rig page shows the hand-posed artwork; the animate page samples the
     // selected animation at the playhead. Both build a deformed copy for
     // display, leaving the document's rest geometry untouched.
-    let animation_pose = (*mode == EditorMode::Animate)
+    let selected_animation = (*mode == EditorMode::Animate)
         .then_some(editor.selected_animation)
-        .flatten()
-        .map(|index| {
-            editor
-                .document
-                .sample_pose(&[(index, editor.playhead, 1.0)])
-        });
+        .flatten();
+    let animation_pose = selected_animation.map(|index| {
+        editor
+            .document
+            .sample_pose(&[(index, editor.playhead, 1.0)])
+    });
+    let animation_shape_pose = selected_animation.map(|index| {
+        editor
+            .document
+            .sample_shape_pose(&[(index, editor.playhead, 1.0)])
+    });
     let shown_pose = match *mode {
         EditorMode::Rig => Some(&editor.pose),
         EditorMode::Animate => animation_pose.as_ref(),
@@ -1667,7 +1678,13 @@ fn refresh_scene(
         .map(|pose| editor.document.deformed(pose));
     let displayed = posed.as_ref().unwrap_or(&editor.document);
     let stroke_width = 1.0 / scale.max(f32::EPSILON);
-    let mut scene = displayed.into_scene(stroke_width);
+    let mut scene = match animation_shape_pose
+        .as_ref()
+        .filter(|pose| !pose.is_identity())
+    {
+        Some(shape_pose) => displayed.into_scene_with_shape_pose(shape_pose, stroke_width),
+        None => displayed.into_scene(stroke_width),
+    };
 
     // Draw the origin axes above the artwork but below the editing overlays.
     if let (Some(view), Some(window)) = (view, window) {
@@ -1843,6 +1860,15 @@ pub fn shape_at<'a>(document: &'a Asset, address: &TreeAddress) -> Option<&'a Sh
 
 pub fn shape_at_mut<'a>(document: &'a mut Asset, address: &TreeAddress) -> Option<&'a mut Shape> {
     shape_at_chain_mut(document, address.shape_chain())
+}
+
+/// The flat [`viveco::ShapeIndex`] of the selected node's owning shape.
+///
+/// Path selections resolve to the shape that owns them, matching the rest of
+/// the editor. `None` when nothing is selected or the shape no longer exists.
+pub fn selected_shape_index(editor: &EditorState) -> Option<viveco::ShapeIndex> {
+    let address = editor.selected_node.as_ref()?;
+    editor.document.shape_index_of_chain(address.shape_chain())
 }
 
 /// Resolves a path address to the path it names.
@@ -2024,14 +2050,15 @@ fn take_path(document: &mut Asset, address: &TreeAddress) -> Option<Path> {
     Some(shape.paths.remove(*path))
 }
 
-/// Rewrites a sibling list's Z values to match its vector order.
+/// Resets every sibling's Z to zero.
 ///
-/// Painting sorts stably by Z, so a list whose Z values equal their indices
-/// paints in vector order. Reordering physically moves shapes in the vector
-/// and then calls this, keeping both notions of order in agreement.
+/// Painting sorts stably by Z, so equal Z values paint in vector order.
+/// Reordering physically moves shapes in the vector and then calls this, which
+/// keeps the vector's order authoritative and leaves Z free for animation
+/// offsets. The editor never assigns an incremental Z value of its own.
 fn renormalize_z(siblings: &mut [Shape]) {
-    for (index, shape) in siblings.iter_mut().enumerate() {
-        shape.z = index as f32;
+    for shape in siblings {
+        shape.z = 0.0;
     }
 }
 
@@ -2052,6 +2079,9 @@ pub fn move_shape_near(
     }
     let source_slot = shape_slot(document, source)?;
     let target_slot = shape_slot(document, target)?;
+    let old_start = document.shape_index_of_chain(&source_slot.chain)?;
+    let moved_len = shape_at_chain(document, &source_slot.chain)?.subtree_len();
+    let total = document.shape_count();
 
     let shape = take_shape(document, source)?;
     let target_slot = shift_slot_after_removal(target_slot, &source_slot);
@@ -2063,6 +2093,8 @@ pub fn move_shape_near(
 
     let mut chain = target_slot.parents().to_vec();
     chain.push(index);
+    let new_start = document.shape_index_of_chain(&chain)?;
+    document.apply_shape_map(&viveco::move_map(total, old_start, moved_len, new_start));
     Some(TreeAddress::Shape { shapes: chain })
 }
 
@@ -2077,6 +2109,9 @@ pub fn move_shape_into(
     }
     let source_slot = shape_slot(document, source)?;
     let target_slot = shape_slot(document, target)?;
+    let old_start = document.shape_index_of_chain(&source_slot.chain)?;
+    let moved_len = shape_at_chain(document, &source_slot.chain)?.subtree_len();
+    let total = document.shape_count();
 
     let shape = take_shape(document, source)?;
     let target_slot = shift_slot_after_removal(target_slot, &source_slot);
@@ -2087,6 +2122,8 @@ pub fn move_shape_into(
 
     let mut chain = target_slot.chain;
     chain.push(index);
+    let new_start = document.shape_index_of_chain(&chain)?;
+    document.apply_shape_map(&viveco::move_map(total, old_start, moved_len, new_start));
     Some(TreeAddress::Shape { shapes: chain })
 }
 
@@ -3163,21 +3200,12 @@ pub fn finish_pen(editor: &mut EditorState, finalize: bool) {
         return;
     }
 
-    // New shapes go on top of everything, using a Z greater than any sibling.
-    let z = match editor
-        .document
-        .shapes
-        .iter()
-        .map(|shape| shape.z)
-        .reduce(f32::max)
-    {
-        Some(max) => max + 1.0,
-        None => 0.0,
-    };
+    // New shapes append to the vector, so with every Z at zero they paint on
+    // top of the siblings before them.
     let index = editor.document.shapes.len();
     editor.document.shapes.push(Shape {
         name: String::new(),
-        z,
+        z: 0.0,
         style: pen_style(),
         paths: vec![draft.path],
         children: Vec::new(),
@@ -3355,7 +3383,34 @@ fn delete_handle(path: &mut Path, handle: Handle) -> bool {
 /// Removing a shape takes its paths and nested children with it.
 fn remove_object(document: &mut Asset, address: &TreeAddress) -> bool {
     match address {
-        TreeAddress::Shape { .. } => take_shape(document, address).is_some(),
+        TreeAddress::Shape { .. } => {
+            let Some(slot) = shape_slot(document, address) else {
+                return false;
+            };
+            let Some(flat) = document.shape_index_of_chain(&slot.chain) else {
+                return false;
+            };
+            let Some(len) = shape_at_chain(document, &slot.chain).map(Shape::subtree_len) else {
+                return false;
+            };
+            let total = document.shape_count();
+            if take_shape(document, address).is_none() {
+                return false;
+            }
+            let map: Vec<Option<viveco::ShapeIndex>> = (0..total)
+                .map(|index| {
+                    if index < flat {
+                        Some(index)
+                    } else if index < flat + len {
+                        None
+                    } else {
+                        Some(index - len)
+                    }
+                })
+                .collect();
+            document.apply_shape_map(&map);
+            true
+        }
         TreeAddress::Path { .. } => take_path(document, address).is_some(),
     }
 }
@@ -4072,6 +4127,39 @@ mod tests {
     }
 
     #[test]
+    fn deleting_shapes_remaps_and_drops_shape_keyframes() {
+        use viveco::{Animation, Keyframe, KeyframeTarget, ShapeProperty};
+
+        let mut document = document_of(vec![Shape::default(), Shape::default(), Shape::default()]);
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(Keyframe::new(
+            0.0,
+            2.0,
+            KeyframeTarget::Shape {
+                shape: 2,
+                property: ShapeProperty::Z,
+            },
+        ));
+        document.animations.push(animation);
+
+        // Removing the first shape shifts the target down with its shape.
+        assert!(remove_object(&mut document, &shape_address(&[0])));
+        assert!(matches!(
+            document.animations[0].keyframes[0].target,
+            KeyframeTarget::Shape { shape: 1, .. }
+        ));
+
+        // Removing the rest drops the keyframe when its shape is gone.
+        assert!(remove_object(&mut document, &shape_address(&[0])));
+        assert!(matches!(
+            document.animations[0].keyframes[0].target,
+            KeyframeTarget::Shape { shape: 0, .. }
+        ));
+        assert!(remove_object(&mut document, &shape_address(&[0])));
+        assert!(document.animations[0].keyframes.is_empty());
+    }
+
+    #[test]
     fn dragging_a_shape_translates_all_of_its_points() {
         let mut path = Path::new([0.0, 0.0])
             .cubic_to([10.0, 0.0], [20.0, 10.0], [30.0, 10.0])
@@ -4123,11 +4211,8 @@ mod tests {
     }
 
     #[test]
-    fn pen_stacks_new_shapes_above_existing_ones() {
-        let mut editor = EditorState::new(document_of(vec![Shape {
-            z: 4.0,
-            ..default()
-        }]));
+    fn pen_appends_new_shapes_with_a_zero_z() {
+        let mut editor = EditorState::new(document_of(vec![Shape::default()]));
         editor.pen = Some(PenDraft {
             path: Path::new([0.0, 0.0]).line_to([10.0, 10.0]),
             pending_out: None,
@@ -4136,7 +4221,7 @@ mod tests {
 
         finish_pen(&mut editor, true);
 
-        assert_eq!(editor.document.shapes[1].z, 5.0);
+        assert_eq!(editor.document.shapes[1].z, 0.0);
         assert_eq!(editor.selected_node, Some(shape_address(&[1])));
     }
 
@@ -4691,7 +4776,7 @@ mod tests {
         assert_eq!(moved, shape_address(&[0]));
         assert_eq!(document.shapes[0].name, "B");
         assert_eq!(document.shapes[0].z, 0.0);
-        assert_eq!(document.shapes[1].z, 1.0);
+        assert_eq!(document.shapes[1].z, 0.0);
 
         // Dropping the front shape after the back one swaps them again.
         let moved = move_shape_near(&mut document, &first, &second, true).unwrap();

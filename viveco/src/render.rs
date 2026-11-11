@@ -22,7 +22,7 @@ use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point as KurboPoint, Stroke as KurboStroke};
 use vello::peniko::{Color, Fill};
 
-use crate::pose::{Pose, WorldPose};
+use crate::pose::{Pose, ShapePose, WorldPose};
 use crate::{AnimationInstance, Asset, Path, PathEnds, Point, Rgba8, Shape, Style, Weights};
 
 impl Asset {
@@ -49,6 +49,20 @@ impl Asset {
         builder.finish(&mut scene);
         scene
     }
+
+    /// Builds a Vello scene containing this asset with animated shape offsets.
+    ///
+    /// `shape_pose` is indexed like the shape tree in depth-first pre-order,
+    /// and its Z offsets are added to each shape's authored Z while sibling
+    /// shapes are ordered. Every other part of the asset is painted exactly as
+    /// [`Self::into_scene`] paints it.
+    pub fn into_scene_with_shape_pose(&self, shape_pose: &ShapePose, stroke_width: f32) -> Scene {
+        let mut builder = SceneBuilder::new();
+        builder.add_asset_with_shape_pose(self, shape_pose, stroke_width);
+        let mut scene = Scene::new();
+        builder.finish(&mut scene);
+        scene
+    }
 }
 
 /// An instance of a document, posed and placed for rendering into a scene.
@@ -65,6 +79,10 @@ pub struct SceneInstance<'a> {
     ///
     /// `None` paints the asset's rest geometry without skinning.
     pub world_pose: Option<WorldPose>,
+    /// Animated shape offsets, added to the document's authored values.
+    ///
+    /// `None` paints the shapes at their authored Z.
+    pub shape_pose: Option<ShapePose>,
     /// Where the document sits in scene space.
     pub transform: Affine,
     /// Stroke width in the document's local units.
@@ -79,6 +97,7 @@ impl<'a> SceneInstance<'a> {
         Self {
             asset,
             world_pose: None,
+            shape_pose: None,
             transform: Affine::IDENTITY,
             stroke_width: 1.0,
         }
@@ -92,19 +111,25 @@ impl<'a> SceneInstance<'a> {
         Self {
             asset,
             world_pose: (!pose.is_identity()).then(|| pose.to_world(asset)),
+            shape_pose: None,
             transform: Affine::IDENTITY,
             stroke_width: 1.0,
         }
     }
 
-    /// Samples `asset` with `animations` and renders it under the blended pose.
+    /// Samples `asset` with `animations` and renders it under the blended pose
+    /// and shape offsets.
     ///
     /// The instance starts at the identity placement with one-unit strokes.
     pub fn animated(asset: &'a Asset, animations: &[AnimationInstance]) -> Self {
         if animations.is_empty() {
             return Self::new(asset);
         }
-        Self::posed(asset, &asset.sample_pose(animations))
+        let shape_pose = asset.sample_shape_pose(animations);
+        Self {
+            shape_pose: (!shape_pose.is_identity()).then_some(shape_pose),
+            ..Self::posed(asset, &asset.sample_pose(animations))
+        }
     }
 
     /// Sets the resolved bone transforms directly.
@@ -112,6 +137,14 @@ impl<'a> SceneInstance<'a> {
     /// `None` returns the instance to the asset's rest geometry.
     pub fn with_world_pose(mut self, world_pose: Option<WorldPose>) -> Self {
         self.world_pose = world_pose;
+        self
+    }
+
+    /// Sets the animated shape offsets.
+    ///
+    /// `None` returns the shapes to their authored values.
+    pub fn with_shape_pose(mut self, shape_pose: Option<ShapePose>) -> Self {
+        self.shape_pose = shape_pose;
         self
     }
 
@@ -134,7 +167,8 @@ impl<'a> SceneInstance<'a> {
 /// placement transform), so fragments can be sorted, stored, and appended in
 /// any order. [`SceneBuilder::into_fragments`] produces one fragment per
 /// top-level shape, which is how the Bevy integration keeps instance artwork
-/// Z-sorted against custom fragments.
+/// Z-sorted against custom fragments. When a shape has animated offsets, its
+/// fragment's Z is the effective Z, not the authored one.
 pub struct SceneFragment {
     /// Sort key: fragments are drawn in ascending Z.
     pub z: f32,
@@ -147,6 +181,11 @@ pub struct SceneFragment {
 struct Placement<'a> {
     shape: &'a Shape,
     world_pose: Option<&'a WorldPose>,
+    shape_pose: Option<&'a ShapePose>,
+    /// The shape's flat depth-first pre-order index, used to index `shape_pose`.
+    flat_index: usize,
+    /// The shape's effective Z, including its animated offset.
+    z: f32,
     stroke_width: f32,
     transform: Affine,
 }
@@ -174,6 +213,7 @@ impl<'a> SceneBuilder<'a> {
         self.add_asset_with_pose(
             instance.asset,
             instance.world_pose.as_ref(),
+            instance.shape_pose.as_ref(),
             instance.stroke_width,
             instance.transform,
         )
@@ -194,7 +234,27 @@ impl<'a> SceneBuilder<'a> {
         stroke_width: f32,
         transform: Affine,
     ) -> &mut Self {
-        self.add_asset_with_pose(asset, None, stroke_width, transform)
+        self.add_asset_with_pose(asset, None, None, stroke_width, transform)
+    }
+
+    /// Adds every top-level shape of `asset` with animated shape offsets and
+    /// an identity placement.
+    ///
+    /// The offsets are added to the shapes' authored Z values, including the
+    /// Z values that order nested children.
+    pub fn add_asset_with_shape_pose(
+        &mut self,
+        asset: &'a Asset,
+        shape_pose: &'a ShapePose,
+        stroke_width: f32,
+    ) -> &mut Self {
+        self.add_asset_with_pose(
+            asset,
+            None,
+            Some(shape_pose),
+            stroke_width,
+            Affine::IDENTITY,
+        )
     }
 
     /// Adds every top-level shape of `asset`, skinned by `world_pose` and
@@ -210,22 +270,31 @@ impl<'a> SceneBuilder<'a> {
         stroke_width: f32,
         transform: Affine,
     ) -> &mut Self {
-        self.add_asset_with_pose(asset, Some(world_pose), stroke_width, transform)
+        self.add_asset_with_pose(asset, Some(world_pose), None, stroke_width, transform)
     }
 
     fn add_asset_with_pose(
         &mut self,
         asset: &'a Asset,
         world_pose: Option<&'a WorldPose>,
+        shape_pose: Option<&'a ShapePose>,
         stroke_width: f32,
         transform: Affine,
     ) -> &mut Self {
-        self.0.extend(asset.shapes.iter().map(|shape| Placement {
-            shape,
-            world_pose,
-            stroke_width,
-            transform,
-        }));
+        let mut flat_index = 0;
+        for shape in &asset.shapes {
+            let z = shape.z + shape_pose.map_or(0.0, |pose| pose.get(flat_index));
+            self.0.push(Placement {
+                shape,
+                world_pose,
+                shape_pose,
+                flat_index,
+                z,
+                stroke_width,
+                transform,
+            });
+            flat_index += shape.subtree_len();
+        }
         self
     }
 
@@ -244,6 +313,9 @@ impl<'a> SceneBuilder<'a> {
         self.0.push(Placement {
             shape,
             world_pose: None,
+            shape_pose: None,
+            flat_index: 0,
+            z: shape.z,
             stroke_width,
             transform,
         });
@@ -262,6 +334,9 @@ impl<'a> SceneBuilder<'a> {
         self.0.push(Placement {
             shape,
             world_pose: Some(world_pose),
+            shape_pose: None,
+            flat_index: 0,
+            z: shape.z,
             stroke_width,
             transform,
         });
@@ -278,6 +353,8 @@ impl<'a> SceneBuilder<'a> {
                 placement.stroke_width,
                 placement.transform,
                 placement.world_pose,
+                placement.shape_pose,
+                placement.flat_index,
             );
         }
     }
@@ -298,20 +375,22 @@ impl<'a> SceneBuilder<'a> {
                     placement.stroke_width,
                     placement.transform,
                     placement.world_pose,
+                    placement.shape_pose,
+                    placement.flat_index,
                 );
                 SceneFragment {
-                    z: placement.shape.z,
+                    z: placement.z,
                     scene,
                 }
             })
             .collect()
     }
 
-    /// Stable sort by ascending Z, matching
+    /// Stable sort by ascending effective Z, matching
     /// [`indices_in_paint_order`](crate::indices_in_paint_order).
     fn sort(&mut self) {
         self.0
-            .sort_by(|a, b| a.shape.z.partial_cmp(&b.shape.z).unwrap_or(Ordering::Equal));
+            .sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
     }
 }
 
@@ -345,17 +424,22 @@ impl Shape {
         transform: Affine,
     ) -> SceneFragment {
         let mut scene = Scene::new();
-        self.draw(&mut scene, stroke_width, transform, world_pose);
+        self.draw(&mut scene, stroke_width, transform, world_pose, None, 0);
         SceneFragment { z: self.z, scene }
     }
 
     /// Paints this shape and its descendants into `scene`, through `transform`.
+    ///
+    /// `flat_index` is this shape's depth-first pre-order index, which anchors
+    /// the indices passed to its children for `shape_pose`.
     fn draw(
         &self,
         scene: &mut Scene,
         stroke_width: f32,
         transform: Affine,
         world_pose: Option<&WorldPose>,
+        shape_pose: Option<&ShapePose>,
+        flat_index: usize,
     ) {
         let path = self.to_bez_path_with_pose(world_pose);
         draw_fill(scene, &self.style, &path, transform);
@@ -367,8 +451,24 @@ impl Shape {
             if clipped {
                 scene.push_clip_layer(Fill::NonZero, transform, &path);
             }
-            for index in self.child_indices_in_paint_order() {
-                self.children[index].draw(scene, stroke_width, transform, world_pose);
+            let child_flat = child_flat_indices(self, flat_index);
+            let mut order: Vec<usize> = (0..self.children.len()).collect();
+            order.sort_by(|&a, &b| {
+                let z = |index: usize| {
+                    self.children[index].z
+                        + shape_pose.map_or(0.0, |pose| pose.get(child_flat[index]))
+                };
+                z(a).partial_cmp(&z(b)).unwrap_or(Ordering::Equal)
+            });
+            for index in order {
+                self.children[index].draw(
+                    scene,
+                    stroke_width,
+                    transform,
+                    world_pose,
+                    shape_pose,
+                    child_flat[index],
+                );
             }
             if clipped {
                 scene.pop_layer();
@@ -415,6 +515,22 @@ impl Shape {
         }
         bez
     }
+}
+
+/// The flat pre-order index of each child of `shape`, given the parent's own
+/// flat index.
+///
+/// Children are numbered in vector order, matching
+/// [`ShapeIndex`](crate::ShapeIndex): the first child follows its parent, and
+/// each subsequent child follows the previous child's whole subtree.
+fn child_flat_indices(shape: &Shape, flat_index: usize) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(shape.children.len());
+    let mut next = flat_index + 1;
+    for child in &shape.children {
+        indices.push(next);
+        next += child.subtree_len();
+    }
+    indices
 }
 
 fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath, transform: Affine) {
@@ -733,11 +849,7 @@ mod tests {
         builder.add_asset(&first, 1.).add_asset(&second, 2.);
         builder.sort();
 
-        let order: Vec<f32> = builder
-            .0
-            .iter()
-            .map(|placement| placement.shape.z)
-            .collect();
+        let order: Vec<f32> = builder.0.iter().map(|placement| placement.z).collect();
         assert_eq!(order, vec![1.0, 2.0, 3.0, 5.0]);
     }
 
@@ -858,5 +970,113 @@ mod tests {
         let fragment = shape.to_fragment(1.0, Affine::IDENTITY);
         assert_eq!(fragment.z, 3.5);
         assert_eq!(fragment.scene.encoding().n_paths, 1);
+    }
+
+    #[test]
+    fn shape_z_offsets_reorder_top_level_fragments() {
+        let shape = |name: &str, z: f32| Shape {
+            name: name.into(),
+            z,
+            paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0])],
+            style: Style {
+                fill: Some(Rgba8::rgb(255, 0, 0)),
+                stroke: None,
+            },
+            ..Default::default()
+        };
+        let asset = Asset {
+            shapes: vec![shape("low", 0.0), shape("high", 1.0)],
+            ..Default::default()
+        };
+        // Lift the first shape above the second.
+        let mut pose = ShapePose::new(2);
+        pose.set(0, 10.0);
+
+        let fragments = {
+            let mut builder = SceneBuilder::new();
+            builder.add_asset_with_shape_pose(&asset, &pose, 1.0);
+            builder.into_fragments()
+        };
+
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments[0].z, 1.0);
+        assert_eq!(fragments[1].z, 10.0);
+    }
+
+    #[test]
+    fn animated_instances_apply_shape_z_curves() {
+        use crate::animation::{Animation, Keyframe, KeyframeTarget, ShapeProperty};
+
+        let shape = |z: f32| Shape {
+            z,
+            paths: vec![Path::new([0.0, 0.0]).line_to([1.0, 1.0])],
+            style: Style {
+                fill: Some(Rgba8::rgb(255, 0, 0)),
+                stroke: None,
+            },
+            ..Default::default()
+        };
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(Keyframe::new(
+            0.0,
+            10.0,
+            KeyframeTarget::Shape {
+                shape: 0,
+                property: ShapeProperty::Z,
+            },
+        ));
+        let asset = Asset {
+            shapes: vec![shape(0.0), shape(1.0)],
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        let instance = SceneInstance::animated(&asset, &[(0, 0.0, 1.0)]);
+        assert!(instance.shape_pose.is_some());
+        let mut builder = SceneBuilder::new();
+        builder.add_instance(&instance);
+        let fragments = builder.into_fragments();
+
+        assert_eq!(fragments[0].z, 1.0);
+        assert_eq!(fragments[1].z, 10.0);
+    }
+
+    #[test]
+    fn shape_z_offsets_reorder_nested_children() {
+        let shape = |name: &str, z: f32| Shape {
+            name: name.into(),
+            z,
+            ..Default::default()
+        };
+        let asset = Asset {
+            shapes: vec![Shape {
+                z: 0.0,
+                children: vec![shape("a", 0.0), shape("b", 1.0)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Index 0 is the parent, 1 is "a", and 2 is "b".
+        let mut pose = ShapePose::new(3);
+        pose.set(1, 10.0);
+
+        let mut builder = SceneBuilder::new();
+        builder.add_asset_with_shape_pose(&asset, &pose, 1.0);
+        let placements = &builder.0;
+        let child_flat = child_flat_indices(placements[0].shape, 0);
+        assert_eq!(child_flat, vec![1, 2]);
+
+        let order: Vec<usize> = {
+            let mut order: Vec<usize> = (0..2).collect();
+            order.sort_by(|&a, &b| {
+                let z = |index: usize| {
+                    placements[0].shape.children[index].z + pose.get(child_flat[index])
+                };
+                z(a).partial_cmp(&z(b)).unwrap()
+            });
+            order
+        };
+        // "b" is animated past "a", so it is painted first (further back).
+        assert_eq!(order, vec![1, 0]);
     }
 }

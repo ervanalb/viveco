@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::asset::Asset;
 use crate::bone::BoneIndex;
-use crate::pose::Pose;
+use crate::pose::{Pose, ShapePose};
 use crate::shape::ShapeIndex;
 
 /// One playing instance of an animation:
@@ -31,12 +31,16 @@ pub enum BoneProperty {
 
 /// A property of a shape that an animation curve can drive.
 ///
-/// Shape properties are not implemented yet, so this enum intentionally has no
-/// variants: no shape keyframe can be constructed, and any attempt to
-/// deserialize one fails.
+/// Shape curve values are offsets added to the shape's authored value. A
+/// [`ShapeProperty::Z`] curve, for example, is added to
+/// [`Shape::z`](crate::Shape::z), so a shape's painting order can change without
+/// editing its rest Z.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ShapeProperty {}
+pub enum ShapeProperty {
+    /// Offset added to the shape's Z order among its siblings.
+    Z,
+}
 
 /// What a [`Keyframe`] drives.
 ///
@@ -189,7 +193,9 @@ impl Animation {
 
     /// The bone pose this animation's curves describe at `time`.
     ///
-    /// Channels the animation does not drive stay at rest. Before the first
+    /// Shape-targeted curves are sampled separately by
+    /// [`Self::sample_shape_pose`]. Channels the animation does not drive stay
+    /// at rest. Before the first
     /// keyframe a non-cyclic curve holds that keyframe's value, and after the
     /// last it holds the last value. A cyclic curve repeats with a period equal
     /// to the duration, so a sample near either end can interpolate across the
@@ -223,6 +229,64 @@ impl Animation {
             pose.set(bone, bone_pose);
         }
         pose
+    }
+
+    /// The shape offsets this animation's curves describe at `time`.
+    ///
+    /// Only shape-targeted curves contribute; everything they do not drive
+    /// stays at rest (zero). Sampling follows the same timing rules as
+    /// [`Self::sample_pose`], and the returned offsets are added to the
+    /// authored shape values. A curve for [`ShapeProperty::Z`], for example,
+    /// is added to the shape's [`z`](crate::Shape::z).
+    pub fn sample_shape_pose(&self, asset: &Asset, time: f32) -> ShapePose {
+        let count = asset.shape_count();
+        let mut pose = ShapePose::new(count);
+        let time = clamped_time(self, time);
+
+        for group in self.curve_groups() {
+            let Some(first) = group.first() else {
+                continue;
+            };
+            let Some(value) = sample_curve(&group, time, self.duration, self.cyclic) else {
+                continue;
+            };
+            let KeyframeTarget::Shape { shape, property } = &first.target else {
+                continue;
+            };
+            if *shape >= count {
+                continue;
+            }
+            match property {
+                ShapeProperty::Z => pose.set(*shape, value),
+            }
+        }
+        pose
+    }
+
+    /// Writes `value` into the curve for `property` of `shape` at `time`.
+    ///
+    /// This is the shape-targeted counterpart of [`Self::set_bone_keyframe`].
+    /// The time is clamped the same way, and an existing keyframe for the same
+    /// target at that time is updated in place so repeated keying edits rather
+    /// than stacks keyframes.
+    pub fn set_shape_keyframe(
+        &mut self,
+        shape: ShapeIndex,
+        property: ShapeProperty,
+        time: f32,
+        value: f32,
+    ) {
+        let time = clamped_time(self, time);
+        let target = KeyframeTarget::Shape { shape, property };
+        if let Some(existing) = self
+            .keyframes
+            .iter_mut()
+            .find(|keyframe| keyframe.target == target && keyframe.timestamp == time)
+        {
+            existing.value = value;
+            return;
+        }
+        self.insert_keyframe(Keyframe::new(time, value, target));
     }
 
     /// Writes `value` into the curve for `property` of `bone` at `time`.
@@ -474,8 +538,9 @@ impl Asset {
             .position(|animation| animation.name == name)
     }
 
-    /// The blended pose of several animation instances at once.
+    /// The blended bone pose of several animation instances at once.
     ///
+    /// Shape offsets are blended separately by [`Self::sample_shape_pose`].
     /// Out-of-range indices, non-finite times, and non-positive weights are
     /// ignored. The remaining poses are added together relative to rest by
     /// [`Pose::blend`], which does not normalize weights: each instance
@@ -511,12 +576,40 @@ impl Asset {
             .collect();
         Pose::blend(self.bone_count(), &samples)
     }
+
+    /// The blended shape offsets of several animation instances at once.
+    ///
+    /// This is the shape-targeted counterpart of [`Self::sample_pose`].
+    /// Out-of-range indices, non-finite times, and non-positive weights are
+    /// ignored. Each instance contributes its offset scaled by its weight, so
+    /// weights summing to `1` behave like a weighted average. When no instance
+    /// contributes, the result is a rest pose with every offset at zero.
+    pub fn sample_shape_pose(&self, animations: &[AnimationInstance]) -> ShapePose {
+        let mut sampled = Vec::with_capacity(animations.len());
+
+        for &(index, time, weight) in animations {
+            let Some(animation) = self.animations.get(index) else {
+                continue;
+            };
+            if !time.is_finite() || !weight.is_finite() || weight <= 0.0 {
+                continue;
+            }
+            sampled.push((animation.sample_shape_pose(self, time), weight));
+        }
+
+        let samples: Vec<(&ShapePose, f32)> = sampled
+            .iter()
+            .map(|(pose, weight)| (pose, *weight))
+            .collect();
+        ShapePose::blend(self.shape_count(), &samples)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bone::Bone;
+    use crate::shape::Shape;
 
     fn keyframe(timestamp: f32, value: f32) -> Keyframe {
         Keyframe::new(
@@ -643,6 +736,96 @@ mod tests {
         assert_eq!(arm.scale, 2.0);
         // The pose pivots about the bone's rest head, like the rig view.
         assert_eq!(arm.pivot, [10.0, 20.0]);
+    }
+
+    #[test]
+    fn sample_shape_pose_maps_z_curves_to_offsets() {
+        let asset = Asset {
+            shapes: vec![
+                Shape::default(),
+                Shape {
+                    children: vec![Shape::default()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut animation = Animation::new(1.0);
+        // The nested child is flat shape index 2.
+        animation.insert_keyframe(Keyframe::new(
+            0.0,
+            4.0,
+            KeyframeTarget::Shape {
+                shape: 2,
+                property: ShapeProperty::Z,
+            },
+        ));
+
+        let pose = animation.sample_shape_pose(&asset, 0.5);
+        assert_eq!(pose.z_offsets(), &[0.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn shape_offsets_blend_across_instances() {
+        let asset = Asset {
+            shapes: vec![Shape::default()],
+            ..Default::default()
+        };
+        let mut first = Animation::new(1.0);
+        first.insert_keyframe(Keyframe::new(
+            0.0,
+            4.0,
+            KeyframeTarget::Shape {
+                shape: 0,
+                property: ShapeProperty::Z,
+            },
+        ));
+        let mut second = Animation::new(1.0);
+        second.insert_keyframe(Keyframe::new(
+            0.0,
+            8.0,
+            KeyframeTarget::Shape {
+                shape: 0,
+                property: ShapeProperty::Z,
+            },
+        ));
+        let mut asset = asset;
+        asset.animations = vec![first, second];
+
+        let pose = asset.sample_shape_pose(&[(0, 0.0, 0.25), (1, 0.0, 0.75)]);
+        assert!((pose.get(0) - 7.0).abs() < 1e-5);
+
+        // Invalid instances leave every offset at rest.
+        assert!(asset.sample_shape_pose(&[]).is_identity());
+        assert!(asset.sample_shape_pose(&[(9, 0.0, 1.0)]).is_identity());
+    }
+
+    #[test]
+    fn setting_a_shape_keyframe_inserts_or_replaces() {
+        let mut animation = Animation::new(4.0);
+
+        animation.set_shape_keyframe(1, ShapeProperty::Z, 1.0, 2.0);
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].value, 2.0);
+        assert_eq!(
+            animation.keyframes[0].target,
+            KeyframeTarget::Shape {
+                shape: 1,
+                property: ShapeProperty::Z,
+            }
+        );
+
+        // The same target at the same time updates in place, keeping handles.
+        animation.keyframes[0].handle_out = Some(3.0);
+        animation.set_shape_keyframe(1, ShapeProperty::Z, 1.0, 5.0);
+        assert_eq!(animation.keyframes.len(), 1);
+        assert_eq!(animation.keyframes[0].value, 5.0);
+        assert_eq!(animation.keyframes[0].handle_out, Some(3.0));
+
+        // A different shape or time is its own keyframe.
+        animation.set_shape_keyframe(0, ShapeProperty::Z, 1.0, 0.0);
+        animation.set_shape_keyframe(1, ShapeProperty::Z, 2.0, 0.0);
+        assert_eq!(animation.keyframes.len(), 3);
     }
 
     #[test]

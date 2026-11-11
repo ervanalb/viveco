@@ -14,7 +14,7 @@ use crate::bounds::bounds_for;
 use crate::dialogs::FileDialogs;
 use crate::editor::{DocumentBounds, EditorState, TreeAddress, Viewport};
 use crate::history::History;
-use viveco::Asset;
+use viveco::{Asset, Shape};
 
 /// Name used for a fresh document that has not been saved anywhere yet.
 ///
@@ -126,6 +126,14 @@ pub fn open_document(
     }
 }
 
+/// Resets a shape subtree to the editor's default Z of zero.
+fn reset_z(shape: &mut Shape) {
+    shape.z = 0.0;
+    for child in &mut shape.children {
+        reset_z(child);
+    }
+}
+
 /// Imports the shapes of the SVG at `path` into the current document.
 ///
 /// The shapes are appended above every existing top-level shape, and the first
@@ -149,24 +157,11 @@ pub fn import_svg_document(
         return false;
     }
 
-    // New top-level shapes go above every existing one, preserving the SVG's
-    // own painting order among themselves.
-    let highest = editor
-        .document
-        .shapes
-        .iter()
-        .map(|shape| shape.z)
-        .filter(|z| z.is_finite())
-        .fold(f32::NEG_INFINITY, f32::max);
-    let base_z = if highest.is_finite() {
-        highest + 1.0
-    } else {
-        0.0
-    };
-
+    // Imported shapes are appended in the SVG's painting order. They all use
+    // the editor's default Z of zero, so stable sorting keeps that order.
     let first_imported = editor.document.shapes.len();
-    for (index, mut shape) in imported.shapes.into_iter().enumerate() {
-        shape.z = base_z + index as f32;
+    for mut shape in imported.shapes {
+        reset_z(&mut shape);
         editor.document.shapes.push(shape);
     }
 
@@ -337,10 +332,7 @@ mod tests {
         .unwrap();
 
         let mut document = Asset::new();
-        document.shapes.push(Shape {
-            z: 5.0,
-            ..default()
-        });
+        document.shapes.push(Shape::default());
         let mut editor = EditorState::new(document.clone());
         let mut bounds = DocumentBounds(EMPTY_BOUNDS);
         let mut history = History::new(document);
@@ -353,8 +345,8 @@ mod tests {
         ));
 
         assert_eq!(editor.document.shapes.len(), 2);
-        // Imported shapes sit above the existing top-level shape.
-        assert_eq!(editor.document.shapes[1].z, 6.0);
+        // Imported shapes use the default Z and append above the existing one.
+        assert_eq!(editor.document.shapes[1].z, 0.0);
         assert_eq!(
             editor.selected_node,
             Some(TreeAddress::Shape { shapes: vec![1] })

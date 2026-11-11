@@ -74,15 +74,9 @@ pub fn paste_clipboard(editor: &mut EditorState, clipboard: &mut Clipboard) -> b
     let offset = PASTE_OFFSET * clipboard.pastes as f32;
     translate_shape(&mut shape, [offset, offset]);
 
-    // Pasts go on top of everything, using a Z greater than any top-level
-    // sibling.
-    let z = editor
-        .document
-        .shapes
-        .iter()
-        .map(|shape| shape.z)
-        .reduce(f32::max);
-    shape.z = z.map_or(0.0, |max| max + 1.0);
+    // Shapes default to Z zero. Appending to the vector puts the paste on top
+    // of the sibling shapes that share that Z.
+    shape.z = 0.0;
 
     let index = editor.document.shapes.len();
     editor.document.shapes.push(shape);
@@ -160,8 +154,9 @@ mod tests {
             shapes[1].paths[0].start(),
             Some([PASTE_OFFSET, PASTE_OFFSET])
         );
-        // The paste sits on top of the original.
-        assert_eq!(shapes[1].z, 1.0);
+        // The paste shares the original's default Z and comes later in the
+        // vector, so it paints on top.
+        assert_eq!(shapes[1].z, 0.0);
         assert_eq!(
             editor.selected_node,
             Some(TreeAddress::Shape { shapes: vec![1] })
@@ -173,7 +168,7 @@ mod tests {
             editor.document.shapes[2].paths[0].start(),
             Some([2.0 * PASTE_OFFSET, 2.0 * PASTE_OFFSET])
         );
-        assert_eq!(editor.document.shapes[2].z, 2.0);
+        assert_eq!(editor.document.shapes[2].z, 0.0);
     }
 
     #[test]

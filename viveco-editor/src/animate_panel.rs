@@ -14,7 +14,9 @@ use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
-use crate::animate::{commit_animation_rename, selected_animation, set_cyclic, set_duration};
+use crate::animate::{
+    add_shape_z_keyframe, commit_animation_rename, selected_animation, set_cyclic, set_duration,
+};
 use crate::editor::{
     BOTTOM_BAR_HEIGHT, EditorMode, EditorState, SIDEBAR_WIDTH, ShowBones, TOOLBAR_WIDTH,
 };
@@ -38,6 +40,7 @@ impl Plugin for AnimatePanelPlugin {
                     handle_speed_press,
                     handle_play_pause,
                     handle_bones_toggle,
+                    handle_key_shape_z,
                     handle_duration_input,
                     handle_speed_input,
                     handle_cyclic_toggle,
@@ -78,6 +81,8 @@ enum PanelButton {
     PlayPause,
     /// The show-bones checkbox.
     BonesToggle,
+    /// Adds a Z keyframe for the selected shape at the playhead.
+    KeyShapeZ,
 }
 
 /// The text showing the duration value.
@@ -368,6 +373,32 @@ fn spawn_playback_row(row: &mut ChildSpawnerCommands) {
             TextColor(theme::MUTED),
         ));
     });
+
+    // Keying a shape's Z needs both an animation and a selected shape; the
+    // button stays visible so the action is discoverable, and does nothing
+    // until both are available.
+    row.spawn((
+        Button,
+        PanelButton::KeyShapeZ,
+        Node {
+            min_width: Val::Px(64.0),
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            border: UiRect::all(Val::Px(1.0)),
+            border_radius: BorderRadius::all(Val::Px(6.0)),
+            ..default()
+        },
+        BackgroundColor(theme::BUTTON_BG),
+        BorderColor::all(theme::BORDER_FAINT),
+    ))
+    .with_children(|button| {
+        button.spawn((
+            Text::new("Key Z"),
+            TextFont::from_font_size(12.0),
+            TextColor(theme::TEXT),
+        ));
+    });
 }
 
 /// Spawns a labelled checkbox button with the given marker on its square.
@@ -552,6 +583,33 @@ fn handle_bones_toggle(
             show_bones.0 = !show_bones.0;
             return;
         }
+    }
+}
+
+/// Adds a Z keyframe for the selected shape from the "Key Z" button.
+///
+/// Other text edits are committed first so the keyed time and value use the
+/// document as the user sees it.
+fn handle_key_shape_z(
+    mode: Res<EditorMode>,
+    buttons: Query<(&Interaction, &PanelButton), Changed<Interaction>>,
+    mut editor: ResMut<EditorState>,
+    mut duration_edit: ResMut<DurationEdit>,
+    mut speed_edit: ResMut<SpeedEdit>,
+    mut playback: ResMut<Playback>,
+) {
+    if *mode != EditorMode::Animate {
+        return;
+    }
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed || *button != PanelButton::KeyShapeZ {
+            continue;
+        }
+        commit_animation_rename(&mut editor);
+        commit_duration(&mut editor, &mut duration_edit);
+        commit_speed(&mut playback, &mut speed_edit);
+        add_shape_z_keyframe(&mut editor);
+        return;
     }
 }
 
@@ -883,7 +941,7 @@ fn paint_buttons(
                 .is_some_and(|index| edit.editing(index)),
             PanelButton::SpeedField => speed_edit.is_editing(),
             PanelButton::PlayPause => playback.playing,
-            PanelButton::CyclicToggle | PanelButton::BonesToggle => false,
+            PanelButton::CyclicToggle | PanelButton::BonesToggle | PanelButton::KeyShapeZ => false,
         };
         let color = if active {
             theme::ACCENT_SELECTED

@@ -357,7 +357,37 @@ mod tests {
     }
 
     #[test]
-    fn reordering_renormalizes_sibling_z() {
+    fn reordering_shapes_remaps_shape_keyframes() {
+        use viveco::{Animation, Keyframe, KeyframeTarget, ShapeProperty};
+
+        let mut editor = state(vec![
+            named_shape("A", 0.0),
+            named_shape("B", 1.0),
+            named_shape("C", 2.0),
+        ]);
+        let mut animation = Animation::new(1.0);
+        animation.insert_keyframe(Keyframe::new(
+            0.0,
+            2.0,
+            KeyframeTarget::Shape {
+                shape: 0,
+                property: ShapeProperty::Z,
+            },
+        ));
+        editor.document.animations.push(animation);
+
+        // A moves to the end, so its flat index becomes 2.
+        apply_drop(&mut editor, &shape(&[0]), &shape(&[2]), DropKind::After);
+
+        assert_eq!(names(&editor.document.shapes), ["B", "C", "A"]);
+        assert!(matches!(
+            editor.document.animations[0].keyframes[0].target,
+            KeyframeTarget::Shape { shape: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn reordering_resets_sibling_z_to_zero() {
         let mut editor = state(vec![
             named_shape("A", 10.0),
             named_shape("B", 20.0),
@@ -367,7 +397,9 @@ mod tests {
         apply_drop(&mut editor, &shape(&[0]), &shape(&[2]), DropKind::After);
 
         let zs: Vec<f32> = editor.document.shapes.iter().map(|shape| shape.z).collect();
-        assert_eq!(zs, vec![0.0, 1.0, 2.0]);
+        assert_eq!(zs, vec![0.0, 0.0, 0.0]);
+        // Vector order is still the paint order.
+        assert_eq!(displayed_shapes(&editor), ["B", "C", "A"]);
     }
 
     /// Top-level `X` plus parent `P` with a single child `C`.
