@@ -43,10 +43,16 @@ use super::VivecoLoader;
 /// non-cyclic and cyclic animations use the sampling behavior of
 /// [`Animation::sample_pose`](crate::Animation::sample_pose).
 ///
+/// The [`transform`](Self::transform) field adds a Vello [`Affine`] of its own,
+/// applied to the artwork before the entity's transform. It is expressed in the
+/// asset's local Y-down space, so it can mirror, skew, or offset the asset
+/// independently of the Bevy hierarchy above it.
+///
 /// Stroke widths are explicit and in the asset's local units: they are painted
-/// like the rest of the geometry, so scaling the instance entity, its scene, or
-/// the camera scales the stroke along with the artwork. Add
-/// [`VivecoStrokeWidthInPixels`] to keep an on-screen width instead.
+/// like the rest of the geometry, so scaling the instance's transform, the
+/// instance entity, its scene, or the camera scales the stroke along with the
+/// artwork. Add [`VivecoStrokeWidthInPixels`] to keep an on-screen width
+/// instead.
 ///
 /// A user who wants a different pose or rendering path can write their own
 /// producer system in [`VivecoSceneSystems::Build`] and push
@@ -59,6 +65,17 @@ pub struct VivecoInstance {
     /// The animation mixer: the instances to blend, as
     /// `(animation index, time in seconds, weight)`.
     pub mixer: Vec<AnimationInstance>,
+    /// The Vello transform applied to the asset before the entity's
+    /// [`GlobalTransform`].
+    ///
+    /// The artwork is drawn through `scene_affine(GlobalTransform) * transform`,
+    /// so this is a placement in the asset's own Y-down space. The Bevy
+    /// hierarchy still applies on top of it. Use it for transforms a Bevy
+    /// [`Transform`] cannot express, such as mirroring or skewing, or to offset
+    /// artwork without adding an entity.
+    ///
+    /// Defaults to [`Affine::IDENTITY`].
+    pub transform: Affine,
     /// Stroke width in the asset's local units, used as-is.
     ///
     /// The painted width also scales with the instance entity, its scene, and
@@ -75,6 +92,7 @@ impl VivecoInstance {
         Self {
             asset,
             mixer,
+            transform: Affine::IDENTITY,
             stroke_width: 1.0,
         }
     }
@@ -86,6 +104,16 @@ impl VivecoInstance {
     /// [`VivecoInstance::new`] with an empty mixer behaves identically.
     pub fn from_asset(asset: Handle<crate::Asset>) -> Self {
         Self::new(asset, Vec::new())
+    }
+
+    /// Sets the Vello transform applied to the asset before the entity's
+    /// [`GlobalTransform`].
+    ///
+    /// See [`transform`](Self::transform) for the coordinate space. The default
+    /// is [`Affine::IDENTITY`].
+    pub fn with_transform(mut self, transform: Affine) -> Self {
+        self.transform = transform;
+        self
     }
 
     /// Sets the stroke width, in the asset's local units.
@@ -228,9 +256,10 @@ pub struct VivecoDefaultScene;
 /// Attach this to a [`VivecoInstance`], or to its [`VivecoScene`], to have the
 /// plugin rewrite the instance's
 /// [`stroke_width`](VivecoInstance::stroke_width) so painted strokes keep
-/// `width` logical pixels. All three scales that affect the painted size are
-/// compensated: the instance entity, its scene, and the observing camera. A
-/// component on the instance overrides one on its scene.
+/// `width` logical pixels. Every scale that affects the painted size is
+/// compensated: the instance's [`transform`](VivecoInstance::transform), the
+/// instance entity, its scene, and the observing camera. A component on the
+/// instance overrides one on its scene.
 ///
 /// The camera factor comes from the `Camera2d` with `VelloView` whose
 /// `RenderLayers` overlap the scene's. If several cameras match, the most
@@ -353,11 +382,11 @@ fn attach_default_scene(
 /// Keeps instances with [`VivecoStrokeWidthInPixels`] at a constant on-screen
 /// stroke width.
 ///
-/// The painted width scales with the instance entity, its scene, and the
-/// observing camera, so this divides the target width by all three factors.
-/// The component can live on the instance or on its scene; the instance's
-/// value wins. The width is written only when it changes, so a static zoom does
-/// not mark the instance changed every frame.
+/// The painted width scales with the instance's Vello transform, the instance
+/// entity, its scene, and the observing camera, so this divides the target
+/// width by all of those factors. The component can live on the instance or on
+/// its scene; the instance's value wins. The width is written only when it
+/// changes, so a static zoom does not mark the instance changed every frame.
 #[allow(clippy::type_complexity)]
 fn normalize_viveco_stroke_widths(
     mut instances: Query<(
@@ -412,8 +441,9 @@ fn normalize_viveco_stroke_widths(
             pixels_per_unit = 1.0;
         }
 
+        let instance_scale = max_scale(transform) * max_affine_scale(&instance.transform);
         let world_scale =
-            (max_scale(transform) * max_scale(scene_transform) * pixels_per_unit).max(f32::EPSILON);
+            (instance_scale * max_scale(scene_transform) * pixels_per_unit).max(f32::EPSILON);
         let width = pixels.width / world_scale;
         if instance.stroke_width != width {
             instance.stroke_width = width;
@@ -442,6 +472,22 @@ fn camera_pixels_per_unit(
 fn max_scale(transform: &GlobalTransform) -> f32 {
     let scale = transform.scale();
     scale.x.abs().max(scale.y.abs())
+}
+
+/// The largest factor by which an affine stretches geometry.
+///
+/// This is the largest singular value of the affine's linear part, so it is
+/// the scale that strokes painted through it inherit even when the transform
+/// combines rotation, shear, and non-uniform scale.
+fn max_affine_scale(affine: &Affine) -> f32 {
+    let [a, b, c, d, ..] = affine.as_coeffs();
+    // The singular values of `A` are the square roots of the eigenvalues of
+    // `AᵀA`, whose 2x2 entries are gathered here.
+    let (m00, m01, m11) = (a * a + c * c, a * b + c * d, b * b + d * d);
+    let half_trace = (m00 + m11) * 0.5;
+    let half_diff = (m00 - m11) * 0.5;
+    let largest_eigenvalue = half_trace + half_diff.hypot(m01);
+    largest_eigenvalue.max(0.0).sqrt() as f32
 }
 
 /// Empties every scene's fragment list at the start of the frame.
@@ -476,8 +522,11 @@ fn render_viveco_instances(
             continue;
         };
 
+        // The instance's own affine applies in the asset's local space, before
+        // the entity's transform places it in the scene.
+        let placement = scene_affine(transform) * instance.transform;
         let posed = SceneInstance::animated(asset, &instance.mixer)
-            .with_transform(scene_affine(transform))
+            .with_transform(placement)
             .with_stroke_width(instance.stroke_width);
         let mut builder = SceneBuilder::new();
         builder.add_instance(&posed);
@@ -1004,6 +1053,72 @@ mod tests {
         app.update();
 
         assert_eq!(scene_path_counts(&mut app), vec![0]);
+    }
+
+    #[test]
+    fn the_instance_transform_is_applied_before_the_entity_transform() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let asset = add_asset(&mut app);
+        app.world_mut().spawn((
+            VivecoInstance::new(asset, Vec::new()).with_transform(Affine::translate((2.0, 3.0))),
+            VivecoSceneOf(scene),
+            Transform::from_xyz(10.0, 5.0, 0.0),
+            InheritedVisibility::VISIBLE,
+        ));
+
+        app.update();
+
+        // The entity sits at scene-space (10, -5); the asset's local +3 in
+        // Y-down space moves it down to -2.
+        let mut query = app.world_mut().query::<&VelloScene2d>();
+        let vello = query.get(app.world(), scene).unwrap();
+        assert!(
+            vello
+                .encoding()
+                .transforms
+                .iter()
+                .any(|transform| transform.translation == [12.0, -2.0]),
+            "expected the instance transform composed under the entity transform"
+        );
+    }
+
+    #[test]
+    fn stroke_width_in_pixels_compensates_the_instance_transform_scale() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let asset = add_asset(&mut app);
+        let entity = app
+            .world_mut()
+            .spawn((
+                VivecoInstance::new(asset, Vec::new()).with_transform(Affine::scale(2.0)),
+                VivecoSceneOf(scene),
+                VivecoStrokeWidthInPixels::new(4.0),
+                Transform::default().with_scale(Vec3::splat(2.0)),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+
+        app.update();
+
+        // 4 / (2 from the affine * 2 from the entity).
+        let instance = app.world().get::<VivecoInstance>(entity).unwrap();
+        assert!((instance.stroke_width - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn max_affine_scale_measures_rotation_scale_and_shear() {
+        assert!((max_affine_scale(&Affine::IDENTITY) - 1.0).abs() < 1e-6);
+        assert!((max_affine_scale(&Affine::FLIP_X) - 1.0).abs() < 1e-6);
+        assert!((max_affine_scale(&Affine::scale(3.0)) - 3.0).abs() < 1e-6);
+
+        let scaled_rotation = Affine::rotate(std::f64::consts::FRAC_PI_4) * Affine::scale(2.0);
+        assert!((max_affine_scale(&scaled_rotation) - 2.0).abs() < 1e-6);
+
+        // A unit shear has AᵀA = [[1, 1], [1, 2]], whose largest eigenvalue
+        // is (3 + sqrt(5)) / 2.
+        let expected = ((3.0 + 5.0_f64.sqrt()) / 2.0).sqrt() as f32;
+        assert!((max_affine_scale(&Affine::skew(1.0, 0.0)) - expected).abs() < 1e-6);
     }
 
     /// `bevy_vello` negates the off-diagonal terms of a scene entity's

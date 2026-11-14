@@ -59,6 +59,24 @@
 //! camera or render layer); a scene's own transform applies to all its
 //! contents.
 //!
+//! Besides the Bevy transform, an instance carries
+//! [`VivecoInstance::transform`], a Vello [`Affine`](vello::kurbo::Affine)
+//! applied to the asset first, in the asset's local Y-down space. Use it to
+//! mirror or skew artwork, or to offset it without adding an entity:
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use viveco::{Asset, VivecoInstance, VivecoSceneOf};
+//! # use vello::kurbo::Affine;
+//! # fn spawn(commands: &mut Commands, asset: Handle<Asset>, scene: Entity) {
+//! commands.spawn((
+//!     VivecoInstance::from_animation(asset, 0)
+//!         .with_transform(Affine::scale(-1.0)), // mirror horizontally
+//!     VivecoSceneOf(scene),
+//! ));
+//! # }
+//! ```
+//!
 //! # Custom scene content
 //!
 //! A [`VivecoScene`] is filled every frame from [`SceneFragment`]s. To draw
@@ -134,13 +152,13 @@
 //! # Stroke width
 //!
 //! [`VivecoInstance::stroke_width`] is explicit, in the asset's local units,
-//! and painted like the rest of the geometry: scaling the instance entity, its
-//! scene, or the camera scales the stroke along with the artwork. To keep a
-//! constant on-screen width instead, add [`VivecoStrokeWidthInPixels`] to the
-//! instance or to its scene. The plugin then rewrites each affected
-//! instance's `stroke_width` to compensate for the instance's, the scene's,
-//! and the observing camera's scales (a component on the instance overrides
-//! the scene's):
+//! and painted like the rest of the geometry: scaling the instance's transform,
+//! the instance entity, its scene, or the camera scales the stroke along with
+//! the artwork. To keep a constant on-screen width instead, add
+//! [`VivecoStrokeWidthInPixels`] to the instance or to its scene. The plugin
+//! then rewrites each affected instance's `stroke_width` to compensate for the
+//! instance's transform, entity, and scene scales, and the observing camera's
+//! (a component on the instance overrides the scene's):
 //!
 //! ```no_run
 //! # use bevy::prelude::*;

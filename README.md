@@ -179,6 +179,15 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 The mixer sets which animation(s) are active and how they are blended.
 Animations do not advance automatically; each animation's `t` must be driven forward each frame.
 
+The graphics can be transformed through two separate mechanisms.
+The first way is by adding the Bevy `Transform` component.
+This transform is generally used to dynamically place the entity within a scene,
+e.g. as the result of a physics system.
+The second way is by using the `transform` field on `VivecoInstance` (or `.with_transform()`).
+This transform is meant to scale the artwork to game units, or position it with respect to the entity's logical center.
+It is generally static (although varying it is certainly allowed.)
+Note that the type of this transform is a Vello `Affine` and operates in the asset's Y-down coordinate space.
+
 `VivecoInstance::stroke_width` is in the asset's local units and scales with the
 instance, its scene, and the camera.
 If you want to specify a stroke width in pixels, add `VivecoStrokeWidthInPixels::new(2.0)`.
