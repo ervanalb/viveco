@@ -4,7 +4,9 @@
 //! reads an asset, optionally keeps only some top-level shapes, optionally
 //! moves the origin and applies a scale, rotation, and translation, and writes
 //! the result. The `info` mode prints a high-level summary instead: the shape
-//! and bone hierarchies, the animations, and the artwork's bounds at rest.
+//! and bone hierarchies (with each shape's path bounds), the animations, and
+//! the artwork's bounds at rest. Use it to inspect an asset rather than
+//! converting the file to JSON.
 //!
 //! The input kind is detected from the file's contents (with a little help
 //! from its extension): an SVG document is imported as art, and a Viveco asset
@@ -397,12 +399,23 @@ fn info_text(path: &Path, asset: &Asset) -> String {
 }
 
 /// Writes a shape hierarchy, one shape per line.
+///
+/// Each line lists the shape's paths' bounds, which are the geometry the shape
+/// fills, strokes, and clips its children against.
 fn write_shapes(out: &mut String, shapes: &[Shape], depth: usize) {
     let indent = "  ".repeat(depth);
     for shape in shapes {
+        let bounds = match shape.path_bounds() {
+            Some(bounds) => format!(
+                ", bounds {} to {}",
+                display_point(bounds.min),
+                display_point(bounds.max)
+            ),
+            None => String::new(),
+        };
         let _ = writeln!(
             out,
-            "{indent}\"{}\" ({}, {})",
+            "{indent}\"{}\" ({}, {}{bounds})",
             display_name(&shape.name),
             paths_label(shape.paths.len()),
             children_label(shape.children.len())
@@ -460,7 +473,9 @@ fn usage() {
     eprintln!();
     eprintln!("Without a mode, or with `convert`, reads a Viveco asset or SVG document");
     eprintln!("and writes it as a Viveco asset. `info` prints a summary of a file instead");
-    eprintln!("without writing anything.");
+    eprintln!("without writing anything: the shape and bone hierarchies, each shape's");
+    eprintln!("path bounds, the animations, and the artwork's rest bounds. Use it to");
+    eprintln!("inspect an asset; converting to JSON only changes its encoding.");
     eprintln!();
     eprintln!("The conversion pipeline is: read (importing an SVG), keep only the named");
     eprintln!("top-level shapes, apply the origin and transform, then write. The input kind");
@@ -653,7 +668,10 @@ mod tests {
         assert!(text.contains("shapes: 1 top-level, 2 total"), "{text}");
         assert!(text.contains("bones: 2"), "{text}");
         assert!(text.contains("animations: 1"), "{text}");
-        assert!(text.contains("\"Body\" (1 path, 1 child)"), "{text}");
+        assert!(
+            text.contains("\"Body\" (1 path, 1 child, bounds (0, 0) to (10, 20))"),
+            "{text}"
+        );
         assert!(text.contains("  \"Head\" (0 paths, 0 children)"), "{text}");
         assert!(text.contains("  \"Root\""), "{text}");
         assert!(text.contains("    \"Arm\""), "{text}");

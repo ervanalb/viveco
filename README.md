@@ -42,10 +42,13 @@ cargo install --path viveco-editor
 
 Viveco files can be binary or JSON. Binary is recommended for smaller file sizes and quicker loading.
 
-The `viveco` command-line tool can convert files from binary to JSON and vice-versa,
-as well as converting SVG files to non-animated viveco. It can also inspect a file, keep
-only selected top-level objects, apply basic transforms, and move an artwork's origin to
-a chosen bounds anchor.
+Use `viveco info` to inspect an asset: it prints the shape and bone hierarchies
+(with each shape's path bounds), the animations, and the artwork's rest bounds.
+Converting to JSON changes the encoding; it is not the way to inspect geometry.
+
+The `viveco` command-line tool can also convert SVG files to non-animated viveco,
+keep only selected top-level objects, apply basic transforms, and move an
+artwork's origin to a chosen bounds anchor.
 
 ```sh
 # Installs the `viveco` executable
@@ -62,10 +65,11 @@ viveco art.svg art.viveco
 # Convert one named top-level SVG group, e.g. an Inkscape layer
 viveco --group Front art.svg front.viveco
 
-# Binary -> JSON
+# Change the encoding (binary -> JSON)
 viveco art.viveco art.json
 
-# Print the shape/bone hierarchies, animations, and rest bounds
+# Inspect: shape/bone hierarchies with each shape's path bounds, animations,
+# and the artwork's rest bounds
 viveco info art.viveco
 
 # Keep only some top-level objects (repeatable; commas separate names)
@@ -80,17 +84,11 @@ viveco --origin bottom-left art.viveco reorigined.viveco
 ```
 
 A conversion runs in four steps: read the file (importing an SVG if the input is one),
-keep only the named top-level shapes, apply the origin and then the
+keep only the named top-level shapes, apply the origin, apply the
 `--translate`/`--rotate`/`--scale` transform, then write the output. Rotation and
-scaling act about the origin. The transform moves geometry and the skeleton and
+scaling act about the (possibly altered) origin. The transform moves geometry and the skeleton and
 rewrites bone translation curves so animations rotate and scale consistently. Z order,
 bone rotation and scale curves, animation timings, and weights are left alone.
-
-`--origin` moves the whole asset, skeleton included, so the chosen anchor of the
-*filtered* artwork's rest bounds becomes `(0, 0)`. The anchors are `top-left`, `top`,
-`top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, and `bottom-right`.
-When combined with a transform, the origin is applied first, so `--origin center`
-rotates and scales about the artwork's center.
 
 ## The Format
 

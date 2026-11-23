@@ -59,7 +59,7 @@ pub use shape::*;
 
 #[cfg(feature = "bevy")]
 pub use self::bevy::{
-    ParallaxLayer, SceneFragment, VivecoDefaultScene, VivecoInstance, VivecoLoader, VivecoPlugin,
-    VivecoScene, VivecoSceneMembers, VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels,
-    apply_parallax, scene_affine,
+    ParallaxLayer, SceneFragment, ShapeSelector, VivecoChildOf, VivecoChildren, VivecoDefaultScene,
+    VivecoInstance, VivecoLoader, VivecoPlugin, VivecoScene, VivecoSceneMembers, VivecoSceneOf,
+    VivecoSceneSystems, VivecoStrokeWidthInPixels, apply_parallax, scene_affine,
 };

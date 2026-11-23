@@ -385,6 +385,23 @@ impl Asset {
     }
 }
 
+impl Shape {
+    /// The axis-aligned bounds of this shape's own paths, excluding its
+    /// children.
+    ///
+    /// Bézier control points are included, so the result is a conservative
+    /// bound rather than the exact extent of the curves, matching
+    /// [`Asset::bounds`]. This is the geometry the shape fills, strokes, and
+    /// clips its children against. Returns `None` when the shape has no paths.
+    pub fn path_bounds(&self) -> Option<Bounds> {
+        let mut accumulator = BoundsAccumulator::default();
+        for path in &self.paths {
+            accumulator.add_path(path);
+        }
+        accumulator.finish()
+    }
+}
+
 /// An axis-aligned rectangle in asset space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {

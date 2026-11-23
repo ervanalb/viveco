@@ -58,3 +58,8 @@ required-features = ["bevy"]
 name = "planet"
 path = "examples/planet.rs"
 required-features = ["bevy"]
+
+[[example]]
+name = "tv"
+path = "examples/tv.rs"
+required-features = ["bevy"]

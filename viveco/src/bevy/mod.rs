@@ -149,6 +149,32 @@
 //! and with no marked scene unlinked instances are ignored. Removing the
 //! default scene unlinks its members, which can then join a new default.
 //!
+//! # Children
+//!
+//! [`VivecoChildOf`] draws an instance inside one shape of another instance,
+//! instead of into a scene of its own. The child keeps its own asset and mixer,
+//! so it animates independently, and it inherits the host shape's clip layer
+//! and Z order. The host shape is selected by index or by name:
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use viveco::{Asset, VivecoChildOf, VivecoDefaultScene, VivecoInstance, VivecoScene};
+//! # fn spawn(commands: &mut Commands, tv: Handle<Asset>, animation: Handle<Asset>) {
+//! commands.spawn((VivecoScene::default(), VivecoDefaultScene));
+//! let tv_entity = commands.spawn(VivecoInstance::from_asset(tv)).id();
+//!
+//! // Draw the animation inside the TV's shape named "Screen".
+//! commands.spawn((
+//!     VivecoInstance::from_animation(animation, 0),
+//!     VivecoChildOf::new(tv_entity, "Screen"),
+//! ));
+//! # }
+//! ```
+//!
+//! A child's [`VivecoInstance::transform`] places it in the host document's
+//! space; no other placement or fitting is applied. A child should not carry
+//! [`VivecoSceneOf`], and children are drawn one level deep.
+//!
 //! # Stroke width
 //!
 //! [`VivecoInstance::stroke_width`] is explicit, in the asset's local units,
@@ -266,8 +292,9 @@ pub use crate::render::SceneFragment;
 pub use loader::VivecoLoader;
 pub use parallax::{ParallaxLayer, apply_parallax};
 pub use plugin::{
-    VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneMembers,
-    VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, scene_affine,
+    ShapeSelector, VivecoChildOf, VivecoChildren, VivecoDefaultScene, VivecoInstance, VivecoPlugin,
+    VivecoScene, VivecoSceneMembers, VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels,
+    scene_affine,
 };
 
 /// The Bevy integration's vocabulary.
@@ -277,8 +304,8 @@ pub use plugin::{
 /// `viveco` directly.
 pub mod prelude {
     pub use super::{
-        ParallaxLayer, SceneFragment, VivecoDefaultScene, VivecoInstance, VivecoPlugin,
-        VivecoScene, VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels, apply_parallax,
-        scene_affine,
+        ParallaxLayer, SceneFragment, ShapeSelector, VivecoChildOf, VivecoChildren,
+        VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf,
+        VivecoSceneSystems, VivecoStrokeWidthInPixels, apply_parallax, scene_affine,
     };
 }

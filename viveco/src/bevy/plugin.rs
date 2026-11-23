@@ -10,8 +10,8 @@ use ::bevy_vello::prelude::{VelloScene2d, VelloView};
 use ::vello::Scene;
 use ::vello::kurbo::Affine;
 
-use crate::AnimationInstance;
-use crate::render::{SceneBuilder, SceneFragment, SceneInstance};
+use crate::render::{SceneBuilder, SceneFragment, SceneInstance, ShapeAttachment};
+use crate::{AnimationInstance, ShapeIndex};
 
 use super::VivecoLoader;
 
@@ -25,6 +25,10 @@ use super::VivecoLoader;
 /// otherwise it is not rendered. [`VivecoPlugin`] never spawns a scene, so
 /// spawn a [`VivecoScene`] yourself and link the instance to it (or mark it as
 /// the default).
+///
+/// Add [`VivecoChildOf`] to draw the instance inside a shape of another
+/// instance instead of into a scene of its own. A child is drawn through its
+/// host and does not need [`VivecoSceneOf`].
 ///
 /// ```
 /// # use bevy::prelude::*;
@@ -149,7 +153,9 @@ impl VivecoInstance {
 /// example, one per camera or render layer).
 ///
 /// An instance without this component joins the scene marked
-/// [`VivecoDefaultScene`], if one exists; otherwise it is not rendered.
+/// [`VivecoDefaultScene`], if one exists; otherwise it is not rendered. A
+/// [`VivecoChildOf`] child is drawn through its host and does not need this
+/// component.
 ///
 /// This is a Bevy relationship: despawning the scene removes the component,
 /// and the scene's [`VivecoSceneMembers`] stays up to date automatically.
@@ -164,6 +170,133 @@ pub struct VivecoSceneOf(pub Entity);
 #[derive(Component, Default, Debug)]
 #[relationship_target(relationship = VivecoSceneOf)]
 pub struct VivecoSceneMembers(Vec<Entity>);
+
+/// Draws a [`VivecoInstance`]'s artwork inside one shape of another instance.
+///
+/// A child is not drawn as a top-level instance. Instead, the host's producer
+/// paints it while drawing the host shape selected by
+/// [`shape`](Self::shape): the child inherits that shape's clip layer and is
+/// ordered among the shape's children by [`z`](Self::z). Its
+/// [`VivecoInstance::transform`] places it in the host document's coordinate
+/// space, so no other placement is applied. The child entity's Bevy
+/// [`Transform`] is ignored: the child has no independent place in the scene,
+/// so move it with [`VivecoInstance::transform`] instead.
+///
+/// Spawn the child with a [`VivecoInstance`] beside this component. The child
+/// keeps its own asset and
+/// [`mixer`](VivecoInstance::mixer), so it animates independently of the host:
+///
+/// ```
+/// # use bevy::prelude::*;
+/// # use viveco::{Asset, VivecoChildOf, VivecoInstance, VivecoScene, VivecoSceneOf};
+/// # fn spawn(commands: &mut Commands, tv: Handle<Asset>, animation: Handle<Asset>) {
+/// let scene = commands.spawn(VivecoScene::default()).id();
+/// let tv_entity = commands
+///     .spawn((VivecoInstance::from_asset(tv), VivecoSceneOf(scene)))
+///     .id();
+///
+/// // Draw the animation inside the TV's shape named "Screen".
+/// commands.spawn((
+///     VivecoInstance::from_animation(animation, 0),
+///     VivecoChildOf::new(tv_entity, "Screen"),
+/// ));
+/// # }
+/// ```
+///
+/// A child should not also carry [`VivecoSceneOf`]; that component would name a
+/// scene the child does not need. Children are drawn one level deep, so a
+/// child's own [`VivecoChildren`] is ignored.
+///
+/// This is a Bevy relationship: the host's [`VivecoChildren`] stays up to date
+/// automatically, and despawning the host unlinks its children without
+/// despawning them.
+#[derive(Component, Clone, Debug, PartialEq)]
+#[relationship(relationship_target = VivecoChildren)]
+pub struct VivecoChildOf {
+    /// The instance whose asset contains the shape this child is drawn into.
+    #[relationship]
+    pub host: Entity,
+    /// The shape of the host's asset to draw inside.
+    pub shape: ShapeSelector,
+    /// Sort key among the host shape's children and other children.
+    ///
+    /// Equal values paint the host shape's own children first, then children in
+    /// the order they were added to the host.
+    pub z: f32,
+}
+
+impl VivecoChildOf {
+    /// Draws this entity's instance inside the shape chosen by `shape`.
+    ///
+    /// `shape` accepts a [`ShapeIndex`] or a shape name.
+    pub fn new(host: Entity, shape: impl Into<ShapeSelector>) -> Self {
+        Self {
+            host,
+            shape: shape.into(),
+            z: 0.0,
+        }
+    }
+
+    /// Sets the paint order among the host shape's children.
+    pub fn with_z(mut self, z: f32) -> Self {
+        self.z = z;
+        self
+    }
+}
+
+/// The [`VivecoChildOf`] children of a host instance.
+///
+/// Maintained automatically by [`VivecoChildOf`]. The plugin reads it to find
+/// the artwork it draws into each host shape, and user systems can inspect it.
+#[derive(Component, Default, Debug)]
+#[relationship_target(relationship = VivecoChildOf)]
+pub struct VivecoChildren(Vec<Entity>);
+
+impl VivecoChildren {
+    /// The child entities, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.0.iter().copied()
+    }
+}
+
+/// Identifies one shape of a host asset for [`VivecoChildOf`].
+///
+/// Both variants are resolved against the host asset when it is rendered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShapeSelector {
+    /// A depth-first pre-order shape index.
+    Index(ShapeIndex),
+    /// The first shape with this name, as found by
+    /// [`Asset::shape_index_by_name`](crate::Asset::shape_index_by_name).
+    ///
+    /// Names are stable when shapes are reordered, so the constants generated
+    /// by [`codegen`](crate::codegen) are the simplest way to name a shape.
+    Name(String),
+}
+
+impl Default for ShapeSelector {
+    fn default() -> Self {
+        Self::Index(0)
+    }
+}
+
+impl From<ShapeIndex> for ShapeSelector {
+    fn from(index: ShapeIndex) -> Self {
+        Self::Index(index)
+    }
+}
+
+impl From<&str> for ShapeSelector {
+    fn from(name: &str) -> Self {
+        Self::Name(name.to_owned())
+    }
+}
+
+impl From<String> for ShapeSelector {
+    fn from(name: String) -> Self {
+        Self::Name(name)
+    }
+}
 
 /// An entity that carries one Vello scene.
 ///
@@ -309,7 +442,8 @@ impl Default for VivecoStrokeWidthInPixels {
 /// - clears every [`VivecoScene`] each frame in
 ///   [`VivecoSceneSystems::Clear`],
 /// - contributes the artwork of every [`VivecoInstance`] to its scene (or the
-///   [`VivecoDefaultScene`]) in [`VivecoSceneSystems::Build`], and
+///   [`VivecoDefaultScene`]) in [`VivecoSceneSystems::Build`], including any
+///   [`VivecoChildOf`] children inside their host shapes, and
 /// - sorts the collected fragments by Z and paints them into the scene's
 ///   [`VelloScene2d`] in [`VivecoSceneSystems::Finalize`].
 ///
@@ -363,11 +497,20 @@ impl Plugin for VivecoPlugin {
 /// matches nothing. The system returns immediately when no scene is marked, so
 /// its steady-state cost is an empty query scan. `chain` inserts a
 /// deferred-command sync point before the scene update, so a newly linked
-/// instance renders in the same frame.
+/// instance renders in the same frame. [`VivecoChildOf`] children are skipped:
+/// they are drawn through their host, not into a scene of their own.
+#[allow(clippy::type_complexity)]
 fn attach_default_scene(
     mut commands: Commands,
     defaults: Query<Entity, With<VivecoDefaultScene>>,
-    unlinked: Query<Entity, (With<VivecoInstance>, Without<VivecoSceneOf>)>,
+    unlinked: Query<
+        Entity,
+        (
+            With<VivecoInstance>,
+            Without<VivecoSceneOf>,
+            Without<VivecoChildOf>,
+        ),
+    >,
 ) {
     // Pick the lowest index so the choice is deterministic if more than one
     // scene is marked. (`Entity`'s own ordering is not index order.)
@@ -387,6 +530,11 @@ fn attach_default_scene(
 /// width by all of those factors. The component can live on the instance or on
 /// its scene; the instance's value wins. The width is written only when it
 /// changes, so a static zoom does not mark the instance changed every frame.
+///
+/// Children are compensated through the same host placement they are painted
+/// with, so a child of a scaled instance also keeps its width on screen. A
+/// child uses its own component when it has one, and otherwise inherits its
+/// host scene's.
 #[allow(clippy::type_complexity)]
 fn normalize_viveco_stroke_widths(
     mut instances: Query<(
@@ -394,7 +542,12 @@ fn normalize_viveco_stroke_widths(
         &VivecoSceneOf,
         &GlobalTransform,
         Option<&VivecoStrokeWidthInPixels>,
+        Option<&VivecoChildren>,
     )>,
+    mut children: Query<
+        (&mut VivecoInstance, Option<&VivecoStrokeWidthInPixels>),
+        (With<VivecoChildOf>, Without<VivecoSceneOf>),
+    >,
     scenes: Query<
         (
             &GlobalTransform,
@@ -413,11 +566,8 @@ fn normalize_viveco_stroke_widths(
         (With<Camera2d>, With<VelloView>),
     >,
 ) {
-    for (mut instance, scene_of, transform, pixels) in &mut instances {
+    for (mut instance, scene_of, transform, pixels, host_children) in &mut instances {
         let Ok((scene_transform, scene_layers, scene_pixels)) = scenes.get(scene_of.0) else {
-            continue;
-        };
-        let Some(pixels) = pixels.or(scene_pixels) else {
             continue;
         };
 
@@ -442,11 +592,32 @@ fn normalize_viveco_stroke_widths(
         }
 
         let instance_scale = max_scale(transform) * max_affine_scale(&instance.transform);
-        let world_scale =
-            (instance_scale * max_scale(scene_transform) * pixels_per_unit).max(f32::EPSILON);
-        let width = pixels.width / world_scale;
-        if instance.stroke_width != width {
-            instance.stroke_width = width;
+        let scene_scale = max_scale(scene_transform);
+
+        if let Some(pixels) = pixels.or(scene_pixels) {
+            let world_scale = (instance_scale * scene_scale * pixels_per_unit).max(f32::EPSILON);
+            let width = pixels.width / world_scale;
+            if instance.stroke_width != width {
+                instance.stroke_width = width;
+            }
+        }
+
+        let Some(host_children) = host_children else {
+            continue;
+        };
+        for child_entity in host_children.iter() {
+            let Ok((mut child, child_pixels)) = children.get_mut(child_entity) else {
+                continue;
+            };
+            let Some(child_pixels) = child_pixels.or(scene_pixels) else {
+                continue;
+            };
+            let child_scale = instance_scale * max_affine_scale(&child.transform);
+            let world_scale = (child_scale * scene_scale * pixels_per_unit).max(f32::EPSILON);
+            let width = child_pixels.width / world_scale;
+            if child.stroke_width != width {
+                child.stroke_width = width;
+            }
         }
     }
 }
@@ -500,18 +671,26 @@ fn clear_viveco_scenes(mut scenes: Query<&mut VivecoScene>) {
 /// Contributes the artwork of every linked [`VivecoInstance`] to its scene.
 ///
 /// Each top-level shape becomes one fragment carrying that shape's Z, so
-/// instance artwork interleaves with fragments from other producers.
+/// instance artwork interleaves with fragments from other producers. Any
+/// [`VivecoChildOf`] children are attached to their host shapes, so they are
+/// painted inside the host's fragment with the host shape's clip.
+#[allow(clippy::type_complexity)]
 fn render_viveco_instances(
     mut scenes: Query<&mut VivecoScene>,
-    instances: Query<(
-        &VivecoInstance,
-        &VivecoSceneOf,
-        &GlobalTransform,
-        &InheritedVisibility,
-    )>,
+    instances: Query<
+        (
+            &VivecoInstance,
+            &VivecoSceneOf,
+            &GlobalTransform,
+            &InheritedVisibility,
+            Option<&VivecoChildren>,
+        ),
+        Without<VivecoChildOf>,
+    >,
+    children: Query<(&VivecoInstance, &VivecoChildOf, &InheritedVisibility)>,
     assets: Res<Assets<crate::Asset>>,
 ) {
-    for (instance, scene_of, transform, visibility) in &instances {
+    for (instance, scene_of, transform, visibility, host_children) in &instances {
         if !visibility.get() || max_scale(transform) <= f32::EPSILON {
             continue;
         }
@@ -530,7 +709,45 @@ fn render_viveco_instances(
             .with_stroke_width(instance.stroke_width);
         let mut builder = SceneBuilder::new();
         builder.add_instance(&posed);
+
+        if let Some(host_children) = host_children {
+            for child_entity in host_children.iter() {
+                let Ok((child, child_of, child_visibility)) = children.get(child_entity) else {
+                    continue;
+                };
+                if !child_visibility.get() {
+                    continue;
+                }
+                let Some(child_asset) = assets.get(&child.asset) else {
+                    continue;
+                };
+                let Some(shape) = resolve_shape(asset, &child_of.shape) else {
+                    ::bevy::log::warn!(
+                        "VivecoChildOf on {child_entity:?} names a shape that does not exist \
+                         in its host's asset; the child is not drawn"
+                    );
+                    continue;
+                };
+                let child_posed = SceneInstance::animated(child_asset, &child.mixer)
+                    .with_transform(child.transform)
+                    .with_stroke_width(child.stroke_width);
+                builder.add_attachment(ShapeAttachment {
+                    shape,
+                    z: child_of.z,
+                    instance: child_posed,
+                });
+            }
+        }
+
         scene.push_fragments(builder.into_fragments());
+    }
+}
+
+/// Resolves a [`ShapeSelector`] against a loaded asset.
+fn resolve_shape(asset: &crate::Asset, selector: &ShapeSelector) -> Option<ShapeIndex> {
+    match selector {
+        ShapeSelector::Index(index) => (*index < asset.shape_count()).then_some(*index),
+        ShapeSelector::Name(name) => asset.shape_index_by_name(name),
     }
 }
 
@@ -1182,5 +1399,153 @@ mod tests {
                 "{actual} != {expected} (all: {coeffs:?})"
             );
         }
+    }
+
+    fn add_named_asset(app: &mut App, name: &str) -> Handle<crate::Asset> {
+        let mut shape = filled_shape();
+        shape.name = name.to_owned();
+        app.world_mut()
+            .resource_mut::<Assets<crate::Asset>>()
+            .add(crate::Asset {
+                shapes: vec![shape],
+                ..Default::default()
+            })
+    }
+
+    fn spawn_child(app: &mut App, asset: Handle<crate::Asset>, child_of: VivecoChildOf) -> Entity {
+        app.world_mut()
+            .spawn((
+                VivecoInstance::new(asset, Vec::new()),
+                child_of,
+                Transform::default(),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id()
+    }
+
+    fn scene_clip_count(app: &mut App, entity: Entity) -> u32 {
+        let mut query = app.world_mut().query::<&VelloScene2d>();
+        query
+            .get(app.world(), entity)
+            .map_or(0, |scene| scene.encoding().n_clips)
+    }
+
+    #[test]
+    fn a_child_is_drawn_inside_its_host_shape() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let host_asset = add_asset(&mut app);
+        let host = spawn_instance(&mut app, scene, host_asset, Transform::default());
+        let child_asset = add_asset(&mut app);
+        spawn_child(&mut app, child_asset, VivecoChildOf::new(host, 0usize));
+
+        app.update();
+
+        // The host and child fills, plus the clip layer's bookkeeping paths.
+        assert_eq!(scene_path_count(&mut app, scene), 4);
+        // The child is painted inside the host shape's clip layer.
+        assert_eq!(scene_clip_count(&mut app, scene), 2);
+    }
+
+    #[test]
+    fn a_child_resolves_its_host_shape_by_name() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let host_asset = add_named_asset(&mut app, "Screen");
+        let host = spawn_instance(&mut app, scene, host_asset, Transform::default());
+        let child_asset = add_asset(&mut app);
+        spawn_child(&mut app, child_asset, VivecoChildOf::new(host, "Screen"));
+
+        app.update();
+
+        assert_eq!(scene_path_count(&mut app, scene), 4);
+    }
+
+    #[test]
+    fn a_child_of_a_missing_shape_is_not_drawn() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let host_asset = add_asset(&mut app);
+        let host = spawn_instance(&mut app, scene, host_asset, Transform::default());
+        let child_asset = add_asset(&mut app);
+        spawn_child(&mut app, child_asset, VivecoChildOf::new(host, "Missing"));
+
+        app.update();
+
+        assert_eq!(scene_path_count(&mut app, scene), 1);
+    }
+
+    #[test]
+    fn a_child_is_not_drawn_as_a_top_level_instance() {
+        let mut app = test_app();
+        let default = app
+            .world_mut()
+            .spawn((VivecoScene::default(), VivecoDefaultScene))
+            .id();
+        let host_scene = spawn_scene(&mut app);
+        let host_asset = add_asset(&mut app);
+        let host = spawn_instance(&mut app, host_scene, host_asset, Transform::default());
+        let child_asset = add_asset(&mut app);
+        let child = spawn_child(&mut app, child_asset, VivecoChildOf::new(host, 0usize));
+
+        app.update();
+
+        // The child draws into the host's scene only and is not linked to the
+        // default scene.
+        assert_eq!(scene_path_count(&mut app, default), 0);
+        assert_eq!(scene_path_count(&mut app, host_scene), 4);
+        assert!(app.world().get::<VivecoSceneOf>(child).is_none());
+    }
+
+    #[test]
+    fn an_invisible_host_hides_its_children() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let host_asset = add_asset(&mut app);
+        let host = app
+            .world_mut()
+            .spawn((
+                VivecoInstance::new(host_asset, Vec::new()),
+                VivecoSceneOf(scene),
+                Transform::default(),
+                InheritedVisibility::HIDDEN,
+            ))
+            .id();
+        let child_asset = add_asset(&mut app);
+        spawn_child(&mut app, child_asset, VivecoChildOf::new(host, 0usize));
+
+        app.update();
+
+        assert_eq!(scene_path_count(&mut app, scene), 0);
+    }
+
+    #[test]
+    fn a_pixel_width_child_compensates_the_host_scale() {
+        let mut app = test_app();
+        let scene = spawn_scene(&mut app);
+        let host_asset = add_asset(&mut app);
+        let host = spawn_instance(
+            &mut app,
+            scene,
+            host_asset,
+            Transform::default().with_scale(Vec3::splat(2.0)),
+        );
+        let child_asset = add_asset(&mut app);
+        let child = app
+            .world_mut()
+            .spawn((
+                VivecoInstance::new(child_asset, Vec::new()).with_transform(Affine::scale(2.0)),
+                VivecoChildOf::new(host, 0usize),
+                VivecoStrokeWidthInPixels::new(4.0),
+                Transform::default(),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+
+        app.update();
+
+        // 4 / (the host entity's 2 * the child's affine 2).
+        let instance = app.world().get::<VivecoInstance>(child).unwrap();
+        assert!((instance.stroke_width - 1.0).abs() < 1e-6);
     }
 }
