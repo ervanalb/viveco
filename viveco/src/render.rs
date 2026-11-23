@@ -165,10 +165,13 @@ impl<'a> SceneInstance<'a> {
 
 /// A document painted inside one shape's clip layer.
 ///
-/// The attachment behaves like an extra child of `shape`: it is drawn after the
-/// shape's fill, clipped to the shape's paths when it has any, and ordered
-/// against the shape's children by [`z`](Self::z). Its
-/// [`SceneInstance::transform`] places it in the host document's coordinate
+/// The attachment behaves like extra top-level shapes of the host document: its
+/// [`shapes`](crate::Asset::shapes) are painted after the host shape's fill,
+/// clipped to the shape's paths when it has any, and ordered against the
+/// shape's children by their own Z. This is the same ordering [`SceneBuilder`]
+/// uses when several assets are added to one scene.
+///
+/// Its [`SceneInstance::transform`] places it in the host document's coordinate
 /// space, so the child is drawn in its own coordinates unless the caller moves
 /// it.
 ///
@@ -182,7 +185,6 @@ impl<'a> SceneInstance<'a> {
 ///     .add_instance(&host)
 ///     .add_attachment(ShapeAttachment {
 ///         shape: screen_shape_index,
-///         z: 0.0,
 ///         instance: SceneInstance::animated(&animation, &[(0, time, 1.0)])
 ///             .with_transform(Affine::translate((40.0, 30.0))),
 ///     });
@@ -190,11 +192,6 @@ impl<'a> SceneInstance<'a> {
 pub struct ShapeAttachment<'a> {
     /// Flat depth-first pre-order index of the host shape to draw inside.
     pub shape: ShapeIndex,
-    /// Sort key among the host shape's children and other attachments.
-    ///
-    /// Equal values paint the shape's own children first, in tree order, then
-    /// attachments in the order they were added.
-    pub z: f32,
     /// The child document, posed and placed in the host document's space.
     pub instance: SceneInstance<'a>,
 }
@@ -450,9 +447,15 @@ impl<'a> SceneBuilder<'a> {
 
     /// Stable sort by ascending effective Z, matching
     /// [`indices_in_paint_order`](crate::indices_in_paint_order).
+    ///
+    /// Attachments are also sorted by host shape index, so [`Shape::draw`] can
+    /// find the ones belonging to a shape with one binary search instead of
+    /// scanning every attachment. The sort is stable, so attachments sharing a
+    /// host shape keep the order they were added.
     fn sort(&mut self) {
         self.placements
             .sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
+        self.attachments.sort_by_key(|attachment| attachment.shape);
     }
 }
 
@@ -502,8 +505,10 @@ impl Shape {
     ///
     /// `flat_index` is this shape's depth-first pre-order index, which anchors
     /// the indices passed to its children for `shape_pose`. Attachments whose
-    /// [`shape`](ShapeAttachment::shape) matches this index are painted inside
-    /// this shape's clip layer, ordered with its children by Z.
+    /// [`shape`](ShapeAttachment::shape) matches this index contribute their
+    /// top-level shapes to this shape's clip layer, where they compete with its
+    /// children by Z. `attachments` must be sorted by shape index;
+    /// [`SceneBuilder`] maintains that order.
     #[allow(clippy::too_many_arguments)]
     fn draw(
         &self,
@@ -518,18 +523,9 @@ impl Shape {
         let path = self.to_bez_path_with_pose(world_pose);
         draw_fill(scene, &self.style, &path, transform);
 
-        // Children and attachments share one paint order inside this shape.
         let child_flat = child_flat_indices(self, flat_index);
-        let mut painters: Vec<(f32, Painter)> = Vec::with_capacity(self.children.len());
-        for (index, flat) in child_flat.iter().enumerate() {
-            let z = self.children[index].z + shape_pose.map_or(0.0, |pose| pose.get(*flat));
-            painters.push((z, Painter::Child(index)));
-        }
-        for (attachment_index, attachment) in attachments.iter().enumerate() {
-            if attachment.shape == flat_index {
-                painters.push((attachment.z, Painter::Attachment(attachment_index)));
-            }
-        }
+        let painters =
+            painters_in_paint_order(self, &child_flat, flat_index, shape_pose, attachments);
 
         if !painters.is_empty() {
             // Without paths there is nothing to clip against, so the children
@@ -538,7 +534,6 @@ impl Shape {
             if clipped {
                 scene.push_clip_layer(Fill::NonZero, transform, &path);
             }
-            painters.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
             for (_, painter) in painters {
                 match painter {
                     Painter::Child(index) => self.children[index].draw(
@@ -550,12 +545,20 @@ impl Shape {
                         child_flat[index],
                         attachments,
                     ),
-                    Painter::Attachment(index) => {
-                        let attachment = &attachments[index];
-                        draw_child_instance(
-                            &attachment.instance,
+                    Painter::AttachmentShape {
+                        attachment,
+                        top_level,
+                        flat_index,
+                    } => {
+                        let instance = &attachments[attachment].instance;
+                        instance.asset.shapes[top_level].draw(
                             scene,
-                            transform * attachment.instance.transform,
+                            instance.stroke_width,
+                            transform * instance.transform,
+                            instance.world_pose.as_ref(),
+                            instance.shape_pose.as_ref(),
+                            flat_index,
+                            &[],
                         );
                     }
                 }
@@ -623,45 +626,76 @@ fn child_flat_indices(shape: &Shape, flat_index: usize) -> Vec<usize> {
     indices
 }
 
-/// One painter queued inside a shape: a child shape or an attachment.
+/// One painter queued inside a shape.
 enum Painter {
     /// Index into the shape's children.
     Child(usize),
-    /// Index into the attachments passed to [`Shape::draw`].
-    Attachment(usize),
+    /// A top-level shape of an attachment.
+    AttachmentShape {
+        /// Index into the attachments passed to [`Shape::draw`].
+        attachment: usize,
+        /// Index into the attachment asset's top-level shapes.
+        top_level: usize,
+        /// The top-level shape's flat index in the attachment asset.
+        flat_index: usize,
+    },
 }
 
-/// Paints a child document's top-level shapes, sorted by Z, through
-/// `transform`.
+/// Collects the painters inside `shape` in paint order.
 ///
-/// Nested attachments are not drawn: attachments are one level deep.
-fn draw_child_instance(instance: &SceneInstance<'_>, scene: &mut Scene, transform: Affine) {
-    let world_pose = instance.world_pose.as_ref();
-    let shape_pose = instance.shape_pose.as_ref();
-    let mut indexed: Vec<(usize, &Shape)> = Vec::with_capacity(instance.asset.shapes.len());
-    let mut flat_index = 0;
-    for shape in &instance.asset.shapes {
-        indexed.push((flat_index, shape));
-        flat_index += shape.subtree_len();
+/// Child shapes and the top-level shapes of matching attachments share one Z
+/// space, matching [`SceneBuilder`]'s ordering across assets. The sort is
+/// stable, so equal Z keeps the children's tree order, then the attachments in
+/// the order they were added, each in asset order.
+///
+/// Nested attachments are not included: attachments are one level deep.
+fn painters_in_paint_order(
+    shape: &Shape,
+    child_flat: &[usize],
+    flat_index: usize,
+    shape_pose: Option<&ShapePose>,
+    attachments: &[ShapeAttachment<'_>],
+) -> Vec<(f32, Painter)> {
+    // Attachments are sorted by host shape index, so two binary searches find
+    // the ones drawn here instead of scanning all of them.
+    let first = attachments.partition_point(|attachment| attachment.shape < flat_index);
+    let past_last = attachments.partition_point(|attachment| attachment.shape <= flat_index);
+
+    let attachment_shapes: usize = attachments[first..past_last]
+        .iter()
+        .map(|attachment| attachment.instance.asset.shapes.len())
+        .sum();
+    let mut painters = Vec::with_capacity(shape.children.len() + attachment_shapes);
+
+    for (index, flat) in child_flat.iter().enumerate() {
+        let z = shape.children[index].z + shape_pose.map_or(0.0, |pose| pose.get(*flat));
+        painters.push((z, Painter::Child(index)));
     }
-    indexed.sort_by(|(a_flat, a), (b_flat, b)| {
-        let effective_z =
-            |flat: usize, shape: &Shape| shape.z + shape_pose.map_or(0.0, |pose| pose.get(flat));
-        effective_z(*a_flat, a)
-            .partial_cmp(&effective_z(*b_flat, b))
-            .unwrap_or(Ordering::Equal)
-    });
-    for (flat_index, shape) in indexed {
-        shape.draw(
-            scene,
-            instance.stroke_width,
-            transform,
-            world_pose,
-            shape_pose,
-            flat_index,
-            &[],
-        );
+
+    for (offset, attachment) in attachments[first..past_last].iter().enumerate() {
+        let attachment_index = first + offset;
+        let instance = &attachment.instance;
+        let mut flat_index = 0;
+        for (top_level, top_shape) in instance.asset.shapes.iter().enumerate() {
+            let z = top_shape.z
+                + instance
+                    .shape_pose
+                    .as_ref()
+                    .map_or(0.0, |pose| pose.get(flat_index));
+            painters.push((
+                z,
+                Painter::AttachmentShape {
+                    attachment: attachment_index,
+                    top_level,
+                    flat_index,
+                },
+            ));
+            flat_index += top_shape.subtree_len();
+        }
     }
+
+    painters.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    painters
 }
 
 fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath, transform: Affine) {
@@ -1249,7 +1283,6 @@ mod tests {
             .add_asset(&host, 1.0)
             .add_attachment(ShapeAttachment {
                 shape: 0,
-                z: 0.0,
                 instance: SceneInstance::new(&child).with_transform(Affine::translate((2.0, 3.0))),
             });
         builder.finish(&mut scene);
@@ -1292,7 +1325,6 @@ mod tests {
             .add_asset(&host, 1.0)
             .add_attachment(ShapeAttachment {
                 shape: 1,
-                z: 0.0,
                 instance: SceneInstance::new(&child),
             });
         builder.finish(&mut scene);
@@ -1324,7 +1356,6 @@ mod tests {
             .add_asset(&host, 1.0)
             .add_attachment(ShapeAttachment {
                 shape: 99,
-                z: 0.0,
                 instance: SceneInstance::new(&child),
             });
         builder.finish(&mut scene);
@@ -1334,39 +1365,62 @@ mod tests {
     }
 
     #[test]
-    fn an_attachment_sorts_with_the_hosts_children_by_z() {
-        // The host has no paths, so its interior is an unclipped group and the
-        // attachment shares the children's paint order.
-        let host = Asset {
-            shapes: vec![Shape {
-                children: vec![
-                    filled_rect([0.0, 0.0], [1.0, 1.0]),
-                    filled_rect([3.0, 3.0], [4.0, 4.0]),
-                ],
-                ..Default::default()
-            }],
+    fn an_attachments_top_level_shapes_compete_with_the_hosts_children_by_z() {
+        // The host has no paths, so its interior is an unclipped group.
+        let host = Shape {
+            children: vec![
+                Shape {
+                    name: "back".into(),
+                    z: 0.0,
+                    ..Default::default()
+                },
+                Shape {
+                    name: "front".into(),
+                    z: 3.0,
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         };
         let child = Asset {
-            shapes: vec![filled_rect([0.0, 0.0], [4.0, 4.0])],
+            shapes: vec![
+                Shape {
+                    name: "low".into(),
+                    z: 1.0,
+                    ..Default::default()
+                },
+                Shape {
+                    name: "high".into(),
+                    z: 2.0,
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         };
+        let attachments = [ShapeAttachment {
+            shape: 0,
+            instance: SceneInstance::new(&child),
+        }];
 
-        let mut scene = Scene::new();
-        let mut builder = SceneBuilder::new();
-        builder
-            .add_asset(&host, 1.0)
-            .add_attachment(ShapeAttachment {
-                shape: 0,
-                z: 0.5,
-                instance: SceneInstance::new(&child),
-            });
-        builder.finish(&mut scene);
+        let child_flat = child_flat_indices(&host, 0);
+        let painters = painters_in_paint_order(&host, &child_flat, 0, None, &attachments);
 
-        let encoding = scene.encoding();
-        assert_eq!(encoding.n_paths, 3);
-        // A group shape has nothing to clip against, so the attachment is not
-        // clipped (matching the group's own children).
-        assert_eq!(encoding.n_clips, 0);
+        let names: Vec<&str> = painters
+            .iter()
+            .map(|(_, painter)| match painter {
+                Painter::Child(index) => host.children[*index].name.as_str(),
+                Painter::AttachmentShape {
+                    attachment,
+                    top_level,
+                    ..
+                } => attachments[*attachment].instance.asset.shapes[*top_level]
+                    .name
+                    .as_str(),
+            })
+            .collect();
+
+        // The child's shapes are interleaved with the host shape's children by
+        // their own Z, exactly like top-level shapes of separate assets.
+        assert_eq!(names, vec!["back", "low", "high", "front"]);
     }
 }

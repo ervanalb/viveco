@@ -153,8 +153,10 @@
 //!
 //! [`VivecoChildOf`] draws an instance inside one shape of another instance,
 //! instead of into a scene of its own. The child keeps its own asset and mixer,
-//! so it animates independently, and it inherits the host shape's clip layer
-//! and Z order. The host shape is selected by index or by name:
+//! so it animates independently. Its top-level shapes inherit the host shape's
+//! clip layer and compete with that shape's children by their own Z, exactly
+//! like the top-level shapes of separate assets in one scene. The host shape is
+//! selected by index or by name:
 //!
 //! ```no_run
 //! # use bevy::prelude::*;

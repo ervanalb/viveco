@@ -174,9 +174,10 @@ pub struct VivecoSceneMembers(Vec<Entity>);
 /// Draws a [`VivecoInstance`]'s artwork inside one shape of another instance.
 ///
 /// A child is not drawn as a top-level instance. Instead, the host's producer
-/// paints it while drawing the host shape selected by
-/// [`shape`](Self::shape): the child inherits that shape's clip layer and is
-/// ordered among the shape's children by [`z`](Self::z). Its
+/// paints the child's top-level shapes while drawing the host shape selected by
+/// [`shape`](Self::shape): they inherit that shape's clip layer and compete
+/// with its children for paint order by their own Z, exactly like the
+/// top-level shapes of separate assets added to one scene. The child's
 /// [`VivecoInstance::transform`] places it in the host document's coordinate
 /// space, so no other placement is applied. The child entity's Bevy
 /// [`Transform`] is ignored: the child has no independent place in the scene,
@@ -218,11 +219,6 @@ pub struct VivecoChildOf {
     pub host: Entity,
     /// The shape of the host's asset to draw inside.
     pub shape: ShapeSelector,
-    /// Sort key among the host shape's children and other children.
-    ///
-    /// Equal values paint the host shape's own children first, then children in
-    /// the order they were added to the host.
-    pub z: f32,
 }
 
 impl VivecoChildOf {
@@ -233,14 +229,7 @@ impl VivecoChildOf {
         Self {
             host,
             shape: shape.into(),
-            z: 0.0,
         }
-    }
-
-    /// Sets the paint order among the host shape's children.
-    pub fn with_z(mut self, z: f32) -> Self {
-        self.z = z;
-        self
     }
 }
 
@@ -571,31 +560,18 @@ fn normalize_viveco_stroke_widths(
             continue;
         };
 
-        // bevy_vello renders a scene only for cameras whose render layers
-        // overlap the scene's, so use the same rule here.
-        let scene_layers = scene_layers.cloned().unwrap_or_default();
-        let mut pixels_per_unit = 0.0_f32;
-        for (camera, projection, camera_transform, camera_layers) in &cameras {
-            let camera_layers = camera_layers.cloned().unwrap_or_default();
-            if scene_layers.intersects(&camera_layers) {
-                pixels_per_unit = pixels_per_unit.max(camera_pixels_per_unit(
-                    camera,
-                    projection,
-                    camera_transform,
-                ));
-            }
-        }
-        // With no matching camera the entity and scene scales are still
-        // compensated; assume an unzoomed camera.
-        if pixels_per_unit <= 0.0 {
-            pixels_per_unit = 1.0;
-        }
+        // The camera scan is only needed when a width is actually compensated.
+        // Resolve it on first use so instances with no pixel-width target stay
+        // on the cheap path.
+        let mut pixels_per_unit: Option<f32> = None;
 
         let instance_scale = max_scale(transform) * max_affine_scale(&instance.transform);
         let scene_scale = max_scale(scene_transform);
 
         if let Some(pixels) = pixels.or(scene_pixels) {
-            let world_scale = (instance_scale * scene_scale * pixels_per_unit).max(f32::EPSILON);
+            let ppu =
+                *pixels_per_unit.get_or_insert_with(|| pixels_per_unit_for(scene_layers, &cameras));
+            let world_scale = (instance_scale * scene_scale * ppu).max(f32::EPSILON);
             let width = pixels.width / world_scale;
             if instance.stroke_width != width {
                 instance.stroke_width = width;
@@ -612,13 +588,50 @@ fn normalize_viveco_stroke_widths(
             let Some(child_pixels) = child_pixels.or(scene_pixels) else {
                 continue;
             };
+            let ppu =
+                *pixels_per_unit.get_or_insert_with(|| pixels_per_unit_for(scene_layers, &cameras));
             let child_scale = instance_scale * max_affine_scale(&child.transform);
-            let world_scale = (child_scale * scene_scale * pixels_per_unit).max(f32::EPSILON);
+            let world_scale = (child_scale * scene_scale * ppu).max(f32::EPSILON);
             let width = child_pixels.width / world_scale;
             if child.stroke_width != width {
                 child.stroke_width = width;
             }
         }
+    }
+}
+
+/// Pixels per world unit for the most zoomed-in camera that renders
+/// `scene_layers`.
+///
+/// bevy_vello renders a scene only for cameras whose render layers overlap the
+/// scene's, so this uses the same rule. With no matching camera the entity and
+/// scene scales are still compensated; assume an unzoomed camera.
+#[allow(clippy::type_complexity)]
+fn pixels_per_unit_for(
+    scene_layers: Option<&RenderLayers>,
+    cameras: &Query<
+        (
+            &Camera,
+            &Projection,
+            &GlobalTransform,
+            Option<&RenderLayers>,
+        ),
+        (With<Camera2d>, With<VelloView>),
+    >,
+) -> f32 {
+    let scene_layers = scene_layers.cloned().unwrap_or_default();
+    let mut pixels_per_unit = 0.0_f32;
+    for (camera, projection, camera_transform, camera_layers) in cameras {
+        let camera_layers = camera_layers.cloned().unwrap_or_default();
+        if scene_layers.intersects(&camera_layers) {
+            pixels_per_unit =
+                pixels_per_unit.max(camera_pixels_per_unit(camera, projection, camera_transform));
+        }
+    }
+    if pixels_per_unit <= 0.0 {
+        1.0
+    } else {
+        pixels_per_unit
     }
 }
 
@@ -672,8 +685,9 @@ fn clear_viveco_scenes(mut scenes: Query<&mut VivecoScene>) {
 ///
 /// Each top-level shape becomes one fragment carrying that shape's Z, so
 /// instance artwork interleaves with fragments from other producers. Any
-/// [`VivecoChildOf`] children are attached to their host shapes, so they are
-/// painted inside the host's fragment with the host shape's clip.
+/// [`VivecoChildOf`] children are attached to their host shapes: their
+/// top-level shapes are painted inside the host shape's clip layer and compete
+/// with its children by Z.
 #[allow(clippy::type_complexity)]
 fn render_viveco_instances(
     mut scenes: Query<&mut VivecoScene>,
@@ -733,7 +747,6 @@ fn render_viveco_instances(
                     .with_stroke_width(child.stroke_width);
                 builder.add_attachment(ShapeAttachment {
                     shape,
-                    z: child_of.z,
                     instance: child_posed,
                 });
             }

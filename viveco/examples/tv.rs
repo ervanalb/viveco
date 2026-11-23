@@ -22,14 +22,6 @@ mod tv {
     include!(concat!(env!("OUT_DIR"), "/tv.rs"));
 }
 
-/// The TV `"screen"` shape's path bounds, from `viveco info tv.viveco`.
-const SCREEN_MIN: Vec2 = Vec2::new(-115.921, -85.67);
-const SCREEN_SIZE: Vec2 = Vec2::new(222.209, 170.365);
-
-/// `planet.viveco`'s rest bounds, from `viveco info planet.viveco`.
-const PLANET_MIN: Vec2 = Vec2::new(-147.188, -89.64);
-const PLANET_SIZE: Vec2 = Vec2::new(248.299, 196.541);
-
 /// Minimum world-space area the camera shows.
 const MIN_VIEW_WIDTH: f32 = 380.0;
 const MIN_VIEW_HEIGHT: f32 = 480.0;
