@@ -7,9 +7,9 @@ use serde::de;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::animation::{Animation, KeyframeTarget};
+use crate::animation::{Animation, BoneProperty, KeyframeTarget};
 use crate::bone::{Bone, BoneIndex};
-use crate::shape::{Shape, ShapeIndex, Weights};
+use crate::shape::{Path, PathEnds, Point, Shape, ShapeIndex, Weights};
 
 /// Identifier written to and expected in an asset's `type` field.
 pub const FORMAT_TYPE: &str = "viveco";
@@ -318,6 +318,100 @@ impl Asset {
             });
         }
     }
+
+    /// Uniformly scales every length in the asset by `factor`, about the
+    /// origin.
+    ///
+    /// Instead of a full affine transform this is a bare multiplication, so the
+    /// asset keeps its proportions and its origin. Every shape point—an open
+    /// path's start, each segment's two controls, and its end point—is scaled,
+    /// as is every bone's stored head and tail; omitted heads stay omitted.
+    /// Bone translation curves (X and Y) scale too, including their Bézier
+    /// handles, because those values are offsets in asset space.
+    ///
+    /// Values that are not lengths are left untouched: shape and animation Z
+    /// (paint order), bone rotation and scale curves, animation timings, and
+    /// bone weights. A factor of one leaves the asset unchanged.
+    ///
+    /// The caller is responsible for passing a positive, finite factor.
+    pub fn scale_uniform(&mut self, factor: f32) {
+        if factor == 1.0 {
+            return;
+        }
+        for shape in &mut self.shapes {
+            scale_shape(shape, factor);
+        }
+        for bone in &mut self.bones {
+            scale_bone(bone, factor);
+        }
+        for animation in &mut self.animations {
+            scale_translations(animation, factor);
+        }
+    }
+}
+
+/// Scales every point of `shape` and its descendants.
+fn scale_shape(shape: &mut Shape, factor: f32) {
+    for path in &mut shape.paths {
+        scale_path(path, factor);
+    }
+    for child in &mut shape.children {
+        scale_shape(child, factor);
+    }
+}
+
+/// Scales a path's start, controls, and segment ends.
+fn scale_path(path: &mut Path, factor: f32) {
+    if let PathEnds::Open(start) = &mut path.ends {
+        scale_point(start, factor);
+    }
+    for segment in &mut path.segments {
+        if let Some(ctrl1) = &mut segment.ctrl1 {
+            scale_point(ctrl1, factor);
+        }
+        if let Some(ctrl2) = &mut segment.ctrl2 {
+            scale_point(ctrl2, factor);
+        }
+        scale_point(&mut segment.to, factor);
+    }
+}
+
+/// Scales a bone's endpoints and every bone below it.
+fn scale_bone(bone: &mut Bone, factor: f32) {
+    if let Some(head) = &mut bone.head {
+        scale_point(head, factor);
+    }
+    scale_point(&mut bone.tail, factor);
+    for child in &mut bone.children {
+        scale_bone(child, factor);
+    }
+}
+
+/// Scales the X and Y translation curves of `animation`.
+///
+/// Angle and scale curves are dimensionless and shape Z curves are paint
+/// order, so all of them are left alone.
+fn scale_translations(animation: &mut Animation, factor: f32) {
+    for keyframe in &mut animation.keyframes {
+        let KeyframeTarget::Bone { property, .. } = &keyframe.target else {
+            continue;
+        };
+        if !matches!(property, BoneProperty::X | BoneProperty::Y) {
+            continue;
+        }
+        keyframe.value *= factor;
+        if let Some(handle) = &mut keyframe.handle_in {
+            *handle *= factor;
+        }
+        if let Some(handle) = &mut keyframe.handle_out {
+            *handle *= factor;
+        }
+    }
+}
+
+fn scale_point(point: &mut Point, factor: f32) {
+    point[0] *= factor;
+    point[1] *= factor;
 }
 
 #[cfg(test)]
@@ -621,6 +715,141 @@ mod tests {
             })
             .collect();
         assert_eq!(shapes, vec![2, 1]);
+    }
+
+    #[test]
+    fn uniform_scaling_scales_geometry_bones_and_translations() {
+        use crate::animation::{Animation, BoneProperty, Keyframe, KeyframeTarget, ShapeProperty};
+        use crate::shape::PathEnds;
+
+        let mut path = Path::new([1.0, 2.0]).cubic_to([3.0, 4.0], [5.0, 6.0], [7.0, 8.0]);
+        path.segments[0].to_weights.set(0, 1.0);
+        let mut animation = Animation::new(1.0);
+        for (timestamp, value, target) in [
+            (
+                0.0,
+                5.0,
+                KeyframeTarget::Bone {
+                    bone: 0,
+                    property: BoneProperty::X,
+                },
+            ),
+            (
+                0.1,
+                -2.0,
+                KeyframeTarget::Bone {
+                    bone: 0,
+                    property: BoneProperty::Y,
+                },
+            ),
+            (
+                0.2,
+                1.5,
+                KeyframeTarget::Bone {
+                    bone: 0,
+                    property: BoneProperty::Angle,
+                },
+            ),
+            (
+                0.3,
+                2.0,
+                KeyframeTarget::Bone {
+                    bone: 0,
+                    property: BoneProperty::Scale,
+                },
+            ),
+            (
+                0.4,
+                4.0,
+                KeyframeTarget::Shape {
+                    shape: 0,
+                    property: ShapeProperty::Z,
+                },
+            ),
+        ] {
+            let mut keyframe = Keyframe::new(timestamp, value, target);
+            keyframe.handle_in = Some(value / 2.0);
+            keyframe.handle_out = Some(value * 2.0);
+            animation.insert_keyframe(keyframe);
+        }
+
+        let mut asset = Asset {
+            shapes: vec![Shape {
+                z: 5.0,
+                paths: vec![path],
+                children: vec![Shape {
+                    z: -3.0,
+                    paths: vec![Path::new([9.0, 10.0]).line_to([11.0, 12.0])],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            bones: vec![Bone {
+                head: Some([1.0, 1.0]),
+                tail: [2.0, 3.0],
+                children: vec![Bone {
+                    // A connected child keeps its omitted head.
+                    head: None,
+                    tail: [4.0, 6.0],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            animations: vec![animation],
+        };
+
+        asset.scale_uniform(2.0);
+
+        let shape = &asset.shapes[0];
+        assert_eq!(shape.z, 5.0, "paint order is not a length");
+        assert_eq!(
+            shape.paths[0].ends,
+            PathEnds::Open([2.0, 4.0]),
+            "an open path's start scales"
+        );
+        assert_eq!(shape.paths[0].segments[0].ctrl1, Some([6.0, 8.0]));
+        assert_eq!(shape.paths[0].segments[0].ctrl2, Some([10.0, 12.0]));
+        assert_eq!(shape.paths[0].segments[0].to, [14.0, 16.0]);
+
+        let child = &shape.children[0];
+        assert_eq!(child.z, -3.0);
+        assert_eq!(child.paths[0].start(), Some([18.0, 20.0]));
+        assert_eq!(child.paths[0].segments[0].to, [22.0, 24.0]);
+
+        let parent = &asset.bones[0];
+        assert_eq!(parent.head, Some([2.0, 2.0]));
+        assert_eq!(parent.tail, [4.0, 6.0]);
+        assert_eq!(parent.children[0].head, None);
+        assert_eq!(parent.children[0].tail, [8.0, 12.0]);
+
+        let keyframes = &asset.animations[0].keyframes;
+        // X and Y are lengths, so their values and handles scale.
+        assert_eq!(keyframes[0].value, 10.0);
+        assert_eq!(keyframes[0].handle_in, Some(5.0));
+        assert_eq!(keyframes[0].handle_out, Some(20.0));
+        assert_eq!(keyframes[1].value, -4.0);
+        // Rotation, scale, and Z are dimensionless or paint order.
+        for index in 2..5 {
+            assert_eq!(keyframes[index].value, [1.5, 2.0, 4.0][index - 2]);
+            assert_eq!(
+                keyframes[index].handle_in,
+                Some([1.5, 2.0, 4.0][index - 2] / 2.0)
+            );
+            assert_eq!(
+                keyframes[index].handle_out,
+                Some([1.5, 2.0, 4.0][index - 2] * 2.0)
+            );
+        }
+    }
+
+    #[test]
+    fn scaling_by_one_leaves_the_asset_unchanged() {
+        let mut asset = sample_asset();
+        let before = asset.clone();
+
+        asset.scale_uniform(1.0);
+
+        assert_eq!(asset, before);
     }
 
     #[test]

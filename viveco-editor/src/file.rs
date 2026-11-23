@@ -211,6 +211,7 @@ pub(crate) fn report_save(result: std::io::Result<()>, file: &DocumentFile) {
 /// Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S.
 fn handle_file_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
     mut bounds: ResMut<DocumentBounds>,
     mut viewport: ResMut<Viewport>,
@@ -218,6 +219,10 @@ fn handle_file_shortcuts(
     mut file: ResMut<DocumentFile>,
     mut dialogs: ResMut<FileDialogs>,
 ) {
+    // A transform prompt owns the keyboard while it is open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        return;
+    }
     // While a tree row is being renamed, these shortcuts belong to the text
     // field.
     if editor.is_renaming() || !ctrl_held(&keys) {

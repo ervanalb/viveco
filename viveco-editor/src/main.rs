@@ -32,6 +32,7 @@ use viveco_editor::style_panel::StylePanelPlugin;
 use viveco_editor::theme;
 use viveco_editor::timeline::TimelinePlugin;
 use viveco_editor::toolbar::ToolbarPlugin;
+use viveco_editor::transform::TransformPlugin;
 
 /// Initial window size, in logical pixels.
 const WINDOW_SIZE: u32 = 900;
@@ -61,6 +62,7 @@ fn main() {
         .add_plugins(AnimatePanelPlugin)
         .add_plugins(TimelinePlugin)
         .add_plugins(MenuBarPlugin)
+        .add_plugins(TransformPlugin)
         .add_plugins(FilePlugin)
         .add_plugins(DialogPlugin)
         .add_plugins(HistoryPlugin)

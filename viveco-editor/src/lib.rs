@@ -23,5 +23,6 @@ pub mod style_panel;
 pub mod theme;
 pub mod timeline;
 pub mod toolbar;
+pub mod transform;
 pub mod tree;
 pub mod weight_paint;

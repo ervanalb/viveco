@@ -1091,6 +1091,7 @@ fn handle_timeline_input(
     duration_edit: Res<DurationEdit>,
     speed_edit: Res<SpeedEdit>,
     time: Res<Time>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut wheel: MessageReader<MouseWheel>,
     area: Query<(&RelativeCursorPosition, &ComputedNode), With<TimelineArea>>,
     mut editor: ResMut<EditorState>,
@@ -1101,6 +1102,15 @@ fn handle_timeline_input(
         drain_wheel(&mut wheel);
         edit.selected.clear();
         edit.selected_handles.clear();
+        edit.drag = None;
+        edit.right_drag = None;
+        edit.last_keyframe_press = None;
+        return;
+    }
+
+    // A transform prompt owns the pointer and keyboard while it is open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        drain_wheel(&mut wheel);
         edit.drag = None;
         edit.right_drag = None;
         edit.last_keyframe_press = None;

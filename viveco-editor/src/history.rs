@@ -102,9 +102,14 @@ impl History {
 /// Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y.
 fn handle_history_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
     mut history: ResMut<History>,
 ) {
+    // A transform prompt owns the keyboard while it is open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        return;
+    }
     // While a tree row is being renamed, these shortcuts belong to the text
     // field.
     if editor.is_renaming() || !ctrl_held(&keys) {

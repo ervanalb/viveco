@@ -617,9 +617,14 @@ fn handle_key_shape_z(
 fn handle_speed_input(
     mode: Res<EditorMode>,
     mut events: MessageReader<KeyboardInput>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut playback: ResMut<Playback>,
     mut edit: ResMut<SpeedEdit>,
 ) {
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        for _ in events.read() {}
+        return;
+    }
     if *mode != EditorMode::Animate || edit.buffer.is_none() {
         for _ in events.read() {}
         return;
@@ -734,9 +739,14 @@ fn advance_playhead(
 fn handle_duration_input(
     mode: Res<EditorMode>,
     mut events: MessageReader<KeyboardInput>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
     mut edit: ResMut<DurationEdit>,
 ) {
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        for _ in events.read() {}
+        return;
+    }
     if *mode != EditorMode::Animate || edit.animation.is_none() {
         for _ in events.read() {}
         return;

@@ -796,9 +796,14 @@ fn handle_z_press(
 fn handle_z_input(
     mode: Res<EditorMode>,
     mut events: MessageReader<KeyboardInput>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut panel: ResMut<StylePanelState>,
     mut edit: ResMut<ZEdit>,
 ) {
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        for _ in events.read() {}
+        return;
+    }
     if *mode != EditorMode::Draw || edit.buffer.is_none() || !panel.editable {
         edit.cancel();
         for _ in events.read() {}

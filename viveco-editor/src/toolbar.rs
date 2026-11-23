@@ -142,9 +142,14 @@ fn handle_tool_buttons(
     mode: Res<EditorMode>,
     buttons: Query<(&Interaction, &ToolButton), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut tool: ResMut<ToolState>,
     mut editor: ResMut<EditorState>,
 ) {
+    // A transform prompt owns the keyboard while it is open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        return;
+    }
     let mut requested = None;
     for (interaction, button) in &buttons {
         if *interaction == Interaction::Pressed {

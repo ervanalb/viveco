@@ -91,9 +91,14 @@ pub fn paste_clipboard(editor: &mut EditorState, clipboard: &mut Clipboard) -> b
 fn handle_clipboard_shortcuts(
     mode: Res<EditorMode>,
     keys: Res<ButtonInput<KeyCode>>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
     mut clipboard: ResMut<Clipboard>,
 ) {
+    // A transform prompt owns the keyboard while it is open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        return;
+    }
     // Only modes that manage document nodes use the clipboard; rig mode edits
     // the skeleton instead.
     if !mode.uses_clipboard() {

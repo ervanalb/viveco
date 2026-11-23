@@ -250,8 +250,13 @@ fn handle_row_press(
 fn handle_rename_input(
     mode: Res<EditorMode>,
     mut events: MessageReader<KeyboardInput>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
 ) {
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        for _ in events.read() {}
+        return;
+    }
     if *mode != EditorMode::Animate || editor.animation_renaming.is_none() {
         for _ in events.read() {}
         return;
@@ -302,11 +307,15 @@ fn handle_rename_input(
 fn handle_delete_key(
     mode: Res<EditorMode>,
     keys: Res<ButtonInput<KeyCode>>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
     duration_edit: Res<DurationEdit>,
     speed_edit: Res<SpeedEdit>,
     timeline: Res<TimelineEdit>,
 ) {
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        return;
+    }
     if *mode != EditorMode::Animate || !keys.just_pressed(KeyCode::Delete) {
         return;
     }

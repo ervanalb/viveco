@@ -504,8 +504,13 @@ fn spawn_slot<M: TreeModel>(
 /// Types into, commits, or cancels the row being renamed.
 pub fn handle_rename_input<M: TreeModel>(
     mut events: MessageReader<KeyboardInput>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
 ) {
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        for _ in events.read() {}
+        return;
+    }
     if M::rename_buffer_mut(&mut editor).is_none() {
         for _ in events.read() {}
         return;

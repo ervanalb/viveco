@@ -1195,10 +1195,20 @@ fn handle_bone_input(
     bounds: Res<DocumentBounds>,
     viewport: Res<Viewport>,
     menu: Option<Res<MenuState>>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     brush: Res<WeightPaintBrush>,
     mut editor: ResMut<EditorState>,
     mut paint_last: Local<Option<Point>>,
 ) {
+    // A document transform prompt owns the pointer and keyboard while open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        if mouse.just_released(MouseButton::Left) {
+            editor.rig.pose_drag = None;
+            editor.rig.drag = None;
+        }
+        return;
+    }
+
     // Animate mode reuses the pose gestures, keying their result into the
     // selected animation instead of the transient rig pose.
     if *mode == EditorMode::Animate {

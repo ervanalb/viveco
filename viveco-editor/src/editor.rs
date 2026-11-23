@@ -978,11 +978,17 @@ fn handle_viewport_input(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     bounds: Res<DocumentBounds>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut viewport: ResMut<Viewport>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
+    // A transform prompt owns the wheel while it is open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        for _ in wheel.read() {}
+        return;
+    }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
 
@@ -1096,8 +1102,14 @@ fn handle_input(
     mut tool: ResMut<ToolState>,
     menu: Option<Res<MenuState>>,
     z_edit: Option<Res<crate::style_panel::ZEdit>>,
+    transform: Option<Res<crate::transform::TransformDialog>>,
     mut editor: ResMut<EditorState>,
 ) {
+    // A document transform prompt owns the canvas while it is open.
+    if transform.is_some_and(|dialog| dialog.blocks_input()) {
+        return;
+    }
+
     // Rig mode locks the graphic. Bone editing has its own input system.
     if *mode != EditorMode::Draw {
         return;

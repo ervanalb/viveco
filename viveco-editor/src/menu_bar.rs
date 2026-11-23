@@ -17,6 +17,7 @@ use crate::file::{
 };
 use crate::history::History;
 use crate::theme;
+use crate::transform::TransformDialog;
 
 /// Height of one dropdown row, in screen pixels.
 const MENU_ROW_HEIGHT: f32 = 26.0;
@@ -35,6 +36,9 @@ pub struct MenuBarPlugin;
 impl Plugin for MenuBarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuState>()
+            // The menu drives the transform prompt, so make sure its resource
+            // exists even if the transform plugin is added later.
+            .init_resource::<TransformDialog>()
             .add_systems(Startup, spawn_menu_bar)
             .add_systems(
                 Update,
@@ -65,6 +69,7 @@ enum EditorAction {
     Redo,
     Copy,
     Paste,
+    Scale,
 }
 
 /// The menus in the bar.
@@ -72,6 +77,7 @@ enum EditorAction {
 enum MenuKind {
     File,
     Edit,
+    Transform,
 }
 
 /// A clickable menu label.
@@ -140,6 +146,12 @@ fn spawn_menu_bar(mut commands: Commands) {
                     ("Copy", EditorAction::Copy, "Ctrl+C"),
                     ("Paste", EditorAction::Paste, "Ctrl+V"),
                 ],
+            );
+            spawn_menu(
+                bar,
+                MenuKind::Transform,
+                "Transform",
+                &[("Scale...", EditorAction::Scale, "")],
             );
         });
 }
@@ -210,11 +222,13 @@ fn spawn_menu(
                                 TextFont::from_font_size(MENU_FONT_SIZE),
                                 TextColor(theme::TEXT),
                             ));
-                            row.spawn((
-                                Text::new(*shortcut),
-                                TextFont::from_font_size(SHORTCUT_FONT_SIZE),
-                                TextColor(theme::MUTED),
-                            ));
+                            if !shortcut.is_empty() {
+                                row.spawn((
+                                    Text::new(*shortcut),
+                                    TextFont::from_font_size(SHORTCUT_FONT_SIZE),
+                                    TextColor(theme::MUTED),
+                                ));
+                            }
                         });
                 }
             });
@@ -224,8 +238,12 @@ fn spawn_menu(
 /// Opens, switches, or closes a dropdown when its label is pressed.
 fn handle_menu_labels(
     labels: Query<(&Interaction, &MenuLabel), Changed<Interaction>>,
+    transform: Option<Res<TransformDialog>>,
     mut state: ResMut<MenuState>,
 ) {
+    if transform.is_some_and(|dialog| dialog.is_open()) {
+        return;
+    }
     for (interaction, label) in &labels {
         if *interaction == Interaction::Pressed {
             state.open = if state.open == Some(label.0) {
@@ -248,6 +266,7 @@ fn handle_menu_items(
     mut file: ResMut<DocumentFile>,
     mut clipboard: ResMut<Clipboard>,
     mut dialogs: ResMut<FileDialogs>,
+    mut transform: ResMut<TransformDialog>,
 ) {
     for (interaction, item) in &items {
         if *interaction != Interaction::Pressed {
@@ -263,10 +282,12 @@ fn handle_menu_items(
             &mut file,
             &mut clipboard,
             &mut dialogs,
+            &mut transform,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_action(
     action: EditorAction,
     editor: &mut EditorState,
@@ -276,6 +297,7 @@ fn run_action(
     file: &mut DocumentFile,
     clipboard: &mut Clipboard,
     dialogs: &mut FileDialogs,
+    transform: &mut TransformDialog,
 ) {
     match action {
         EditorAction::New => {
@@ -308,6 +330,9 @@ fn run_action(
         }
         EditorAction::Paste => {
             paste_clipboard(editor, clipboard);
+        }
+        EditorAction::Scale => {
+            transform.open_scale();
         }
     }
 }
