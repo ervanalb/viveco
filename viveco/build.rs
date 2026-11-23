@@ -5,6 +5,11 @@
 //! and the `codegen` module are compiled from source here too. Downstream games
 //! use the same helpers as `viveco::codegen::emit_asset_constants` and
 //! `viveco::convert::convert_file` from their own build scripts.
+//!
+//! Because the converter source is compiled here directly, build scripts get
+//! every conversion option, including `ConvertOptions::with_keep`,
+//! `with_origin`, and `with_transform`, and the public `Origin` and
+//! `TransformOptions` types.
 
 #[path = "src/animation.rs"]
 mod animation;

@@ -40,7 +40,7 @@ usvg.workspace = true
 bevy_egui.workspace = true
 
 [[bin]]
-name = "viveco-convert"
+name = "viveco"
 path = "src/bin/convert.rs"
 required-features = ["svg"]
 

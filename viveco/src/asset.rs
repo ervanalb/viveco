@@ -7,8 +7,9 @@ use serde::de;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::animation::{Animation, BoneProperty, KeyframeTarget};
+use crate::animation::{Animation, KeyframeTarget};
 use crate::bone::{Bone, BoneIndex};
+use crate::pose::Similarity;
 use crate::shape::{Path, PathEnds, Point, Shape, ShapeIndex, Weights};
 
 /// Identifier written to and expected in an asset's `type` field.
@@ -322,96 +323,181 @@ impl Asset {
     /// Uniformly scales every length in the asset by `factor`, about the
     /// origin.
     ///
-    /// Instead of a full affine transform this is a bare multiplication, so the
-    /// asset keeps its proportions and its origin. Every shape point—an open
-    /// path's start, each segment's two controls, and its end point—is scaled,
-    /// as is every bone's stored head and tail; omitted heads stay omitted.
-    /// Bone translation curves (X and Y) scale too, including their Bézier
-    /// handles, because those values are offsets in asset space.
-    ///
-    /// Values that are not lengths are left untouched: shape and animation Z
-    /// (paint order), bone rotation and scale curves, animation timings, and
-    /// bone weights. A factor of one leaves the asset unchanged.
+    /// This is [`Self::apply_transform`] with a rotation of zero, kept as a
+    /// convenience. See that method for exactly what is and is not a length.
+    /// A factor of one leaves the asset unchanged.
     ///
     /// The caller is responsible for passing a positive, finite factor.
     pub fn scale_uniform(&mut self, factor: f32) {
-        if factor == 1.0 {
+        self.apply_transform(Similarity {
+            scale: factor,
+            rotation: 0.0,
+            translation: [0.0, 0.0],
+        });
+    }
+
+    /// Applies a uniform scale, rotation, and translation to the whole asset.
+    ///
+    /// Every shape point—an open path's start, each segment's two controls, and
+    /// its end point—is transformed, as is every bone's stored head and tail;
+    /// omitted heads stay omitted. Because rotations and scales are uniform,
+    /// the asset keeps its proportions.
+    ///
+    /// Bone translation curves (X and Y) are transformed too, since they are
+    /// offsets in asset space. A pure scale multiplies them channel by channel.
+    /// A rotation mixes the two channels: both curves are split at the union of
+    /// their keyframe times and rewritten as rotated vectors, so sampling the
+    /// transformed animation reproduces the rotated motion exactly.
+    ///
+    /// Values that are not lengths are left untouched: shape and animation Z
+    /// (paint order), bone rotation and scale curves, animation timings, and
+    /// bone weights. The translation part of `transform` moves the artwork and
+    /// the skeleton but not the animation offsets, which are relative.
+    ///
+    /// The caller is responsible for passing a positive, finite scale.
+    pub fn apply_transform(&mut self, transform: Similarity) {
+        if transform == Similarity::IDENTITY {
             return;
         }
         for shape in &mut self.shapes {
-            scale_shape(shape, factor);
+            transform_shape(shape, transform);
         }
         for bone in &mut self.bones {
-            scale_bone(bone, factor);
+            transform_bone(bone, transform);
         }
         for animation in &mut self.animations {
-            scale_translations(animation, factor);
+            animation.transform_translations(transform.scale, transform.rotation);
         }
     }
+
+    /// The axis-aligned bounds of all artwork in the asset, including nested
+    /// children.
+    ///
+    /// Bézier control points are included, so the result is a conservative
+    /// bound rather than the exact extent of the curves. Bones are not artwork
+    /// and are not included. Returns `None` when the asset has no geometry.
+    pub fn bounds(&self) -> Option<Bounds> {
+        let mut accumulator = BoundsAccumulator::default();
+        for shape in &self.shapes {
+            accumulator.add_shape(shape);
+        }
+        accumulator.finish()
+    }
 }
 
-/// Scales every point of `shape` and its descendants.
-fn scale_shape(shape: &mut Shape, factor: f32) {
+/// An axis-aligned rectangle in asset space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bounds {
+    pub min: Point,
+    pub max: Point,
+}
+
+impl Bounds {
+    pub fn width(&self) -> f32 {
+        self.max[0] - self.min[0]
+    }
+
+    pub fn height(&self) -> f32 {
+        self.max[1] - self.min[1]
+    }
+
+    pub fn center(&self) -> Point {
+        [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+        ]
+    }
+}
+
+/// Accumulates the bounds of every point that affects painted geometry.
+#[derive(Default)]
+struct BoundsAccumulator {
+    min: Point,
+    max: Point,
+    any: bool,
+}
+
+impl BoundsAccumulator {
+    fn add_point(&mut self, point: Point) {
+        if self.any {
+            self.min[0] = self.min[0].min(point[0]);
+            self.min[1] = self.min[1].min(point[1]);
+            self.max[0] = self.max[0].max(point[0]);
+            self.max[1] = self.max[1].max(point[1]);
+        } else {
+            self.min = point;
+            self.max = point;
+            self.any = true;
+        }
+    }
+
+    fn add_path(&mut self, path: &Path) {
+        if let Some(start) = path.start() {
+            self.add_point(start);
+        }
+        for segment in &path.segments {
+            if let Some(ctrl1) = segment.ctrl1 {
+                self.add_point(ctrl1);
+            }
+            if let Some(ctrl2) = segment.ctrl2 {
+                self.add_point(ctrl2);
+            }
+            self.add_point(segment.to);
+        }
+    }
+
+    fn add_shape(&mut self, shape: &Shape) {
+        for path in &shape.paths {
+            self.add_path(path);
+        }
+        for child in &shape.children {
+            self.add_shape(child);
+        }
+    }
+
+    fn finish(self) -> Option<Bounds> {
+        self.any.then_some(Bounds {
+            min: self.min,
+            max: self.max,
+        })
+    }
+}
+
+/// Transforms every point of `shape` and its descendants.
+fn transform_shape(shape: &mut Shape, transform: Similarity) {
     for path in &mut shape.paths {
-        scale_path(path, factor);
+        transform_path(path, transform);
     }
     for child in &mut shape.children {
-        scale_shape(child, factor);
+        transform_shape(child, transform);
     }
 }
 
-/// Scales a path's start, controls, and segment ends.
-fn scale_path(path: &mut Path, factor: f32) {
+/// Transforms a path's start, controls, and segment ends.
+fn transform_path(path: &mut Path, transform: Similarity) {
     if let PathEnds::Open(start) = &mut path.ends {
-        scale_point(start, factor);
+        *start = transform.apply(*start);
     }
     for segment in &mut path.segments {
         if let Some(ctrl1) = &mut segment.ctrl1 {
-            scale_point(ctrl1, factor);
+            *ctrl1 = transform.apply(*ctrl1);
         }
         if let Some(ctrl2) = &mut segment.ctrl2 {
-            scale_point(ctrl2, factor);
+            *ctrl2 = transform.apply(*ctrl2);
         }
-        scale_point(&mut segment.to, factor);
+        segment.to = transform.apply(segment.to);
     }
 }
 
-/// Scales a bone's endpoints and every bone below it.
-fn scale_bone(bone: &mut Bone, factor: f32) {
+/// Transforms a bone's endpoints and every bone below it.
+fn transform_bone(bone: &mut Bone, transform: Similarity) {
     if let Some(head) = &mut bone.head {
-        scale_point(head, factor);
+        *head = transform.apply(*head);
     }
-    scale_point(&mut bone.tail, factor);
+    bone.tail = transform.apply(bone.tail);
     for child in &mut bone.children {
-        scale_bone(child, factor);
+        transform_bone(child, transform);
     }
-}
-
-/// Scales the X and Y translation curves of `animation`.
-///
-/// Angle and scale curves are dimensionless and shape Z curves are paint
-/// order, so all of them are left alone.
-fn scale_translations(animation: &mut Animation, factor: f32) {
-    for keyframe in &mut animation.keyframes {
-        let KeyframeTarget::Bone { property, .. } = &keyframe.target else {
-            continue;
-        };
-        if !matches!(property, BoneProperty::X | BoneProperty::Y) {
-            continue;
-        }
-        keyframe.value *= factor;
-        if let Some(handle) = &mut keyframe.handle_in {
-            *handle *= factor;
-        }
-        if let Some(handle) = &mut keyframe.handle_out {
-            *handle *= factor;
-        }
-    }
-}
-
-fn scale_point(point: &mut Point, factor: f32) {
-    point[0] *= factor;
-    point[1] *= factor;
 }
 
 #[cfg(test)]
@@ -840,6 +926,300 @@ mod tests {
                 Some([1.5, 2.0, 4.0][index - 2] * 2.0)
             );
         }
+    }
+
+    #[test]
+    fn bounds_include_nested_shapes_and_bezier_controls() {
+        let asset = Asset {
+            shapes: vec![Shape {
+                paths: vec![Path::new([10.0, 20.0]).cubic_to(
+                    [0.0, 0.0],
+                    [40.0, 50.0],
+                    [30.0, 30.0],
+                )],
+                children: vec![Shape {
+                    paths: vec![Path::new([-5.0, 25.0]).line_to([15.0, 60.0])],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let bounds = asset.bounds().unwrap();
+        assert_eq!(bounds.min, [-5.0, 0.0]);
+        assert_eq!(bounds.max, [40.0, 60.0]);
+        assert_eq!(bounds.width(), 45.0);
+        assert_eq!(bounds.height(), 60.0);
+        assert_eq!(bounds.center(), [17.5, 30.0]);
+
+        assert_eq!(Asset::new().bounds(), None);
+    }
+
+    #[test]
+    fn transform_applies_a_similarity_to_artwork_and_bones() {
+        use crate::bone::Bone;
+        use std::f32::consts::FRAC_PI_2;
+
+        let mut asset = Asset {
+            shapes: vec![Shape {
+                paths: vec![Path::new([1.0, 0.0]).line_to([0.0, 1.0])],
+                children: vec![Shape {
+                    paths: vec![Path::new([2.0, 0.0])],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            bones: vec![Bone {
+                head: Some([2.0, 0.0]),
+                tail: [0.0, 2.0],
+                children: vec![Bone {
+                    head: None,
+                    tail: [0.0, 3.0],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // A quarter turn, doubled, then shifted by [5, 6].
+        asset.apply_transform(Similarity {
+            scale: 2.0,
+            rotation: FRAC_PI_2,
+            translation: [5.0, 6.0],
+        });
+
+        let near = |actual: Point, expected: Point| {
+            assert!(
+                (actual[0] - expected[0]).abs() < 1e-5 && (actual[1] - expected[1]).abs() < 1e-5,
+                "expected {expected:?}, got {actual:?}"
+            );
+        };
+
+        let shape = &asset.shapes[0];
+        near(shape.paths[0].start().unwrap(), [5.0, 8.0]);
+        near(shape.paths[0].segments[0].to, [3.0, 6.0]);
+        near(shape.children[0].paths[0].start().unwrap(), [5.0, 10.0]);
+
+        let parent = &asset.bones[0];
+        near(parent.head.unwrap(), [5.0, 10.0]);
+        near(parent.tail, [1.0, 6.0]);
+        assert_eq!(parent.children[0].head, None);
+        near(parent.children[0].tail, [-1.0, 6.0]);
+    }
+
+    /// An asset whose bone has X and Y curves with different keyframe times,
+    /// so rotating it forces the curves to be resplit.
+    fn animated_translation_asset(cyclic: bool) -> Asset {
+        use crate::animation::{Animation, BoneProperty, Keyframe, KeyframeTarget};
+
+        let mut animation = Animation::new(4.0);
+        animation.cyclic = cyclic;
+        for (timestamp, value, property) in [
+            (0.0, 1.0, BoneProperty::X),
+            (2.0, 3.0, BoneProperty::X),
+            (1.0, -2.0, BoneProperty::Y),
+            (3.0, 4.0, BoneProperty::Y),
+        ] {
+            let mut keyframe =
+                Keyframe::new(timestamp, value, KeyframeTarget::Bone { bone: 0, property });
+            keyframe.handle_in = Some(value * 0.5);
+            keyframe.handle_out = Some(value * 1.5);
+            animation.insert_keyframe(keyframe);
+        }
+
+        Asset {
+            bones: vec![Bone {
+                head: Some([0.0, 0.0]),
+                tail: [10.0, 0.0],
+                ..Default::default()
+            }],
+            animations: vec![animation],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rotating_translation_curves_matches_rotated_samples() {
+        use std::f32::consts::FRAC_PI_2;
+
+        for cyclic in [false, true] {
+            let mut asset = animated_translation_asset(cyclic);
+            let times = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
+            let before: Vec<[f32; 2]> = times
+                .iter()
+                .map(|&time| {
+                    asset.animations[0]
+                        .sample_pose(&asset, time)
+                        .get(0)
+                        .translation
+                })
+                .collect();
+
+            let scale = 2.0;
+            let rotation = FRAC_PI_2 / 2.0;
+            asset.apply_transform(Similarity {
+                scale,
+                rotation,
+                translation: [100.0, -50.0],
+            });
+
+            let (sin, cos) = rotation.sin_cos();
+            for (&time, before) in times.iter().zip(before) {
+                let after = asset.animations[0]
+                    .sample_pose(&asset, time)
+                    .get(0)
+                    .translation;
+                let expected = [
+                    scale * (cos * before[0] - sin * before[1]),
+                    scale * (sin * before[0] + cos * before[1]),
+                ];
+                assert!(
+                    (after[0] - expected[0]).abs() < 1e-4 && (after[1] - expected[1]).abs() < 1e-4,
+                    "cyclic={cyclic} t={time}: expected {expected:?}, got {after:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rotating_an_unpaired_translation_channel_creates_the_other_curve() {
+        use crate::animation::{Animation, BoneProperty, Keyframe, KeyframeTarget};
+        use crate::bone::Bone;
+        use std::f32::consts::FRAC_PI_2;
+
+        let mut animation = Animation::new(3.0);
+        for (timestamp, value) in [(0.0, 1.0), (2.0, 3.0)] {
+            animation.insert_keyframe(Keyframe::new(
+                timestamp,
+                value,
+                KeyframeTarget::Bone {
+                    bone: 0,
+                    property: BoneProperty::X,
+                },
+            ));
+        }
+        let mut asset = Asset {
+            bones: vec![Bone {
+                head: Some([0.0, 0.0]),
+                tail: [10.0, 0.0],
+                ..Default::default()
+            }],
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        asset.apply_transform(Similarity {
+            scale: 1.0,
+            rotation: FRAC_PI_2,
+            translation: [0.0, 0.0],
+        });
+
+        // The X offset now points down, so it has become a Y curve.
+        for time in [0.0, 0.5, 1.0, 1.5, 2.0] {
+            let pose = asset.animations[0].sample_pose(&asset, time);
+            let x = pose.get(0).translation[0];
+            let y = pose.get(0).translation[1];
+            assert!(x.abs() < 1e-5, "t={time}: x should be zero, got {x}");
+            let before = 1.0 + 2.0 * (time / 2.0);
+            assert!(
+                (y - before).abs() < 1e-4,
+                "t={time}: expected {before}, got {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn transformed_animation_deforms_the_same_way_as_the_original() {
+        use crate::animation::{Animation, BoneProperty, Keyframe, KeyframeTarget};
+        use crate::bone::Bone;
+        use crate::shape::{Path, Weights};
+
+        let mut path = Path::new([0.0, 0.0]).line_to([10.0, 0.0]);
+        let weights = {
+            let mut weights = Weights::new();
+            weights.set(0, 1.0);
+            weights
+        };
+        path.start_weights = weights.clone();
+        path.segments[0].to_weights = weights;
+
+        let mut animation = Animation::new(1.0);
+        for (timestamp, x, y) in [(0.0, 2.0, 1.0), (1.0, 4.0, -1.0)] {
+            animation.insert_keyframe(Keyframe::new(
+                timestamp,
+                x,
+                KeyframeTarget::Bone {
+                    bone: 0,
+                    property: BoneProperty::X,
+                },
+            ));
+            animation.insert_keyframe(Keyframe::new(
+                timestamp,
+                y,
+                KeyframeTarget::Bone {
+                    bone: 0,
+                    property: BoneProperty::Y,
+                },
+            ));
+        }
+        let mut asset = Asset {
+            shapes: vec![Shape {
+                paths: vec![path],
+                ..Default::default()
+            }],
+            bones: vec![Bone {
+                head: Some([0.0, 0.0]),
+                tail: [10.0, 0.0],
+                ..Default::default()
+            }],
+            animations: vec![animation],
+        };
+
+        let time = 0.25;
+        let before = asset.deformed(&asset.animations[0].sample_pose(&asset, time));
+        let original = before.shapes[0].paths[0].clone();
+
+        let transform = Similarity {
+            scale: 2.0,
+            rotation: 0.7,
+            translation: [5.0, -3.0],
+        };
+        asset.apply_transform(transform);
+
+        let after = asset.deformed(&asset.animations[0].sample_pose(&asset, time));
+        let transformed = &after.shapes[0].paths[0];
+
+        let near = |actual: Point, expected: Point| {
+            assert!(
+                (actual[0] - expected[0]).abs() < 1e-4 && (actual[1] - expected[1]).abs() < 1e-4,
+                "expected {expected:?}, got {actual:?}"
+            );
+        };
+        near(
+            transformed.start().unwrap(),
+            transform.apply(original.start().unwrap()),
+        );
+        near(
+            transformed.segments[0].to,
+            transform.apply(original.segments[0].to),
+        );
+    }
+
+    #[test]
+    fn pure_scale_transform_matches_scale_uniform() {
+        let mut scaled = animated_translation_asset(true);
+        let mut transformed = scaled.clone();
+
+        scaled.scale_uniform(2.5);
+        transformed.apply_transform(Similarity {
+            scale: 2.5,
+            rotation: 0.0,
+            translation: [0.0, 0.0],
+        });
+
+        assert_eq!(scaled, transformed);
     }
 
     #[test]

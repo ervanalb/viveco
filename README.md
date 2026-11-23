@@ -12,7 +12,7 @@ This repository also contains an editor application for authoring viveco files.
 | Path | What it is |
 | --- | --- |
 | `viveco/` | The library crate: document model, file I/O, SVG import, skinning, animation sampling, Vello rendering, and Bevy integration. |
-| `viveco/src/bin/convert.rs` | `viveco-convert`, A command-line file type converter. |
+| `viveco/src/bin/convert.rs` | `viveco`, the command-line converter and inspector. |
 | `viveco/examples/` | Runnable Rust examples (`planet`, `compound`, `parallax`). |
 | `examples/` | Example viveco assets |
 | `viveco-editor/` | The desktop editor for drawing, rigging, and animating. |
@@ -42,27 +42,55 @@ cargo install --path viveco-editor
 
 Viveco files can be binary or JSON. Binary is recommended for smaller file sizes and quicker loading.
 
-The `viveco-convert` command-line tool can convert files from binary to JSON and vice-versa,
-as well as converting SVG files to non-animated viveco.
+The `viveco` command-line tool can convert files from binary to JSON and vice-versa,
+as well as converting SVG files to non-animated viveco. It can also inspect a file, keep
+only selected top-level objects, apply basic transforms, and move an artwork's origin to
+a chosen bounds anchor.
 
 ```sh
-# Installs the `viveco-convert` executable
+# Installs the `viveco` executable
 cargo install --path viveco
 
 # If you don't want to install it, you can use:
-# cargo run -p viveco --bin viveco-convert --
+# cargo run -p viveco --bin viveco --
 ```
 
 ```sh
 # SVG -> binary .viveco
-viveco-convert art.svg art.viveco
+viveco art.svg art.viveco
 
 # Convert one named top-level SVG group, e.g. an Inkscape layer
-viveco-convert --group Front art.svg front.viveco
+viveco --group Front art.svg front.viveco
 
 # Binary -> JSON
-viveco-convert art.viveco art.json
+viveco art.viveco art.json
+
+# Print the shape/bone hierarchies, animations, and rest bounds
+viveco info art.viveco
+
+# Keep only some top-level objects (repeatable; commas separate names)
+viveco --keep Body,Head art.viveco trimmed.viveco
+
+# Move the artwork's center to the origin, then rotate and scale about it
+viveco --origin center --rotate 45 --scale 2 --translate 10,20 \
+  art.viveco transformed.viveco
+
+# Move the artwork so the bottom-left of its rest bounds is the origin
+viveco --origin bottom-left art.viveco reorigined.viveco
 ```
+
+A conversion runs in four steps: read the file (importing an SVG if the input is one),
+keep only the named top-level shapes, apply the origin and then the
+`--translate`/`--rotate`/`--scale` transform, then write the output. Rotation and
+scaling act about the origin. The transform moves geometry and the skeleton and
+rewrites bone translation curves so animations rotate and scale consistently. Z order,
+bone rotation and scale curves, animation timings, and weights are left alone.
+
+`--origin` moves the whole asset, skeleton included, so the chosen anchor of the
+*filtered* artwork's rest bounds becomes `(0, 0)`. The anchors are `top-left`, `top`,
+`top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, and `bottom-right`.
+When combined with a transform, the origin is applied first, so `--origin center`
+rotates and scales about the artwork's center.
 
 ## The Format
 

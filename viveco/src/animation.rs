@@ -1,6 +1,7 @@
 //! Animations, keyframes, and curve sampling.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -315,6 +316,350 @@ impl Animation {
         }
         self.insert_keyframe(Keyframe::new(time, value, target));
     }
+
+    /// Rewrites every bone translation curve as a vector scaled by `scale` and
+    /// rotated by `rotation` radians about the origin.
+    ///
+    /// A bone's X and Y curves are components of one offset vector in asset
+    /// space. A pure scale transforms each channel on its own. A rotation mixes
+    /// the channels, so the two curves are split at the union of their
+    /// keyframe times and rebuilt as rotated keyframes and Bézier handles. The
+    /// split is exact: sampling either curve after the rewrite produces the
+    /// rotated and scaled version of the original offset at every time.
+    ///
+    /// Angle and scale curves are dimensionless and shape Z curves are paint
+    /// order, so all of them are left alone.
+    pub(crate) fn transform_translations(&mut self, scale: f32, rotation: f32) {
+        if rotation == 0.0 {
+            // The channels stay independent, so no keyframe surgery is needed.
+            for keyframe in &mut self.keyframes {
+                let KeyframeTarget::Bone { property, .. } = &keyframe.target else {
+                    continue;
+                };
+                if !matches!(property, BoneProperty::X | BoneProperty::Y) {
+                    continue;
+                }
+                keyframe.value *= scale;
+                if let Some(handle) = &mut keyframe.handle_in {
+                    *handle *= scale;
+                }
+                if let Some(handle) = &mut keyframe.handle_out {
+                    *handle *= scale;
+                }
+            }
+            return;
+        }
+
+        let duration = self.duration;
+        let cyclic = self.cyclic && duration.is_finite() && duration > 0.0;
+        let mut groups: BTreeMap<BoneIndex, BoneTranslations> = BTreeMap::new();
+        let mut retained = Vec::with_capacity(self.keyframes.len());
+        for keyframe in std::mem::take(&mut self.keyframes) {
+            match &keyframe.target {
+                KeyframeTarget::Bone { bone, property } => match property {
+                    BoneProperty::X => groups.entry(*bone).or_default().x.push(keyframe),
+                    BoneProperty::Y => groups.entry(*bone).or_default().y.push(keyframe),
+                    BoneProperty::Angle | BoneProperty::Scale => retained.push(keyframe),
+                },
+                KeyframeTarget::Shape { .. } => retained.push(keyframe),
+            }
+        }
+
+        for (bone, curves) in groups {
+            retained.extend(transformed_translation_curves(
+                bone, curves, scale, rotation, duration, cyclic,
+            ));
+        }
+        retained.sort_by(|a, b| {
+            a.timestamp
+                .partial_cmp(&b.timestamp)
+                .unwrap_or(Ordering::Equal)
+        });
+        self.keyframes = retained;
+    }
+}
+
+/// The X and Y curves of one bone, extracted from an animation.
+#[derive(Default)]
+struct BoneTranslations {
+    x: Vec<Keyframe>,
+    y: Vec<Keyframe>,
+}
+
+/// Rebuilds one bone's X and Y curves on shared keyframes under a scale and
+/// rotation.
+fn transformed_translation_curves(
+    bone: BoneIndex,
+    mut curves: BoneTranslations,
+    scale: f32,
+    rotation: f32,
+    duration: f32,
+    cyclic: bool,
+) -> Vec<Keyframe> {
+    // Both channels are split at every time used by either, so their keyframes
+    // line up and can be transformed as paired vectors.
+    let mut times: Vec<f32> = curves
+        .x
+        .iter()
+        .chain(curves.y.iter())
+        .map(|keyframe| keyframe.timestamp)
+        .collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    times.dedup_by(|a, b| *a == *b);
+    if times.is_empty() {
+        return Vec::new();
+    }
+
+    fill_times(
+        &mut curves.x,
+        &times,
+        bone,
+        BoneProperty::X,
+        duration,
+        cyclic,
+    );
+    fill_times(
+        &mut curves.y,
+        &times,
+        bone,
+        BoneProperty::Y,
+        duration,
+        cyclic,
+    );
+    materialize_handles(&mut curves.x, cyclic);
+    materialize_handles(&mut curves.y, cyclic);
+
+    let (sin, cos) = rotation.sin_cos();
+    let rotate = |x: f32, y: f32| (scale * (cos * x - sin * y), scale * (sin * x + cos * y));
+
+    debug_assert_eq!(curves.x.len(), curves.y.len());
+    for (x, y) in curves.x.iter_mut().zip(curves.y.iter_mut()) {
+        debug_assert_eq!(x.timestamp, y.timestamp);
+        let (value_x, value_y) = rotate(x.value, y.value);
+        x.value = value_x;
+        y.value = value_y;
+        let (in_x, in_y) = rotate_optional(x.handle_in, y.handle_in, &rotate);
+        let (out_x, out_y) = rotate_optional(x.handle_out, y.handle_out, &rotate);
+        x.handle_in = in_x;
+        y.handle_in = in_y;
+        x.handle_out = out_x;
+        y.handle_out = out_y;
+    }
+
+    let mut result = Vec::with_capacity(curves.x.len() + curves.y.len());
+    for (mut x, mut y) in curves.x.into_iter().zip(curves.y) {
+        x.target = KeyframeTarget::Bone {
+            bone,
+            property: BoneProperty::X,
+        };
+        y.target = KeyframeTarget::Bone {
+            bone,
+            property: BoneProperty::Y,
+        };
+        result.push(x);
+        result.push(y);
+    }
+    result
+}
+
+/// Gives a curve a keyframe at each of `times`, splitting existing segments so
+/// the curve itself does not change. An empty channel becomes a flat zero
+/// curve, which is how a rest translation that is not animated behaves.
+fn fill_times(
+    keyframes: &mut Vec<Keyframe>,
+    times: &[f32],
+    bone: BoneIndex,
+    property: BoneProperty,
+    duration: f32,
+    cyclic: bool,
+) {
+    keyframes.dedup_by(|a, b| a.timestamp == b.timestamp);
+    if keyframes.is_empty() {
+        *keyframes = times
+            .iter()
+            .map(|&timestamp| {
+                Keyframe::new(timestamp, 0.0, KeyframeTarget::Bone { bone, property })
+            })
+            .collect();
+        return;
+    }
+    for &timestamp in times {
+        split_curve_at(keyframes, timestamp, duration, cyclic);
+    }
+}
+
+/// Rotates a pair of optional handles, which must either both be present or
+/// both be absent because the curves share breakpoints.
+fn rotate_optional(
+    x: Option<f32>,
+    y: Option<f32>,
+    rotate: &impl Fn(f32, f32) -> (f32, f32),
+) -> (Option<f32>, Option<f32>) {
+    match (x, y) {
+        (Some(x), Some(y)) => {
+            let (x, y) = rotate(x, y);
+            (Some(x), Some(y))
+        }
+        _ => (None, None),
+    }
+}
+
+/// Replaces every handle with its effective value, so the two channels can be
+/// rotated together without relying on the default-handle rules.
+fn materialize_handles(keyframes: &mut [Keyframe], cyclic: bool) {
+    if keyframes.is_empty() {
+        return;
+    }
+    let handles: Vec<(Option<f32>, Option<f32>)> = {
+        let refs: Vec<&Keyframe> = keyframes.iter().collect();
+        (0..keyframes.len())
+            .map(|index| {
+                (
+                    effective_handle_in(&refs, index, cyclic),
+                    effective_handle_out(&refs, index, cyclic),
+                )
+            })
+            .collect()
+    };
+    for (keyframe, (handle_in, handle_out)) in keyframes.iter_mut().zip(handles) {
+        keyframe.handle_in = handle_in;
+        keyframe.handle_out = handle_out;
+    }
+}
+
+/// Inserts a keyframe at `time` without changing a curve.
+fn split_curve_at(keyframes: &mut Vec<Keyframe>, time: f32, duration: f32, cyclic: bool) {
+    if keyframes.is_empty() || keyframes.iter().any(|keyframe| keyframe.timestamp == time) {
+        return;
+    }
+    let first = keyframes[0].timestamp;
+    let last = keyframes[keyframes.len() - 1].timestamp;
+
+    if !cyclic {
+        if time < first {
+            insert_hold(keyframes, time, keyframes[0].value, true);
+            return;
+        }
+        if time > last {
+            let value = keyframes[keyframes.len() - 1].value;
+            insert_hold(keyframes, time, value, false);
+            return;
+        }
+        let before = keyframes
+            .windows(2)
+            .position(|pair| pair[0].timestamp < time && time < pair[1].timestamp);
+        if let Some(before) = before {
+            let (start, end) = (keyframes[before].timestamp, keyframes[before + 1].timestamp);
+            split_segment(keyframes, before, before + 1, start, end, time, time, false);
+        }
+        return;
+    }
+
+    let before = keyframes
+        .windows(2)
+        .position(|pair| pair[0].timestamp < time && time < pair[1].timestamp);
+    if let Some(before) = before {
+        let (start, end) = (keyframes[before].timestamp, keyframes[before + 1].timestamp);
+        split_segment(keyframes, before, before + 1, start, end, time, time, true);
+        return;
+    }
+
+    // The time lies in the seam that wraps from the last keyframe to the first
+    // of the next cycle. A time before the first keyframe belongs to the next
+    // cycle, so it is evaluated at `time + duration` but stored at `time`.
+    if time > last {
+        split_segment(
+            keyframes,
+            keyframes.len() - 1,
+            0,
+            last,
+            first + duration,
+            time,
+            time,
+            true,
+        );
+    } else if time < first {
+        split_segment(
+            keyframes,
+            keyframes.len() - 1,
+            0,
+            last,
+            first + duration,
+            time,
+            time + duration,
+            true,
+        );
+    }
+}
+
+/// Inserts a keyframe in the constant region before the first keyframe or after
+/// the last one, keeping the hold flat.
+fn insert_hold(keyframes: &mut Vec<Keyframe>, time: f32, value: f32, before_first: bool) {
+    let target = keyframes[0].target.clone();
+    let mut inserted = Keyframe::new(time, value, target);
+    if before_first {
+        inserted.handle_out = Some(value);
+        keyframes[0].handle_in = Some(value);
+        keyframes.insert(0, inserted);
+    } else {
+        inserted.handle_in = Some(value);
+        if let Some(last) = keyframes.last_mut() {
+            last.handle_out = Some(value);
+        }
+        keyframes.push(inserted);
+    }
+}
+
+/// Splits the segment between two keyframes, preserving the cubic exactly on
+/// both sides.
+///
+/// `time` is the timestamp the new keyframe is stored at. `parameter_time` is
+/// the same moment on the unwrapped timeline, which differs for a cyclic seam
+/// split before the first keyframe.
+#[allow(clippy::too_many_arguments)]
+fn split_segment(
+    keyframes: &mut Vec<Keyframe>,
+    before: usize,
+    after: usize,
+    start_time: f32,
+    end_time: f32,
+    time: f32,
+    parameter_time: f32,
+    cyclic: bool,
+) {
+    let gap = end_time - start_time;
+    if gap.is_nan() || gap <= 0.0 {
+        return;
+    }
+    let u = ((parameter_time - start_time) / gap).clamp(0.0, 1.0);
+    let value_start = keyframes[before].value;
+    let value_end = keyframes[after].value;
+    let (control_out, control_in) = {
+        let refs: Vec<&Keyframe> = keyframes.iter().collect();
+        (
+            effective_handle_out(&refs, before, cyclic).unwrap_or(value_start),
+            effective_handle_in(&refs, after, cyclic).unwrap_or(value_end),
+        )
+    };
+    // Split the cubic with de Casteljau so the two pieces reproduce it exactly.
+    // A handle is a Bézier control value, not the curve's value at a third of
+    // the segment, so the controls are interpolated rather than sampled.
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let first_out = lerp(value_start, control_out, u);
+    let first_in = lerp(control_out, control_in, u);
+    let last_out = lerp(control_in, value_end, u);
+    let middle_out = lerp(first_out, first_in, u);
+    let middle_in = lerp(first_in, last_out, u);
+    let value = lerp(middle_out, middle_in, u);
+
+    let mut inserted = Keyframe::new(time, value, keyframes[before].target.clone());
+    inserted.handle_in = Some(middle_out);
+    inserted.handle_out = Some(middle_in);
+    keyframes[before].handle_out = Some(first_out);
+    keyframes[after].handle_in = Some(last_out);
+
+    let position = keyframes.partition_point(|keyframe| keyframe.timestamp < time);
+    keyframes.insert(position, inserted);
 }
 
 /// Whether `timestamp` falls in the valid animation range `0..duration`.

@@ -394,6 +394,51 @@ impl Asset {
             .collect()
     }
 
+    /// Keeps only the top-level shapes whose names appear in `names`, dropping
+    /// every other top-level shape and its subtree.
+    ///
+    /// Animation keyframes that target a dropped shape are removed, and the
+    /// remaining shape targets are renumbered to match the new flat shape
+    /// indices. Bones and their weights are left untouched, so a kept shape
+    /// keeps its rig even when the shapes that shared it are gone.
+    ///
+    /// Names are compared exactly, and duplicate names select every matching
+    /// top-level shape. Returns the requested names that matched no top-level
+    /// shape; in that case the asset is left unchanged, which lets a caller
+    /// report a typo before doing any work. Passing no names keeps everything.
+    pub fn retain_top_level_shapes(&mut self, names: &[String]) -> Result<(), Vec<String>> {
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|name| !self.shapes.iter().any(|shape| &shape.name == *name))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(missing);
+        }
+        if names.is_empty() {
+            return Ok(());
+        }
+
+        let mut map = vec![None; self.shape_count()];
+        let mut kept = Vec::new();
+        let mut old_flat = 0;
+        let mut new_flat = 0;
+        for shape in std::mem::take(&mut self.shapes) {
+            let len = shape.subtree_len();
+            if names.iter().any(|name| name == &shape.name) {
+                for offset in 0..len {
+                    map[old_flat + offset] = Some(new_flat + offset);
+                }
+                new_flat += len;
+                kept.push(shape);
+            }
+            old_flat += len;
+        }
+        self.shapes = kept;
+        self.apply_shape_map(&map);
+        Ok(())
+    }
+
     /// The number of shapes in the asset, counting descendants.
     pub fn shape_count(&self) -> usize {
         self.shapes.iter().map(Shape::subtree_len).sum()
@@ -933,6 +978,112 @@ mod tests {
 
         // There is no bone to scale, so the point stays unweighted.
         assert!(weights.is_empty());
+    }
+
+    #[test]
+    fn retaining_top_level_shapes_keeps_subtrees_and_remaps_animation_targets() {
+        use crate::animation::{Animation, Keyframe, KeyframeTarget, ShapeProperty};
+
+        let mut animation = Animation::new(1.0);
+        for shape in 0..5 {
+            animation.insert_keyframe(Keyframe::new(
+                shape as f32 * 0.1,
+                0.0,
+                KeyframeTarget::Shape {
+                    shape,
+                    property: ShapeProperty::Z,
+                },
+            ));
+        }
+        let mut asset = Asset {
+            shapes: vec![
+                Shape {
+                    name: "A".into(),
+                    children: vec![Shape {
+                        name: "A1".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Shape {
+                    name: "B".into(),
+                    children: vec![Shape {
+                        name: "B1".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Shape {
+                    name: "C".into(),
+                    ..Default::default()
+                },
+            ],
+            animations: vec![animation],
+            ..Default::default()
+        };
+
+        // Flat indices before filtering: A=0, A1=1, B=2, B1=3, C=4.
+        asset
+            .retain_top_level_shapes(&["B".to_owned(), "C".to_owned()])
+            .unwrap();
+
+        assert_eq!(asset.shapes.len(), 2);
+        assert_eq!(asset.shapes[0].name, "B");
+        assert_eq!(asset.shapes[0].children[0].name, "B1");
+        assert_eq!(asset.shapes[1].name, "C");
+        assert_eq!(asset.shape_count(), 3);
+
+        // B=0, B1=1, C=2; the keyframes for removed A and A1 are gone.
+        let shapes: Vec<usize> = asset.animations[0]
+            .keyframes
+            .iter()
+            .map(|keyframe| match &keyframe.target {
+                KeyframeTarget::Shape { shape, .. } => *shape,
+                KeyframeTarget::Bone { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(shapes, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn retaining_top_level_shapes_reports_unknown_names_without_changing_the_asset() {
+        let mut asset = Asset {
+            shapes: vec![Shape {
+                name: "A".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let before = asset.clone();
+
+        let missing = asset
+            .retain_top_level_shapes(&["A".to_owned(), "Nope".to_owned()])
+            .unwrap_err();
+
+        assert_eq!(missing, ["Nope"]);
+        assert_eq!(asset, before);
+    }
+
+    #[test]
+    fn retaining_no_names_keeps_every_shape() {
+        let mut asset = Asset {
+            shapes: vec![
+                Shape {
+                    name: "A".into(),
+                    ..Default::default()
+                },
+                Shape {
+                    name: "B".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let before = asset.clone();
+
+        asset.retain_top_level_shapes(&[]).unwrap();
+
+        assert_eq!(asset, before);
     }
 
     #[test]

@@ -18,8 +18,9 @@
 //! - SVG import: [`svg`] imports the shapes of an SVG document when the `svg`
 //!   feature is enabled. It is independent of `bevy`, so the Bevy plugin does
 //!   not compile `usvg`.
-//! - conversion: [`convert`] imports SVG documents and rewrites assets in
-//!   either encoding, including from build scripts.
+//! - conversion: [`convert`] imports SVG documents, filters top-level shapes,
+//!   applies uniform transforms, and rewrites assets in either encoding,
+//!   including from build scripts.
 //! - Bevy: the `bevy` feature adds an asset loader, an immediate-mode scene
 //!   built from Z-sorted fragments, a producer for animated instances, a
 //!   parallax system, and a rendering plugin (see [`bevy`]).
