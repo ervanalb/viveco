@@ -22,7 +22,8 @@
 //!
 //! // stick::animations::WALK is the index of the "Walk" animation.
 //! // stick::animations::WALK_DURATION is its length in seconds.
-//! // stick::shapes::HEAD and stick::bones::HEAD are their names.
+//! // stick::shapes::HEAD and stick::bones::HEAD are their flat depth-first
+//! // pre-order indices. Each module also exposes `NAMES` and `INDICES` tables.
 //! ```
 //!
 //! Add `viveco` to `[build-dependencies]` with `default-features = false` so the
@@ -79,12 +80,12 @@ pub fn emit_asset_constants(
 
 /// Returns the generated Rust source for `asset`.
 ///
-/// The source defines `animations`, `shapes`, and `bones` modules. Animation
-/// constants are indices, and each animation also gets a `{NAME}_DURATION`
-/// constant; shape and bone constants are their names. Entries are emitted in
-/// tree order, unnamed entries and repeated names are skipped, and names that
-/// sanitize to the same identifier are disambiguated with `_2`, `_3`, and so
-/// on.
+/// The source defines `animations`, `shapes`, and `bones` modules. All three
+/// emit indices; animations also get a `{NAME}_DURATION` constant, and shape
+/// and bone modules expose `NAMES` and `INDICES` tables plus a
+/// `debug_assert_matches` helper. Entries are emitted in tree order, unnamed
+/// entries and repeated names are skipped, and names that sanitize to the same
+/// identifier are disambiguated with `_2`, `_3`, and so on.
 pub fn asset_constants_source(asset: &Asset) -> String {
     let animations = named_entries(
         asset
@@ -252,10 +253,13 @@ fn float_literal(value: f32) -> String {
 fn write_names(out: &mut String, module: &str, kind: &str, lookup: &str, entries: &[NamedEntry]) {
     let _ = writeln!(out, "pub mod {module} {{");
     for entry in entries {
-        let (name, identifier) = (&entry.name, &entry.identifier);
-        let _ = writeln!(out, "    /// Name of the {kind} {name:?}.");
+        let (name, identifier, index) = (&entry.name, &entry.identifier, entry.index);
+        let _ = writeln!(
+            out,
+            "    /// Flat depth-first pre-order index of the {kind} {name:?}."
+        );
         let _ = writeln!(out, "    #[allow(dead_code)]");
-        let _ = writeln!(out, "    pub const {identifier}: &str = {name:?};");
+        let _ = writeln!(out, "    pub const {identifier}: usize = {index};");
         out.push('\n');
     }
 
@@ -267,19 +271,28 @@ fn write_names(out: &mut String, module: &str, kind: &str, lookup: &str, entries
     }
     out.push_str("];\n\n");
 
+    let _ = writeln!(out, "    /// The {kind} names and indices in the asset.");
+    let _ = writeln!(out, "    #[allow(dead_code)]");
+    let _ = write!(out, "    pub const INDICES: &[(&str, usize)] = &[");
+    for entry in entries {
+        let _ = write!(out, "({:?}, {}), ", entry.name, entry.index);
+    }
+    out.push_str("];\n\n");
+
     let _ = writeln!(
         out,
-        "    /// Panics in debug builds if the loaded asset no longer has these {kind}s."
+        "    /// Panics in debug builds if the loaded asset no longer has these {kind}s\n\
+         \x20   /// at these indices."
     );
     let _ = writeln!(out, "    #[allow(dead_code)]");
     let _ = writeln!(
         out,
         "    pub fn debug_assert_matches(asset: &::viveco::Asset) {{"
     );
-    let _ = writeln!(out, "        for &name in NAMES {{");
+    let _ = writeln!(out, "        for &(name, index) in INDICES {{");
     let _ = writeln!(
         out,
-        "            debug_assert!(asset.{lookup}(name).is_some(), \"{kind} `{{name}}` is missing\");"
+        "            debug_assert_eq!(asset.{lookup}(name), Some(index), \"{kind} `{{name}}` moved to index {{index}}\");"
     );
     let _ = writeln!(out, "        }}");
     let _ = writeln!(out, "    }}");
@@ -482,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_shape_and_bone_name_modules() {
+    fn emits_shape_and_bone_index_modules() {
         let source = asset_constants_source(&Asset {
             shapes: vec![Shape {
                 name: "Body".into(),
@@ -506,13 +519,22 @@ mod tests {
         // Same name in both modules does not collide.
         assert_eq!(source.matches("pub mod shapes {").count(), 1);
         assert_eq!(source.matches("pub mod bones {").count(), 1);
-        assert!(source.contains(r#"pub const BODY: &str = "Body";"#));
-        assert!(source.contains(r#"pub const HEAD: &str = "Head";"#));
-        assert!(source.contains(r#"pub const ROOT: &str = "Root";"#));
+        assert!(source.contains("pub const BODY: usize = 0;"));
+        assert!(source.contains("pub const HEAD: usize = 1;"));
+        assert!(source.contains("pub const ROOT: usize = 0;"));
         assert!(source.contains("pub const NAMES: &[&str] = &[\"Body\", \"Head\", ];"));
         assert!(source.contains("pub const NAMES: &[&str] = &[\"Root\", \"Head\", ];"));
-        assert!(source.contains("asset.shape_index_by_name(name).is_some()"));
-        assert!(source.contains("asset.bone_index_by_name(name).is_some()"));
+        assert!(
+            source.contains(
+                "pub const INDICES: &[(&str, usize)] = &[(\"Body\", 0), (\"Head\", 1), ];"
+            )
+        );
+        assert!(source.contains(
+            "debug_assert_eq!(asset.shape_index_by_name(name), Some(index), \"shape `{name}` moved to index {index}\");"
+        ));
+        assert!(source.contains(
+            "debug_assert_eq!(asset.bone_index_by_name(name), Some(index), \"bone `{name}` moved to index {index}\");"
+        ));
     }
 
     #[test]
@@ -535,10 +557,7 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(
-            source.matches(r#"pub const HEAD: &str = "Head";"#).count(),
-            1
-        );
+        assert_eq!(source.matches("pub const HEAD: usize = 0;").count(), 1);
     }
 
     #[test]

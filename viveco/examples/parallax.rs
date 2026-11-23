@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use bevy_vello::VelloPlugin;
 use bevy_vello::prelude::*;
 use viveco::{
-    ParallaxLayer, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf,
+    ParallaxLayer, VivecoChildOf, VivecoInstance, VivecoPlugin, VivecoScene,
     VivecoStrokeWidthInPixels, apply_parallax,
 };
 
@@ -100,9 +100,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     let back = asset_server.load::<viveco::Asset>("landscape_back.viveco");
     let middle = asset_server.load::<viveco::Asset>("landscape_mid.viveco");
     let front = asset_server.load::<viveco::Asset>("landscape_front.viveco");
-    commands.spawn((VivecoInstance::from_asset(back), VivecoSceneOf(far)));
-    commands.spawn((VivecoInstance::from_asset(middle), VivecoSceneOf(mid)));
-    commands.spawn((VivecoInstance::from_asset(front), VivecoSceneOf(near)));
+    commands.spawn((VivecoInstance::from_asset(back), VivecoChildOf::root(far)));
+    commands.spawn((VivecoInstance::from_asset(middle), VivecoChildOf::root(mid)));
+    commands.spawn((VivecoInstance::from_asset(front), VivecoChildOf::root(near)));
 }
 
 /// Pans the orthographic camera so the parallax layers have something to react to.

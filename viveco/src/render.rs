@@ -74,6 +74,7 @@ impl Asset {
 /// [`SceneInstance::new`], [`SceneInstance::posed`], or
 /// [`SceneInstance::animated`], then adjust it with the `with_*` methods. Add
 /// it to a [`SceneBuilder`] with [`SceneBuilder::add_instance`].
+#[derive(Clone)]
 pub struct SceneInstance<'a> {
     /// The document to paint.
     pub asset: &'a Asset,
@@ -163,85 +164,223 @@ impl<'a> SceneInstance<'a> {
     }
 }
 
-/// A document painted inside one shape's clip layer.
+/// A placed node in a document tree.
 ///
-/// The attachment behaves like extra top-level shapes of the host document: its
-/// [`shapes`](crate::Asset::shapes) are painted after the host shape's fill,
-/// clipped to the shape's paths when it has any, and ordered against the
-/// shape's children by their own Z. This is the same ordering [`SceneBuilder`]
-/// uses when several assets are added to one scene.
+/// A node owns an optional document and a list of children. Each child is
+/// content grafted at a context: the node's root paint level (`shape: None`) or
+/// one shape of the node's document (`shape: Some(index)`). Root content shares
+/// this node's paint level, unclipped relative to it; shape content is painted
+/// inside that shape's clip and competes with its children by Z. Children nest
+/// to any depth.
 ///
-/// Its [`SceneInstance::transform`] places it in the host document's coordinate
-/// space, so the child is drawn in its own coordinates unless the caller moves
-/// it.
+/// [`placement`](Self::placement) is the scene-space placement of this node's
+/// content and already includes the node's own local transform. It is not
+/// composed with any Viveco parent; each node is placed independently. The
+/// [`SceneInstance::transform`] of a stored instance is ignored; use the node's
+/// placement instead.
 ///
-/// Add attachments to a [`SceneBuilder`] with
-/// [`SceneBuilder::add_attachment`]. Attachments are one level deep: a child
-/// document's own attachments are ignored.
-///
-/// ```ignore
-/// let mut builder = SceneBuilder::new();
-/// builder
-///     .add_instance(&host)
-///     .add_attachment(ShapeAttachment {
-///         shape: screen_shape_index,
-///         instance: SceneInstance::animated(&animation, &[(0, time, 1.0)])
-///             .with_transform(Affine::translate((40.0, 30.0))),
-///     });
-/// ```
-pub struct ShapeAttachment<'a> {
-    /// Flat depth-first pre-order index of the host shape to draw inside.
-    pub shape: ShapeIndex,
-    /// The child document, posed and placed in the host document's space.
-    pub instance: SceneInstance<'a>,
+/// Add nodes to a [`SceneBuilder`] with [`SceneBuilder::add_node`].
+pub struct DrawNode<'a> {
+    /// Scene-space placement of this node's content.
+    pub placement: Affine,
+    /// The node's own document, if it has one.
+    pub instance: Option<SceneInstance<'a>>,
+    /// Content attached to this node, by context.
+    pub children: Vec<DrawChild<'a>>,
+}
+
+impl<'a> DrawNode<'a> {
+    /// Starts an empty node placed at `placement` in scene space.
+    pub fn new(placement: Affine) -> Self {
+        Self {
+            placement,
+            instance: None,
+            children: Vec::new(),
+        }
+    }
+
+    /// Sets this node's document.
+    pub fn with_instance(mut self, instance: SceneInstance<'a>) -> Self {
+        self.instance = Some(instance);
+        self
+    }
+
+    /// Adds one child.
+    pub fn with_child(mut self, child: DrawChild<'a>) -> Self {
+        self.children.push(child);
+        self
+    }
+
+    /// Adds custom scenes at this node's root paint level.
+    pub fn with_fragments(mut self, fragments: impl IntoIterator<Item = SceneFragment>) -> Self {
+        self.children
+            .extend(fragments.into_iter().map(DrawChild::root_fragment));
+        self
+    }
+
+    /// Adds a node attached at this node's root.
+    pub fn with_root_child(self, child: DrawNode<'a>) -> Self {
+        self.with_child(DrawChild::root_node(child))
+    }
+
+    /// Adds a node attached inside `shape` of this node's document.
+    pub fn with_shape_child(self, shape: ShapeIndex, child: DrawNode<'a>) -> Self {
+        self.with_child(DrawChild::shape_node(shape, child))
+    }
+
+    /// Adds custom content inside `shape` of this node's document.
+    pub fn with_shape_fragment(self, shape: ShapeIndex, fragment: SceneFragment) -> Self {
+        self.with_child(DrawChild::shape_fragment(shape, fragment))
+    }
+
+    /// Sorts every child list in this subtree by context.
+    ///
+    /// Root-context children (`None`) come first, then shape-context children by
+    /// shape index. The sort is stable, so equal contexts keep the order they
+    /// were added. The renderer's per-shape lookup relies on this order.
+    pub fn sort_children(&mut self) {
+        self.children.sort_by_key(|child| child.shape);
+        for child in &mut self.children {
+            if let DrawContent::Node(node) = &mut child.content {
+                node.sort_children();
+            }
+        }
+    }
+}
+
+/// One piece of content attached to a node.
+pub struct DrawChild<'a> {
+    /// `None` attaches at the node's root paint level; `Some(shape)` attaches
+    /// inside that shape of the node's document.
+    pub shape: Option<ShapeIndex>,
+    /// What is attached.
+    pub content: DrawContent<'a>,
+}
+
+impl<'a> DrawChild<'a> {
+    /// A nested node at the parent's root level.
+    pub fn root_node(node: DrawNode<'a>) -> Self {
+        Self {
+            shape: None,
+            content: DrawContent::Node(node),
+        }
+    }
+
+    /// A nested node inside `shape` of the parent's document.
+    pub fn shape_node(shape: ShapeIndex, node: DrawNode<'a>) -> Self {
+        Self {
+            shape: Some(shape),
+            content: DrawContent::Node(node),
+        }
+    }
+
+    /// Custom content at the parent's root level.
+    pub fn root_fragment(fragment: SceneFragment) -> Self {
+        Self {
+            shape: None,
+            content: DrawContent::Fragment(fragment),
+        }
+    }
+
+    /// Custom content inside `shape` of the parent's document.
+    pub fn shape_fragment(shape: ShapeIndex, fragment: SceneFragment) -> Self {
+        Self {
+            shape: Some(shape),
+            content: DrawContent::Fragment(fragment),
+        }
+    }
+}
+
+/// Content attached at one context.
+pub enum DrawContent<'a> {
+    /// A nested node subtree.
+    Node(DrawNode<'a>),
+    /// Custom Vello content, authored in the parent node's local space.
+    Fragment(SceneFragment),
 }
 
 /// One stand-alone piece of a scene, with the Z at which to draw it.
 ///
-/// A fragment owns a complete Vello scene in scene space (including any
-/// placement transform), so fragments can be sorted, stored, and appended in
-/// any order. [`SceneBuilder::into_fragments`] produces one fragment per
-/// top-level shape, which is how the Bevy integration keeps instance artwork
-/// Z-sorted against custom fragments. When a shape has animated offsets, its
-/// fragment's Z is the effective Z, not the authored one.
+/// A fragment owns a complete Vello scene and the placement to append it
+/// through, so fragments can be sorted, stored, and appended in any order.
+/// [`SceneBuilder::into_fragments`] produces one fragment per top-level shape,
+/// which is how the Bevy integration keeps instance artwork Z-sorted against
+/// custom fragments. When a shape has animated offsets, its fragment's Z is the
+/// effective Z, not the authored one.
 pub struct SceneFragment {
     /// Sort key: fragments are drawn in ascending Z.
     pub z: f32,
+    /// Placement applied when the fragment is appended.
+    pub transform: Affine,
     /// The fragment's complete Vello content.
     pub scene: Scene,
 }
 
-/// One shape queued in a [`SceneBuilder`], with the placement that puts it in
-/// scene space.
-struct Placement<'a> {
-    shape: &'a Shape,
-    world_pose: Option<&'a WorldPose>,
-    shape_pose: Option<&'a ShapePose>,
-    /// The shape's flat depth-first pre-order index, used to index `shape_pose`.
-    flat_index: usize,
-    /// The shape's effective Z, including its animated offset.
-    z: f32,
-    stroke_width: f32,
-    transform: Affine,
+impl SceneFragment {
+    /// A fragment drawn through the identity transform.
+    pub fn new(z: f32, scene: Scene) -> Self {
+        Self {
+            z,
+            transform: Affine::IDENTITY,
+            scene,
+        }
+    }
 }
 
-/// Collects top-level shapes from one or more assets and paints them into a
-/// [`Scene`], sorted by Z across all of them.
+/// One scene-level item queued in a [`SceneBuilder`].
+enum SceneItem<'a> {
+    /// One top-level shape of a node's document.
+    Shape {
+        node: usize,
+        top_level: usize,
+        flat_index: usize,
+        z: f32,
+    },
+    /// One stand-alone shape added directly to the builder.
+    StandaloneShape {
+        shape: &'a Shape,
+        world_pose: Option<&'a WorldPose>,
+        shape_pose: Option<&'a ShapePose>,
+        stroke_width: f32,
+        transform: Affine,
+        z: f32,
+    },
+    /// One custom scene, already placed relative to its node.
+    Fragment {
+        z: f32,
+        transform: Affine,
+        scene: Box<Scene>,
+    },
+}
+
+impl SceneItem<'_> {
+    fn z(&self) -> f32 {
+        match self {
+            Self::Shape { z, .. } | Self::StandaloneShape { z, .. } | Self::Fragment { z, .. } => {
+                *z
+            }
+        }
+    }
+}
+
+/// A root-closure node retained by a [`SceneBuilder`] for drawing its shapes.
+struct SceneNode<'a> {
+    placement: Affine,
+    instance: Option<SceneInstance<'a>>,
+    /// The node's shape-context children, retained for shape draws.
+    children: Vec<DrawChild<'a>>,
+}
+
+/// Collects top-level shapes and custom scenes from one or more nodes and
+/// paints them into a [`Scene`], sorted by Z across all of them.
 ///
 /// Shapes are painted in ascending Z; equal Z keeps the order they were added.
-/// Children stay grouped with their parent and are not re-sorted against the
-/// top-level shapes.
-///
-/// A placement transform affects only the shapes added with it. This is how
-/// callers bake per-asset entity transforms into one shared scene.
-///
-/// [`add_attachment`](Self::add_attachment) nests another document inside a
-/// shape of an asset added here. Attachments are painted while their host
-/// shape is drawn, so they inherit its clip and paint order.
+/// A node's root-context children share its paint level, while its shape-context
+/// children are painted inside the shape's clip layer.
 #[derive(Default)]
 pub struct SceneBuilder<'a> {
-    placements: Vec<Placement<'a>>,
-    attachments: Vec<ShapeAttachment<'a>>,
+    nodes: Vec<SceneNode<'a>>,
+    items: Vec<SceneItem<'a>>,
 }
 
 impl<'a> SceneBuilder<'a> {
@@ -250,26 +389,84 @@ impl<'a> SceneBuilder<'a> {
         Self::default()
     }
 
-    /// Adds every top-level shape of `instance`.
-    pub fn add_instance(&mut self, instance: &'a SceneInstance<'a>) -> &mut Self {
-        self.add_asset_with_pose(
-            instance.asset,
-            instance.world_pose.as_ref(),
-            instance.shape_pose.as_ref(),
-            instance.stroke_width,
-            instance.transform,
-        )
+    /// Adds a node and everything attached at its root.
+    ///
+    /// Root-context children are flattened into this builder's paint level.
+    /// Shape-context children stay with the node and are resolved while its
+    /// shapes are drawn.
+    pub fn add_node(&mut self, mut node: DrawNode<'a>) -> &mut Self {
+        node.sort_children();
+        self.add_node_at_root(node);
+        self
     }
 
-    /// Queues `attachment` to be painted inside its host shape's clip layer.
-    ///
-    /// Attachments are drawn while the shape whose
-    /// [`flat index`](ShapeAttachment::shape) matches is painted, so they are
-    /// ordered with its children by [`z`](ShapeAttachment::z). They must be
-    /// added to the same builder as the asset that contains the host shape.
-    pub fn add_attachment(&mut self, attachment: ShapeAttachment<'a>) -> &mut Self {
-        self.attachments.push(attachment);
-        self
+    fn add_node_at_root(&mut self, node: DrawNode<'a>) {
+        let DrawNode {
+            placement,
+            instance,
+            children,
+        } = node;
+
+        let mut shape_children = Vec::new();
+        let mut root_children = Vec::new();
+        for child in children {
+            if child.shape.is_some() {
+                shape_children.push(child);
+            } else {
+                root_children.push(child);
+            }
+        }
+
+        let node_index = self.nodes.len();
+        self.nodes.push(SceneNode {
+            placement,
+            instance,
+            children: shape_children,
+        });
+
+        if let Some(instance) = &self.nodes[node_index].instance {
+            let mut flat_index = 0;
+            for (top_level, shape) in instance.asset.shapes.iter().enumerate() {
+                let z = shape.z
+                    + instance
+                        .shape_pose
+                        .as_ref()
+                        .map_or(0.0, |pose| pose.get(flat_index));
+                self.items.push(SceneItem::Shape {
+                    node: node_index,
+                    top_level,
+                    flat_index,
+                    z,
+                });
+                flat_index += shape.subtree_len();
+            }
+        }
+
+        for child in root_children {
+            match child.content {
+                DrawContent::Fragment(fragment) => {
+                    let SceneFragment {
+                        z,
+                        transform,
+                        scene,
+                    } = fragment;
+                    self.items.push(SceneItem::Fragment {
+                        z,
+                        transform: placement * transform,
+                        scene: Box::new(scene),
+                    });
+                }
+                DrawContent::Node(child_node) => self.add_node_at_root(child_node),
+            }
+        }
+    }
+
+    /// Adds every top-level shape of `instance` as a root node.
+    pub fn add_instance(&mut self, instance: &'a SceneInstance<'a>) -> &mut Self {
+        let mut instance = instance.clone();
+        let placement = instance.transform;
+        instance.transform = Affine::IDENTITY;
+        self.add_node(DrawNode::new(placement).with_instance(instance))
     }
 
     /// Adds every top-level shape of `asset` with an identity placement.
@@ -334,21 +531,14 @@ impl<'a> SceneBuilder<'a> {
         stroke_width: f32,
         transform: Affine,
     ) -> &mut Self {
-        let mut flat_index = 0;
-        for shape in &asset.shapes {
-            let z = shape.z + shape_pose.map_or(0.0, |pose| pose.get(flat_index));
-            self.placements.push(Placement {
-                shape,
-                world_pose,
-                shape_pose,
-                flat_index,
-                z,
-                stroke_width,
-                transform,
-            });
-            flat_index += shape.subtree_len();
-        }
-        self
+        let instance = SceneInstance {
+            asset,
+            world_pose: world_pose.cloned(),
+            shape_pose: shape_pose.cloned(),
+            transform: Affine::IDENTITY,
+            stroke_width,
+        };
+        self.add_node(DrawNode::new(transform).with_instance(instance))
     }
 
     /// Adds a single top-level shape with an identity placement.
@@ -363,14 +553,13 @@ impl<'a> SceneBuilder<'a> {
         stroke_width: f32,
         transform: Affine,
     ) -> &mut Self {
-        self.placements.push(Placement {
+        self.items.push(SceneItem::StandaloneShape {
             shape,
             world_pose: None,
             shape_pose: None,
-            flat_index: 0,
-            z: shape.z,
             stroke_width,
             transform,
+            z: shape.z,
         });
         self
     }
@@ -384,78 +573,143 @@ impl<'a> SceneBuilder<'a> {
         stroke_width: f32,
         transform: Affine,
     ) -> &mut Self {
-        self.placements.push(Placement {
+        self.items.push(SceneItem::StandaloneShape {
             shape,
             world_pose: Some(world_pose),
             shape_pose: None,
-            flat_index: 0,
-            z: shape.z,
             stroke_width,
             transform,
+            z: shape.z,
         });
         self
     }
 
-    /// Sorts the collected shapes by Z and paints them into `scene`, appending
+    /// Sorts the collected items by Z and paints them into `scene`, appending
     /// to whatever the scene already contains.
     pub fn finish(mut self, scene: &mut Scene) {
         self.sort();
-        for placement in &self.placements {
-            placement.shape.draw(
-                scene,
-                placement.stroke_width,
-                placement.transform,
-                placement.world_pose,
-                placement.shape_pose,
-                placement.flat_index,
-                &self.attachments,
-            );
+        let nodes = &self.nodes;
+        for item in &self.items {
+            match item {
+                SceneItem::Shape {
+                    node,
+                    top_level,
+                    flat_index,
+                    ..
+                } => {
+                    let node = &nodes[*node];
+                    if let Some(instance) = &node.instance {
+                        instance.asset.shapes[*top_level].draw(
+                            scene,
+                            instance.stroke_width,
+                            node.placement,
+                            instance.world_pose.as_ref(),
+                            instance.shape_pose.as_ref(),
+                            *flat_index,
+                            &node.children,
+                        );
+                    }
+                }
+                SceneItem::StandaloneShape {
+                    shape,
+                    world_pose,
+                    shape_pose,
+                    stroke_width,
+                    transform,
+                    ..
+                } => {
+                    shape.draw(
+                        scene,
+                        *stroke_width,
+                        *transform,
+                        *world_pose,
+                        *shape_pose,
+                        0,
+                        &[],
+                    );
+                }
+                SceneItem::Fragment {
+                    transform,
+                    scene: fragment,
+                    ..
+                } => {
+                    scene.append(fragment, Some(*transform));
+                }
+            }
         }
     }
 
-    /// Sorts the collected shapes by Z and paints each one into its own
-    /// [`SceneFragment`], with the placement baked in.
+    /// Sorts the collected items by Z and paints each one into its own
+    /// [`SceneFragment`].
     ///
-    /// One fragment per top-level shape. Children stay grouped with their
-    /// parent. Equal Z keeps the order the shapes were added.
+    /// One fragment per top-level shape or custom scene. A node's root-context
+    /// children join this level, so their shapes and custom scenes are separate
+    /// fragments too.
     pub fn into_fragments(mut self) -> Vec<SceneFragment> {
         self.sort();
-        let Self {
-            placements,
-            attachments,
-        } = self;
-        placements
+        let Self { nodes, items } = self;
+        items
             .into_iter()
-            .map(|placement| {
-                let mut scene = Scene::new();
-                placement.shape.draw(
-                    &mut scene,
-                    placement.stroke_width,
-                    placement.transform,
-                    placement.world_pose,
-                    placement.shape_pose,
-                    placement.flat_index,
-                    &attachments,
-                );
-                SceneFragment {
-                    z: placement.z,
-                    scene,
+            .map(|item| match item {
+                SceneItem::Shape {
+                    node,
+                    top_level,
+                    flat_index,
+                    z,
+                } => {
+                    let node = &nodes[node];
+                    let mut scene = Scene::new();
+                    if let Some(instance) = &node.instance {
+                        instance.asset.shapes[top_level].draw(
+                            &mut scene,
+                            instance.stroke_width,
+                            node.placement,
+                            instance.world_pose.as_ref(),
+                            instance.shape_pose.as_ref(),
+                            flat_index,
+                            &node.children,
+                        );
+                    }
+                    SceneFragment::new(z, scene)
                 }
+                SceneItem::StandaloneShape {
+                    shape,
+                    world_pose,
+                    shape_pose,
+                    stroke_width,
+                    transform,
+                    z,
+                } => {
+                    let mut scene = Scene::new();
+                    shape.draw(
+                        &mut scene,
+                        stroke_width,
+                        transform,
+                        world_pose,
+                        shape_pose,
+                        0,
+                        &[],
+                    );
+                    SceneFragment::new(z, scene)
+                }
+                SceneItem::Fragment {
+                    z,
+                    transform,
+                    scene,
+                } => SceneFragment {
+                    z,
+                    transform,
+                    scene: *scene,
+                },
             })
             .collect()
     }
 
     /// Stable sort by ascending effective Z, matching
     /// [`indices_in_paint_order`](crate::indices_in_paint_order).
-    ///
-    /// Attachments are also sorted by host shape index, so [`Shape::draw`] can
-    /// find the ones belonging to a shape with one binary search instead of
-    /// scanning every attachment. The sort is stable, so attachments sharing a
-    /// host shape keep the order they were added.
     fn sort(&mut self) {
-        self.placements
-            .sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
-        self.attachments.sort_by_key(|attachment| attachment.shape);
+        self.items
+            .sort_by(|a, b| a.z().partial_cmp(&b.z()).unwrap_or(Ordering::Equal));
     }
 }
 
@@ -498,19 +752,19 @@ impl Shape {
             0,
             &[],
         );
-        SceneFragment { z: self.z, scene }
+        SceneFragment::new(self.z, scene)
     }
 
     /// Paints this shape and its descendants into `scene`, through `transform`.
     ///
     /// `flat_index` is this shape's depth-first pre-order index, which anchors
-    /// the indices passed to its children for `shape_pose`. Attachments whose
-    /// [`shape`](ShapeAttachment::shape) matches this index contribute their
-    /// top-level shapes to this shape's clip layer, where they compete with its
-    /// children by Z. `attachments` must be sorted by shape index;
-    /// [`SceneBuilder`] maintains that order.
+    /// the indices passed to its children for `shape_pose`. `children` are the
+    /// owning node's children: those attached to this shape contribute their
+    /// content to this shape's clip layer, where it competes with the shape's
+    /// children by Z. `children` must be sorted by context;
+    /// [`DrawNode::sort_children`] maintains that order.
     #[allow(clippy::too_many_arguments)]
-    fn draw(
+    fn draw<'n, 'a>(
         &self,
         scene: &mut Scene,
         stroke_width: f32,
@@ -518,14 +772,22 @@ impl Shape {
         world_pose: Option<&WorldPose>,
         shape_pose: Option<&ShapePose>,
         flat_index: usize,
-        attachments: &[ShapeAttachment<'_>],
+        children: &'n [DrawChild<'a>],
     ) {
         let path = self.to_bez_path_with_pose(world_pose);
         draw_fill(scene, &self.style, &path, transform);
 
         let child_flat = child_flat_indices(self, flat_index);
-        let painters =
-            painters_in_paint_order(self, &child_flat, flat_index, shape_pose, attachments);
+        let mut nodes = Vec::new();
+        let painters = painters_in_paint_order(
+            self,
+            &child_flat,
+            flat_index,
+            shape_pose,
+            transform,
+            children,
+            &mut nodes,
+        );
 
         if !painters.is_empty() {
             // Without paths there is nothing to clip against, so the children
@@ -543,23 +805,31 @@ impl Shape {
                         world_pose,
                         shape_pose,
                         child_flat[index],
-                        attachments,
+                        children,
                     ),
-                    Painter::AttachmentShape {
-                        attachment,
+                    Painter::NodeShape {
+                        node,
                         top_level,
                         flat_index,
                     } => {
-                        let instance = &attachments[attachment].instance;
-                        instance.asset.shapes[top_level].draw(
-                            scene,
-                            instance.stroke_width,
-                            transform * instance.transform,
-                            instance.world_pose.as_ref(),
-                            instance.shape_pose.as_ref(),
-                            flat_index,
-                            &[],
-                        );
+                        let node = nodes[node];
+                        if let Some(instance) = &node.instance {
+                            instance.asset.shapes[top_level].draw(
+                                scene,
+                                instance.stroke_width,
+                                node.placement,
+                                instance.world_pose.as_ref(),
+                                instance.shape_pose.as_ref(),
+                                flat_index,
+                                &node.children,
+                            );
+                        }
+                    }
+                    Painter::Fragment {
+                        fragment,
+                        transform,
+                    } => {
+                        scene.append(&fragment.scene, Some(transform));
                     }
                 }
             }
@@ -627,54 +897,85 @@ fn child_flat_indices(shape: &Shape, flat_index: usize) -> Vec<usize> {
 }
 
 /// One painter queued inside a shape.
-enum Painter {
+enum Painter<'n> {
     /// Index into the shape's children.
     Child(usize),
-    /// A top-level shape of an attachment.
-    AttachmentShape {
-        /// Index into the attachments passed to [`Shape::draw`].
-        attachment: usize,
-        /// Index into the attachment asset's top-level shapes.
+    /// A top-level shape of an attached node.
+    NodeShape {
+        /// Index into the node arena built for this draw.
+        node: usize,
+        /// Index into the node's document top-level shapes.
         top_level: usize,
-        /// The top-level shape's flat index in the attachment asset.
+        /// The top-level shape's flat index in the node's document.
         flat_index: usize,
+    },
+    /// Custom content attached to this shape.
+    Fragment {
+        /// The custom scene.
+        fragment: &'n SceneFragment,
+        /// Its scene-space placement.
+        transform: Affine,
     },
 }
 
 /// Collects the painters inside `shape` in paint order.
 ///
-/// Child shapes and the top-level shapes of matching attachments share one Z
-/// space, matching [`SceneBuilder`]'s ordering across assets. The sort is
-/// stable, so equal Z keeps the children's tree order, then the attachments in
-/// the order they were added, each in asset order.
-///
-/// Nested attachments are not included: attachments are one level deep.
-fn painters_in_paint_order(
+/// Child shapes and every child attached to this shape share one Z space,
+/// matching [`SceneBuilder`]'s ordering across documents. The sort is stable, so
+/// equal Z keeps the children's tree order, then the attached content in the
+/// order it was added.
+fn painters_in_paint_order<'n, 'a>(
     shape: &Shape,
     child_flat: &[usize],
     flat_index: usize,
     shape_pose: Option<&ShapePose>,
-    attachments: &[ShapeAttachment<'_>],
-) -> Vec<(f32, Painter)> {
-    // Attachments are sorted by host shape index, so two binary searches find
-    // the ones drawn here instead of scanning all of them.
-    let first = attachments.partition_point(|attachment| attachment.shape < flat_index);
-    let past_last = attachments.partition_point(|attachment| attachment.shape <= flat_index);
-
-    let attachment_shapes: usize = attachments[first..past_last]
-        .iter()
-        .map(|attachment| attachment.instance.asset.shapes.len())
-        .sum();
-    let mut painters = Vec::with_capacity(shape.children.len() + attachment_shapes);
+    transform: Affine,
+    children: &'n [DrawChild<'a>],
+    nodes: &mut Vec<&'n DrawNode<'a>>,
+) -> Vec<(f32, Painter<'n>)> {
+    let mut painters = Vec::with_capacity(shape.children.len());
 
     for (index, flat) in child_flat.iter().enumerate() {
         let z = shape.children[index].z + shape_pose.map_or(0.0, |pose| pose.get(*flat));
         painters.push((z, Painter::Child(index)));
     }
 
-    for (offset, attachment) in attachments[first..past_last].iter().enumerate() {
-        let attachment_index = first + offset;
-        let instance = &attachment.instance;
+    // Children are sorted by context, so two binary searches find the ones
+    // attached to this shape instead of scanning all of them.
+    let context = Some(flat_index);
+    let first = children.partition_point(|child| child.shape < context);
+    let past_last = children.partition_point(|child| child.shape <= context);
+    for child in &children[first..past_last] {
+        match &child.content {
+            DrawContent::Fragment(fragment) => painters.push((
+                fragment.z,
+                Painter::Fragment {
+                    fragment,
+                    transform: transform * fragment.transform,
+                },
+            )),
+            DrawContent::Node(node) => push_node_painters(node, nodes, &mut painters),
+        }
+    }
+
+    painters.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    painters
+}
+
+/// Adds the root-level content of `node` and its root-context children to
+/// `painters`.
+///
+/// Content attached to the node's shapes is not added here: it is resolved
+/// while each of the node's top-level shapes is drawn.
+fn push_node_painters<'n, 'a>(
+    node: &'n DrawNode<'a>,
+    nodes: &mut Vec<&'n DrawNode<'a>>,
+    painters: &mut Vec<(f32, Painter<'n>)>,
+) {
+    let node_index = nodes.len();
+    nodes.push(node);
+
+    if let Some(instance) = &node.instance {
         let mut flat_index = 0;
         for (top_level, top_shape) in instance.asset.shapes.iter().enumerate() {
             let z = top_shape.z
@@ -684,8 +985,8 @@ fn painters_in_paint_order(
                     .map_or(0.0, |pose| pose.get(flat_index));
             painters.push((
                 z,
-                Painter::AttachmentShape {
-                    attachment: attachment_index,
+                Painter::NodeShape {
+                    node: node_index,
                     top_level,
                     flat_index,
                 },
@@ -694,8 +995,21 @@ fn painters_in_paint_order(
         }
     }
 
-    painters.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-    painters
+    for child in &node.children {
+        if child.shape.is_some() {
+            continue;
+        }
+        match &child.content {
+            DrawContent::Fragment(fragment) => painters.push((
+                fragment.z,
+                Painter::Fragment {
+                    fragment,
+                    transform: node.placement * fragment.transform,
+                },
+            )),
+            DrawContent::Node(child_node) => push_node_painters(child_node, nodes, painters),
+        }
+    }
 }
 
 fn draw_fill(scene: &mut Scene, style: &Style, path: &BezPath, transform: Affine) {
@@ -1014,11 +1328,7 @@ mod tests {
         builder.add_asset(&first, 1.).add_asset(&second, 2.);
         builder.sort();
 
-        let order: Vec<f32> = builder
-            .placements
-            .iter()
-            .map(|placement| placement.z)
-            .collect();
+        let order: Vec<f32> = builder.items.iter().map(SceneItem::z).collect();
         assert_eq!(order, vec![1.0, 2.0, 3.0, 5.0]);
     }
 
@@ -1040,9 +1350,17 @@ mod tests {
         builder.sort();
 
         let order: Vec<&str> = builder
-            .placements
+            .items
             .iter()
-            .map(|placement| placement.shape.name.as_str())
+            .map(|item| match item {
+                SceneItem::Shape {
+                    node, top_level, ..
+                } => builder.nodes[*node].instance.as_ref().unwrap().asset.shapes[*top_level]
+                    .name
+                    .as_str(),
+                SceneItem::StandaloneShape { shape, .. } => shape.name.as_str(),
+                SceneItem::Fragment { .. } => "",
+            })
             .collect();
         assert_eq!(order, vec!["low", "added", "high"]);
     }
@@ -1063,10 +1381,13 @@ mod tests {
         builder.add_asset(&first, 1.0);
         builder.add_asset_with_transform(&first, 2.0, transform);
 
-        assert_eq!(builder.placements.len(), 4);
-        assert_eq!(builder.placements[0].transform, Affine::IDENTITY);
-        assert_eq!(builder.placements[2].transform, transform);
-        assert_eq!(builder.placements[2].stroke_width, 2.0);
+        assert_eq!(builder.items.len(), 4);
+        assert_eq!(builder.nodes[0].placement, Affine::IDENTITY);
+        assert_eq!(builder.nodes[1].placement, transform);
+        assert_eq!(
+            builder.nodes[1].instance.as_ref().unwrap().stroke_width,
+            2.0
+        );
     }
 
     #[test]
@@ -1231,16 +1552,14 @@ mod tests {
 
         let mut builder = SceneBuilder::new();
         builder.add_asset_with_shape_pose(&asset, &pose, 1.0);
-        let placements = &builder.placements;
-        let child_flat = child_flat_indices(placements[0].shape, 0);
+        let shape = &builder.nodes[0].instance.as_ref().unwrap().asset.shapes[0];
+        let child_flat = child_flat_indices(shape, 0);
         assert_eq!(child_flat, vec![1, 2]);
 
         let order: Vec<usize> = {
             let mut order: Vec<usize> = (0..2).collect();
             order.sort_by(|&a, &b| {
-                let z = |index: usize| {
-                    placements[0].shape.children[index].z + pose.get(child_flat[index])
-                };
+                let z = |index: usize| shape.children[index].z + pose.get(child_flat[index]);
                 z(a).partial_cmp(&z(b)).unwrap()
             });
             order
@@ -1276,15 +1595,17 @@ mod tests {
             shapes: vec![filled_rect([0.0, 0.0], [20.0, 20.0])],
             ..Default::default()
         };
+        let node = DrawNode::new(Affine::IDENTITY)
+            .with_instance(SceneInstance::new(&host))
+            .with_shape_child(
+                0,
+                DrawNode::new(Affine::translate((2.0, 3.0)))
+                    .with_instance(SceneInstance::new(&child)),
+            );
 
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new();
-        builder
-            .add_asset(&host, 1.0)
-            .add_attachment(ShapeAttachment {
-                shape: 0,
-                instance: SceneInstance::new(&child).with_transform(Affine::translate((2.0, 3.0))),
-            });
+        builder.add_node(node);
         builder.finish(&mut scene);
 
         let encoding = scene.encoding();
@@ -1318,15 +1639,16 @@ mod tests {
             shapes: vec![filled_rect([0.0, 0.0], [4.0, 4.0])],
             ..Default::default()
         };
+        let node = DrawNode::new(Affine::IDENTITY)
+            .with_instance(SceneInstance::new(&host))
+            .with_shape_child(
+                1,
+                DrawNode::new(Affine::IDENTITY).with_instance(SceneInstance::new(&child)),
+            );
 
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new();
-        builder
-            .add_asset(&host, 1.0)
-            .add_attachment(ShapeAttachment {
-                shape: 1,
-                instance: SceneInstance::new(&child),
-            });
+        builder.add_node(node);
         builder.finish(&mut scene);
 
         let encoding = scene.encoding();
@@ -1335,6 +1657,46 @@ mod tests {
         assert_eq!(encoding.n_paths, 6);
         // The top-level shape clips its child, and that child clips the
         // attachment: two layers, each with a begin and an end.
+        assert_eq!(encoding.n_clips, 4);
+        assert_eq!(encoding.n_open_clips, 0);
+    }
+
+    #[test]
+    fn attachments_nest_to_arbitrary_depth() {
+        // Three documents, each attached inside shape 0 of the previous one.
+        let bottom = Asset {
+            shapes: vec![filled_rect([0.0, 0.0], [4.0, 4.0])],
+            ..Default::default()
+        };
+        let middle = Asset {
+            shapes: vec![filled_rect([0.0, 0.0], [8.0, 8.0])],
+            ..Default::default()
+        };
+        let top = Asset {
+            shapes: vec![filled_rect([0.0, 0.0], [10.0, 10.0])],
+            ..Default::default()
+        };
+
+        let node = DrawNode::new(Affine::IDENTITY)
+            .with_instance(SceneInstance::new(&top))
+            .with_shape_child(
+                0,
+                DrawNode::new(Affine::IDENTITY)
+                    .with_instance(SceneInstance::new(&middle))
+                    .with_shape_child(
+                        0,
+                        DrawNode::new(Affine::IDENTITY).with_instance(SceneInstance::new(&bottom)),
+                    ),
+            );
+
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new();
+        builder.add_node(node);
+        builder.finish(&mut scene);
+
+        let encoding = scene.encoding();
+        // Three fills plus two nested clip layers' bookkeeping paths.
+        assert_eq!(encoding.n_paths, 7);
         assert_eq!(encoding.n_clips, 4);
         assert_eq!(encoding.n_open_clips, 0);
     }
@@ -1349,15 +1711,16 @@ mod tests {
             shapes: vec![filled_rect([0.0, 0.0], [4.0, 4.0])],
             ..Default::default()
         };
+        let node = DrawNode::new(Affine::IDENTITY)
+            .with_instance(SceneInstance::new(&host))
+            .with_shape_child(
+                99,
+                DrawNode::new(Affine::IDENTITY).with_instance(SceneInstance::new(&child)),
+            );
 
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new();
-        builder
-            .add_asset(&host, 1.0)
-            .add_attachment(ShapeAttachment {
-                shape: 99,
-                instance: SceneInstance::new(&child),
-            });
+        builder.add_node(node);
         builder.finish(&mut scene);
 
         assert_eq!(scene.encoding().n_paths, 1);
@@ -1397,30 +1760,189 @@ mod tests {
             ],
             ..Default::default()
         };
-        let attachments = [ShapeAttachment {
-            shape: 0,
-            instance: SceneInstance::new(&child),
-        }];
+        let children = [DrawChild::shape_node(
+            0,
+            DrawNode::new(Affine::IDENTITY).with_instance(SceneInstance::new(&child)),
+        )];
 
         let child_flat = child_flat_indices(&host, 0);
-        let painters = painters_in_paint_order(&host, &child_flat, 0, None, &attachments);
+        let mut nodes = Vec::new();
+        let painters = painters_in_paint_order(
+            &host,
+            &child_flat,
+            0,
+            None,
+            Affine::IDENTITY,
+            &children,
+            &mut nodes,
+        );
 
         let names: Vec<&str> = painters
             .iter()
             .map(|(_, painter)| match painter {
                 Painter::Child(index) => host.children[*index].name.as_str(),
-                Painter::AttachmentShape {
-                    attachment,
-                    top_level,
-                    ..
-                } => attachments[*attachment].instance.asset.shapes[*top_level]
+                Painter::NodeShape {
+                    node, top_level, ..
+                } => nodes[*node].instance.as_ref().unwrap().asset.shapes[*top_level]
                     .name
                     .as_str(),
+                Painter::Fragment { .. } => "",
             })
             .collect();
 
         // The child's shapes are interleaved with the host shape's children by
         // their own Z, exactly like top-level shapes of separate assets.
         assert_eq!(names, vec!["back", "low", "high", "front"]);
+    }
+
+    #[test]
+    fn an_attachment_can_draw_custom_scenes_inside_the_clip() {
+        let host = Asset {
+            shapes: vec![filled_rect([0.0, 0.0], [10.0, 10.0])],
+            ..Default::default()
+        };
+        let mut custom = Scene::new();
+        custom.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgba8(0, 0, 255, 255),
+            None,
+            &vello::kurbo::Rect::new(0.0, 0.0, 4.0, 4.0),
+        );
+        let node = DrawNode::new(Affine::IDENTITY)
+            .with_instance(SceneInstance::new(&host))
+            .with_shape_child(
+                0,
+                DrawNode::new(Affine::translate((2.0, 3.0)))
+                    .with_fragments([SceneFragment::new(1.0, custom)]),
+            );
+
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new();
+        builder.add_node(node);
+        builder.finish(&mut scene);
+
+        let encoding = scene.encoding();
+        // The host fill, the custom fill, and the clip layer's bookkeeping.
+        assert_eq!(encoding.n_paths, 4);
+        assert_eq!(encoding.n_clips, 2);
+        assert_eq!(encoding.n_open_clips, 0);
+        assert!(
+            encoding
+                .transforms
+                .iter()
+                .any(|transform| transform.translation == [2.0, 3.0]),
+            "the custom scene is placed inside the host document"
+        );
+    }
+
+    #[test]
+    fn a_shape_fragment_is_drawn_inside_its_shape() {
+        let host = Asset {
+            shapes: vec![filled_rect([0.0, 0.0], [10.0, 10.0])],
+            ..Default::default()
+        };
+        let mut custom = Scene::new();
+        custom.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgba8(0, 0, 255, 255),
+            None,
+            &vello::kurbo::Rect::new(0.0, 0.0, 4.0, 4.0),
+        );
+        let node = DrawNode::new(Affine::IDENTITY)
+            .with_instance(SceneInstance::new(&host))
+            .with_shape_fragment(0, SceneFragment::new(1.0, custom));
+
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new();
+        builder.add_node(node);
+        builder.finish(&mut scene);
+
+        let encoding = scene.encoding();
+        // The host fill, the custom fill, and the clip layer's bookkeeping.
+        assert_eq!(encoding.n_paths, 4);
+        assert_eq!(encoding.n_clips, 2);
+        assert_eq!(encoding.n_open_clips, 0);
+    }
+
+    #[test]
+    fn shape_fragments_compete_with_the_shapes_children_by_z() {
+        let host = Shape {
+            children: vec![
+                Shape {
+                    name: "back".into(),
+                    z: 0.0,
+                    ..Default::default()
+                },
+                Shape {
+                    name: "front".into(),
+                    z: 3.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let children = [DrawChild::shape_fragment(
+            0,
+            SceneFragment::new(1.0, Scene::new()),
+        )];
+        let child_flat = child_flat_indices(&host, 0);
+        let mut nodes = Vec::new();
+        let painters = painters_in_paint_order(
+            &host,
+            &child_flat,
+            0,
+            None,
+            Affine::IDENTITY,
+            &children,
+            &mut nodes,
+        );
+
+        let order: Vec<&str> = painters
+            .iter()
+            .map(|(_, painter)| match painter {
+                Painter::Child(index) => host.children[*index].name.as_str(),
+                Painter::Fragment { .. } => "fragment",
+                Painter::NodeShape { .. } => "node",
+            })
+            .collect();
+        assert_eq!(order, vec!["back", "fragment", "front"]);
+    }
+
+    #[test]
+    fn root_children_join_the_scene_level() {
+        let host = Asset {
+            shapes: vec![filled_rect([0.0, 0.0], [10.0, 10.0])],
+            ..Default::default()
+        };
+        let child = Asset {
+            shapes: vec![filled_rect([0.0, 0.0], [4.0, 4.0])],
+            ..Default::default()
+        };
+        let node = DrawNode::new(Affine::IDENTITY)
+            .with_instance(SceneInstance::new(&host))
+            .with_root_child(
+                DrawNode::new(Affine::translate((5.0, 6.0)))
+                    .with_instance(SceneInstance::new(&child)),
+            );
+
+        let mut builder = SceneBuilder::new();
+        builder.add_node(node);
+        let fragments = builder.into_fragments();
+
+        // One fragment per top-level shape across the root closure.
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments[0].z, 0.0);
+        assert_eq!(fragments[1].z, 0.0);
+        assert!(
+            fragments[1]
+                .scene
+                .encoding()
+                .transforms
+                .iter()
+                .any(|transform| transform.translation == [5.0, 6.0]),
+            "the root child is placed relative to its parent"
+        );
     }
 }

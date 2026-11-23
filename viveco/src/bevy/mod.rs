@@ -12,12 +12,13 @@
 //! - [`ParallaxLayer`] and [`apply_parallax`]: a system that scales and offsets
 //!   marked entities by depth, emulating a perspective camera.
 //!
-//! Everything is explicit: the plugin never spawns entities. Each
-//! [`VivecoScene`] is a per-frame buffer of fragments; the plugin clears it,
-//! the built-in instance producer and any custom producer systems add
-//! fragments, and the plugin sorts them by Z and paints them. Marking one
-//! scene [`VivecoDefaultScene`] opts into a default target for instances that
-//! do not name a scene; without such a marker, unlinked instances are ignored.
+//! Everything is explicit: the plugin never spawns entities. A [`VivecoScene`]
+//! is the root of a draw tree and a per-frame buffer of fragments. Every
+//! drawable entity is a [`VivecoChildOf`] a scene or another node: a
+//! [`VivecoInstance`] contributes its document, [`VivecoFragments`] contributes
+//! custom Vello scenes, and either can nest inside shapes to any depth. Marking
+//! one scene [`VivecoDefaultScene`] gives unparented drawable nodes a root;
+//! without such a marker, they are ignored.
 //!
 //! # With the plugin
 //!
@@ -28,7 +29,7 @@
 //! use bevy::prelude::*;
 //! use bevy_vello::prelude::VelloView;
 //! use bevy_vello::VelloPlugin;
-//! use viveco::{Asset, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf};
+//! use viveco::{Asset, VivecoInstance, VivecoPlugin, VivecoScene, VivecoChildOf};
 //!
 //! fn main() {
 //!     App::new()
@@ -47,7 +48,7 @@
 //!     let character = asset_server.load::<Asset>("character.viveco");
 //!     commands.spawn((
 //!         VivecoInstance::from_animation(character, 0),
-//!         VivecoSceneOf(scene),
+//!         VivecoChildOf::root(scene),
 //!     ));
 //! }
 //! ```
@@ -66,74 +67,93 @@
 //!
 //! ```no_run
 //! # use bevy::prelude::*;
-//! # use viveco::{Asset, VivecoInstance, VivecoSceneOf};
+//! # use viveco::{Asset, VivecoInstance, VivecoChildOf};
 //! # use vello::kurbo::Affine;
 //! # fn spawn(commands: &mut Commands, asset: Handle<Asset>, scene: Entity) {
 //! commands.spawn((
 //!     VivecoInstance::from_animation(asset, 0)
 //!         .with_transform(Affine::scale(-1.0)), // mirror horizontally
-//!     VivecoSceneOf(scene),
+//!     VivecoChildOf::root(scene),
 //! ));
 //! # }
 //! ```
 //!
 //! # Custom scene content
 //!
-//! A [`VivecoScene`] is filled every frame from [`SceneFragment`]s. To draw
-//! procedural or custom Vello content, write a system in
-//! [`VivecoSceneSystems::Build`] that pushes fragments into the scene:
+//! Custom Vello content is drawn by an entity with [`VivecoFragments`].
+//! Producers fill it in [`VivecoSceneSystems::Build`]; the plugin consumes it in
+//! the same walk as instance artwork and clears it each frame:
 //!
 //! ```no_run
 //! use bevy::prelude::*;
-//! use bevy_vello::prelude::*;
-//! use viveco::{SceneFragment, VivecoScene, VivecoSceneOf, VivecoSceneSystems, scene_affine};
+//! use vello::kurbo::Affine;
+//! use viveco::{SceneFragment, VivecoFragments, VivecoSceneSystems};
 //!
 //! #[derive(Component)]
 //! struct Ring {
 //!     radius: f32,
-//!     z: f32,
 //! }
 //!
-//! fn draw_rings(
-//!     mut scenes: Query<&mut VivecoScene>,
-//!     rings: Query<(&Ring, &VivecoSceneOf, &GlobalTransform)>,
-//! ) {
-//!     for (ring, target, transform) in &rings {
-//!         let Ok(mut scene) = scenes.get_mut(target.0) else {
-//!             continue;
-//!         };
-//!         let mut fragment = vello::Scene::new();
-//!         fragment.stroke(
+//! fn draw_rings(mut rings: Query<(&Ring, &mut VivecoFragments)>) {
+//!     for (ring, mut fragments) in &mut rings {
+//!         let mut scene = vello::Scene::new();
+//!         scene.stroke(
 //!             &vello::kurbo::Stroke::new(1.0),
-//!             scene_affine(transform),
+//!             Affine::IDENTITY,
 //!             vello::peniko::Color::from_rgba8(255, 255, 255, 255),
 //!             None,
 //!             &vello::kurbo::Circle::new((0.0, 0.0), ring.radius as f64),
 //!         );
-//!         scene.push(SceneFragment { z: ring.z, scene: fragment });
+//!         fragments.push(SceneFragment::new(0.0, scene));
 //!     }
 //! }
 //!
 //! fn main() {
-//!     App::new().add_systems(PostUpdate, draw_rings.in_set(VivecoSceneSystems::Build));
+//!     App::new()
+//!         .add_systems(Startup, |mut commands: Commands| {
+//!             commands.spawn(VivecoFragments::default());
+//!         })
+//!         .add_systems(PostUpdate, draw_rings.in_set(VivecoSceneSystems::Build));
 //! }
 //! ```
 //!
-//! Producers are independent: the plugin's instance renderer is just another
-//! producer, and adding a custom type needs no plugin changes. Fragments from
-//! every producer are sorted by Z together, so custom geometry interleaves with
-//! instance artwork at any depth. The scene is rebuilt every frame (clear,
-//! build, finalize), matching Vello's immediate-mode model; equal Z keeps the
-//! order fragments were pushed.
+//! Content is authored in the entity's local space and placed by the entity's
+//! [`GlobalTransform`](bevy::prelude::GlobalTransform) — including any Bevy
+//! [`ChildOf`](bevy::prelude::ChildOf) ancestors — in every context. The Viveco
+//! link only selects the clip and paint level. [`VivecoFragments`] composes with
+//! [`VivecoInstance`] on the same entity, so a document and custom overlays can
+//! share a node.
 //!
+//! A fragment can target a shape of the entity's *own* document with
+//! [`VivecoFragments::push_at_shape`]. It is clipped by that shape and
+//! Z-ordered with its children, so an overlay can be drawn inside a region of a
+//! pre-made asset without a separate entity:
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use viveco::{SceneFragment, VivecoFragments};
+//! fn draw_scanlines(mut sources: Query<&mut VivecoFragments>) {
+//!     // Resolve the shape once, e.g. with a generated index constant.
+//!     let screen = 5usize;
+//!     for mut source in &mut sources {
+//!         let mut scene = vello::Scene::new();
+//!         // Draw the scan-line pattern in the entity's local space.
+//!         source.push_at_shape(screen, SceneFragment::new(1.0, scene));
+//!     }
+//! }
+//! ```
+//!
+//! A system that prefers to push finished scene-space fragments can still query
+//! `&mut VivecoScene` in [`VivecoSceneSystems::Build`] and call
+//! [`VivecoScene::push`]; those fragments are sorted with everything else.
 //! [`SceneBuilder::into_fragments`](crate::render::SceneBuilder::into_fragments)
 //! and [`Shape::to_fragment`](crate::Shape::to_fragment) turn model geometry
 //! into fragments if you prefer the asset styling and Z semantics.
 //!
 //! # Default scene
 //!
-//! Marking a scene with [`VivecoDefaultScene`] makes it the target for
-//! instances that do not name one, so those instances need no [`VivecoSceneOf`]:
+//! Marking a scene with [`VivecoDefaultScene`] gives unparented drawable nodes a
+//! root, so they need no [`VivecoChildOf`]:
 //!
 //! ```no_run
 //! # use bevy::prelude::*;
@@ -144,19 +164,20 @@
 //! # }
 //! ```
 //!
-//! Each instance is linked once; an explicit [`VivecoSceneOf`] always wins. If
-//! several scenes carry the marker, the one with the lowest entity ID is used,
-//! and with no marked scene unlinked instances are ignored. Removing the
-//! default scene unlinks its members, which can then join a new default.
+//! A node is linked once; an explicit [`VivecoChildOf`] always wins. If several
+//! scenes carry the marker, the one with the lowest entity ID is used, and with
+//! no marked scene unparented nodes are ignored. Removing the default scene
+//! unlinks its members, which can then join a new default.
 //!
 //! # Children
 //!
-//! [`VivecoChildOf`] draws an instance inside one shape of another instance,
-//! instead of into a scene of its own. The child keeps its own asset and mixer,
-//! so it animates independently. Its top-level shapes inherit the host shape's
-//! clip layer and compete with that shape's children by their own Z, exactly
-//! like the top-level shapes of separate assets in one scene. The host shape is
-//! selected by index or by name:
+//! [`VivecoChildOf`] attaches a node to another node's *root* or to one *shape*
+//! of its document. Children nest to any depth:
+//!
+//! - [`VivecoChildOf::shape`] paints the child inside that shape's clip layer,
+//!   competing with the shape's children by Z.
+//! - [`VivecoChildOf::root`] paints the child at the parent's paint level,
+//!   unclipped relative to it.
 //!
 //! ```no_run
 //! # use bevy::prelude::*;
@@ -165,17 +186,22 @@
 //! commands.spawn((VivecoScene::default(), VivecoDefaultScene));
 //! let tv_entity = commands.spawn(VivecoInstance::from_asset(tv)).id();
 //!
-//! // Draw the animation inside the TV's shape named "Screen".
+//! // Draw the animation inside the TV's shape named "Screen". Resolve the name
+//! // once with `asset.shape_index_by_name` or a generated index constant.
+//! let screen = 5usize;
 //! commands.spawn((
 //!     VivecoInstance::from_animation(animation, 0),
-//!     VivecoChildOf::new(tv_entity, "Screen"),
+//!     VivecoChildOf::shape(tv_entity, screen),
 //! ));
 //! # }
 //! ```
 //!
-//! A child's [`VivecoInstance::transform`] places it in the host document's
-//! space; no other placement or fitting is applied. A child should not carry
-//! [`VivecoSceneOf`], and children are drawn one level deep.
+//! Every node is placed by its own
+//! [`GlobalTransform`](bevy::prelude::GlobalTransform) (including any Bevy
+//! [`ChildOf`](bevy::prelude::ChildOf) ancestors) times its
+//! [`VivecoInstance::transform`]. `VivecoChildOf` only selects the clip and
+//! paint level; to make a child follow its host, make it a Bevy `ChildOf` it as
+//! well. A node with no instance and no custom fragments groups its children.
 //!
 //! # Stroke width
 //!
@@ -185,19 +211,19 @@
 //! the artwork. To keep a constant on-screen width instead, add
 //! [`VivecoStrokeWidthInPixels`] to the instance or to its scene. The plugin
 //! then rewrites each affected instance's `stroke_width` to compensate for the
-//! instance's transform, entity, and scene scales, and the observing camera's
-//! (a component on the instance overrides the scene's):
+//! instance's transform and every placement above it, its scene's scale, and the
+//! observing camera's (a component on the instance overrides the scene's):
 //!
 //! ```no_run
 //! # use bevy::prelude::*;
-//! # use viveco::{Asset, VivecoInstance, VivecoStrokeWidthInPixels, VivecoScene, VivecoSceneOf};
+//! # use viveco::{Asset, VivecoInstance, VivecoStrokeWidthInPixels, VivecoScene, VivecoChildOf};
 //! # fn spawn(commands: &mut Commands, asset: Handle<Asset>) {
 //! let scene = commands
 //!     .spawn((VivecoScene::default(), VivecoStrokeWidthInPixels::new(2.0))) // two logical pixels wide
 //!     .id();
 //! commands.spawn((
 //!     VivecoInstance::from_animation(asset, 0),
-//!     VivecoSceneOf(scene),
+//!     VivecoChildOf::root(scene),
 //! ));
 //! # }
 //! ```
@@ -241,7 +267,9 @@
 //!
 //! Add one `SceneInstance` per instance (with its own
 //! [`Affine`](vello::kurbo::Affine) placement and stroke width) to Z-order
-//! several of them in one scene. A `SceneInstance` borrows its asset and
+//! several of them in one scene. To nest documents, build a
+//! [`DrawNode`](crate::render::DrawNode) tree with shape- and root-context children and
+//! add it with `SceneBuilder::add_node`. A `SceneInstance` borrows its asset and
 //! resolves the sample with [`Pose::to_world`](crate::Pose::to_world), so
 //! skinning happens while geometry is drawn rather than by cloning the asset.
 //! For a single unposed asset, [`Asset::into_scene`](crate::Asset::into_scene)
@@ -253,8 +281,8 @@
 //! for example in `PostUpdate` after transform propagation, and run it when
 //! the instance's mixer changes.
 //!
-//! [`VivecoScene`] and [`VivecoSceneOf`] are only bookkeeping for the plugin's
-//! systems; the manual path does not need them.
+//! [`VivecoScene`] and [`VivecoChildOf`] are the Bevy plugin's scene and tree
+//! wiring; the manual path does not need them.
 
 mod loader;
 mod parallax;
@@ -294,8 +322,8 @@ pub use crate::render::SceneFragment;
 pub use loader::VivecoLoader;
 pub use parallax::{ParallaxLayer, apply_parallax};
 pub use plugin::{
-    ShapeSelector, VivecoChildOf, VivecoChildren, VivecoDefaultScene, VivecoInstance, VivecoPlugin,
-    VivecoScene, VivecoSceneMembers, VivecoSceneOf, VivecoSceneSystems, VivecoStrokeWidthInPixels,
+    VivecoChildOf, VivecoChildren, VivecoContext, VivecoDefaultScene, VivecoFragments,
+    VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneSystems, VivecoStrokeWidthInPixels,
     scene_affine,
 };
 
@@ -306,8 +334,8 @@ pub use plugin::{
 /// `viveco` directly.
 pub mod prelude {
     pub use super::{
-        ParallaxLayer, SceneFragment, ShapeSelector, VivecoChildOf, VivecoChildren,
-        VivecoDefaultScene, VivecoInstance, VivecoPlugin, VivecoScene, VivecoSceneOf,
+        ParallaxLayer, SceneFragment, VivecoChildOf, VivecoChildren, VivecoContext,
+        VivecoDefaultScene, VivecoFragments, VivecoInstance, VivecoPlugin, VivecoScene,
         VivecoSceneSystems, VivecoStrokeWidthInPixels, apply_parallax, scene_affine,
     };
 }

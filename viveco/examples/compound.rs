@@ -228,7 +228,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         Transform::from_xyz(CHARACTER_CENTER.x, CHARACTER_CENTER.y, 100.0),
     ));
 
-    // Mark one scene as the default; for VivecoInstances without explicit `VivecoSceneOf`.
+    // Mark one scene as the default; unparented VivecoInstances join it.
     commands.spawn((viveco::VivecoScene::default(), viveco::VivecoDefaultScene));
 
     // The instance starts at rest; `animate` supplies the mixer from the
