@@ -18,6 +18,7 @@ pub mod render;
 pub mod rig;
 pub mod rig_panel;
 pub mod rig_sidebar;
+pub mod scrollbar;
 pub mod sidebar;
 pub mod style_panel;
 pub mod theme;

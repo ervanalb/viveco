@@ -27,6 +27,7 @@ use viveco_editor::mode_tabs::ModeTabsPlugin;
 use viveco_editor::rig::RigPlugin;
 use viveco_editor::rig_panel::RigPanelPlugin;
 use viveco_editor::rig_sidebar::RigSidebarPlugin;
+use viveco_editor::scrollbar::PanelScrollbarPlugin;
 use viveco_editor::sidebar::SidebarPlugin;
 use viveco_editor::style_panel::StylePanelPlugin;
 use viveco_editor::theme;
@@ -60,6 +61,7 @@ fn main() {
         .add_plugins(RigPanelPlugin)
         .add_plugins(AnimateSidebarPlugin)
         .add_plugins(AnimatePanelPlugin)
+        .add_plugins(PanelScrollbarPlugin)
         .add_plugins(TimelinePlugin)
         .add_plugins(MenuBarPlugin)
         .add_plugins(TransformPlugin)

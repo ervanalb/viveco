@@ -27,6 +27,7 @@ use bevy::ui::{FocusPolicy, RelativeCursorPosition};
 use bevy::window::PrimaryWindow;
 
 use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH};
+use crate::scrollbar::{PanelScrollbar, spawn_scrollable_list};
 use crate::theme;
 use viveco::Asset;
 
@@ -278,16 +279,7 @@ pub fn spawn_panel<M: TreeModel>(mut commands: Commands) {
                 TextFont::from_font_size(16.0),
                 TextColor(theme::TEXT),
             ));
-            panel.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    width: Val::Percent(100.0),
-                    flex_grow: 1.0,
-                    overflow: Overflow::clip_y(),
-                    ..default()
-                },
-                TreeContainer::<M>(PhantomData),
-            ));
+            spawn_scrollable_list(panel, TreeContainer::<M>(PhantomData), 0.0);
         });
 }
 
@@ -329,6 +321,9 @@ fn spawn_list<M: TreeModel>(
             width: Val::Percent(100.0),
             flex_direction: FlexDirection::Column,
             padding: UiRect::bottom(Val::Px(CHILDREN_PADDING_BOTTOM)),
+            // The list scrolls; its contents must keep their natural height
+            // rather than compress to fit the visible area.
+            flex_shrink: 0.0,
             ..default()
         })
         .with_children(|list| {
@@ -566,6 +561,7 @@ pub fn deselect_on_empty_press<M: TreeModel>(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     rows: Query<&RelativeCursorPosition, With<TreeRow<M>>>,
+    scrollbars: Query<&RelativeCursorPosition, With<PanelScrollbar>>,
     mut editor: ResMut<EditorState>,
 ) {
     if !M::visible_in(*mode) || !mouse.just_pressed(MouseButton::Left) {
@@ -584,6 +580,11 @@ pub fn deselect_on_empty_press<M: TreeModel>(
     }
     // A row under the cursor handles its own press.
     if rows.iter().any(|row| row.cursor_over()) {
+        return;
+    }
+    // Scrolling is not deselection: leave the selection alone while the user
+    // is dragging the scrollbar.
+    if scrollbars.iter().any(|bar| bar.cursor_over()) {
         return;
     }
 

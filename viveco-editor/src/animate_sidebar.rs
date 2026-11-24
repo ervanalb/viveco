@@ -17,6 +17,7 @@ use crate::animate::{
 };
 use crate::animate_panel::{DurationEdit, SpeedEdit};
 use crate::editor::{CONTENT_TOP, EditorMode, EditorState, SIDEBAR_WIDTH, TreeAddress};
+use crate::scrollbar::spawn_scrollable_list;
 use crate::theme;
 use crate::timeline::{TimelineEdit, TimelineInput};
 use crate::tree::label;
@@ -123,18 +124,7 @@ fn spawn_sidebar(mut commands: Commands) {
                     spawn_header_button(header, "+", AddAnimationButton);
                 });
 
-            panel.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    width: Val::Percent(100.0),
-                    flex_grow: 1.0,
-                    flex_basis: Val::Px(0.0),
-                    overflow: Overflow::clip_y(),
-                    row_gap: Val::Px(2.0),
-                    ..default()
-                },
-                AnimationList,
-            ));
+            spawn_scrollable_list(panel, AnimationList, 2.0);
 
             // Shapes are selectable here so animate mode can target their
             // properties without leaving the page.
@@ -143,18 +133,7 @@ fn spawn_sidebar(mut commands: Commands) {
                 TextFont::from_font_size(16.0),
                 TextColor(theme::TEXT),
             ));
-            panel.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    width: Val::Percent(100.0),
-                    flex_grow: 1.0,
-                    flex_basis: Val::Px(0.0),
-                    overflow: Overflow::clip_y(),
-                    row_gap: Val::Px(2.0),
-                    ..default()
-                },
-                AnimateShapeList,
-            ));
+            spawn_scrollable_list(panel, AnimateShapeList, 2.0);
         });
 }
 
@@ -490,6 +469,8 @@ fn spawn_shape_row(parent: &mut ChildSpawnerCommands, entry: ShapeRow, selected:
                 },
                 align_items: AlignItems::Center,
                 border_radius: BorderRadius::all(Val::Px(4.0)),
+                // The shape list scrolls; rows keep their natural height.
+                flex_shrink: 0.0,
                 ..default()
             },
             BackgroundColor(if selected {
@@ -583,6 +564,8 @@ fn spawn_row(parent: &mut ChildSpawnerCommands, index: usize, label: &str, selec
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 align_items: AlignItems::Center,
                 border_radius: BorderRadius::all(Val::Px(4.0)),
+                // The list scrolls; rows keep their natural height.
+                flex_shrink: 0.0,
                 ..default()
             },
             BackgroundColor(if selected {

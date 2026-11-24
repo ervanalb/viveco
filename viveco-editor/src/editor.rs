@@ -994,15 +994,18 @@ fn handle_viewport_input(
 
     let width = window.width();
     let height = window.height();
+    let cursor = window.cursor_position();
     // In animate mode the bottom panel owns the wheel while the cursor is over
     // it, so the timeline can scroll and zoom without also moving the canvas.
     let over_timeline = *mode == EditorMode::Animate
-        && window
-            .cursor_position()
-            .is_some_and(|cursor| cursor.y >= height - BOTTOM_BAR_HEIGHT);
+        && cursor.is_some_and(|cursor| cursor.y >= height - BOTTOM_BAR_HEIGHT);
+    // The right-hand panels scroll their own contents, so leave the wheel to
+    // them while the cursor is over the sidebar strip.
+    let over_sidebar =
+        cursor.is_some_and(|cursor| cursor.x >= width - SIDEBAR_WIDTH && cursor.y >= CONTENT_TOP);
 
     for event in wheel.read() {
-        if over_timeline {
+        if over_timeline || over_sidebar {
             continue;
         }
         let conversion = MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR;
