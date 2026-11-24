@@ -382,13 +382,6 @@ fn info_text(path: &Path, asset: &Asset) -> String {
                 display_point(bounds.min),
                 display_point(bounds.max)
             );
-            let _ = writeln!(
-                out,
-                "  size {} x {}, center {}",
-                number(bounds.width()),
-                number(bounds.height()),
-                display_point(bounds.center())
-            );
         }
         None => {
             let _ = writeln!(out, "  none (no artwork)");
@@ -677,7 +670,8 @@ mod tests {
         assert!(text.contains("    \"Arm\""), "{text}");
         assert!(text.contains("\"Wave\": 2s, cyclic"), "{text}");
         assert!(text.contains("min (0, 0), max (10, 20)"), "{text}");
-        assert!(text.contains("size 10 x 20, center (5, 10)"), "{text}");
+        assert!(!text.contains("size"), "{text}");
+        assert!(!text.contains("center"), "{text}");
     }
 
     #[test]
