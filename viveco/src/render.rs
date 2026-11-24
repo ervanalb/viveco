@@ -349,6 +349,8 @@ enum SceneItem<'a> {
     Fragment {
         z: f32,
         transform: Affine,
+        /// Boxed so the item enum stays sized by the common shape variants
+        /// rather than by `Scene`. Custom fragments are usually few.
         scene: Box<Scene>,
     },
 }
@@ -407,21 +409,11 @@ impl<'a> SceneBuilder<'a> {
             children,
         } = node;
 
-        let mut shape_children = Vec::new();
-        let mut root_children = Vec::new();
-        for child in children {
-            if child.shape.is_some() {
-                shape_children.push(child);
-            } else {
-                root_children.push(child);
-            }
-        }
-
         let node_index = self.nodes.len();
         self.nodes.push(SceneNode {
             placement,
             instance,
-            children: shape_children,
+            children: Vec::new(),
         });
 
         if let Some(instance) = &self.nodes[node_index].instance {
@@ -442,23 +434,30 @@ impl<'a> SceneBuilder<'a> {
             }
         }
 
-        for child in root_children {
-            match child.content {
-                DrawContent::Fragment(fragment) => {
-                    let SceneFragment {
-                        z,
-                        transform,
-                        scene,
-                    } = fragment;
-                    self.items.push(SceneItem::Fragment {
-                        z,
-                        transform: placement * transform,
-                        scene: Box::new(scene),
-                    });
-                }
-                DrawContent::Node(child_node) => self.add_node_at_root(child_node),
+        // Shape-context children stay with the node for its shape draws; root
+        // children are expanded here in the same pass.
+        let mut shape_children = Vec::new();
+        for child in children {
+            match child.shape {
+                Some(_) => shape_children.push(child),
+                None => match child.content {
+                    DrawContent::Fragment(fragment) => {
+                        let SceneFragment {
+                            z,
+                            transform,
+                            scene,
+                        } = fragment;
+                        self.items.push(SceneItem::Fragment {
+                            z,
+                            transform: placement * transform,
+                            scene: Box::new(scene),
+                        });
+                    }
+                    DrawContent::Node(child_node) => self.add_node_at_root(child_node),
+                },
             }
         }
+        self.nodes[node_index].children = shape_children;
     }
 
     /// Adds every top-level shape of `instance` as a root node.
@@ -777,16 +776,9 @@ impl Shape {
         let path = self.to_bez_path_with_pose(world_pose);
         draw_fill(scene, &self.style, &path, transform);
 
-        let child_flat = child_flat_indices(self, flat_index);
         let mut nodes = Vec::new();
         let painters = painters_in_paint_order(
-            self,
-            &child_flat,
-            flat_index,
-            shape_pose,
-            transform,
-            children,
-            &mut nodes,
+            self, flat_index, shape_pose, transform, children, &mut nodes,
         );
 
         if !painters.is_empty() {
@@ -798,13 +790,13 @@ impl Shape {
             }
             for (_, painter) in painters {
                 match painter {
-                    Painter::Child(index) => self.children[index].draw(
+                    Painter::Child { index, flat_index } => self.children[index].draw(
                         scene,
                         stroke_width,
                         transform,
                         world_pose,
                         shape_pose,
-                        child_flat[index],
+                        flat_index,
                         children,
                     ),
                     Painter::NodeShape {
@@ -885,7 +877,9 @@ impl Shape {
 ///
 /// Children are numbered in vector order, matching
 /// [`ShapeIndex`](crate::ShapeIndex): the first child follows its parent, and
-/// each subsequent child follows the previous child's whole subtree.
+/// each subsequent child follows the previous child's whole subtree. The
+/// renderer computes these inline; this helper exists for tests.
+#[cfg(test)]
 fn child_flat_indices(shape: &Shape, flat_index: usize) -> Vec<usize> {
     let mut indices = Vec::with_capacity(shape.children.len());
     let mut next = flat_index + 1;
@@ -898,8 +892,13 @@ fn child_flat_indices(shape: &Shape, flat_index: usize) -> Vec<usize> {
 
 /// One painter queued inside a shape.
 enum Painter<'n> {
-    /// Index into the shape's children.
-    Child(usize),
+    /// One of the shape's own children.
+    Child {
+        /// Index into the shape's children.
+        index: usize,
+        /// The child's flat depth-first pre-order index.
+        flat_index: usize,
+    },
     /// A top-level shape of an attached node.
     NodeShape {
         /// Index into the node arena built for this draw.
@@ -926,7 +925,6 @@ enum Painter<'n> {
 /// order it was added.
 fn painters_in_paint_order<'n, 'a>(
     shape: &Shape,
-    child_flat: &[usize],
     flat_index: usize,
     shape_pose: Option<&ShapePose>,
     transform: Affine,
@@ -935,9 +933,19 @@ fn painters_in_paint_order<'n, 'a>(
 ) -> Vec<(f32, Painter<'n>)> {
     let mut painters = Vec::with_capacity(shape.children.len());
 
-    for (index, flat) in child_flat.iter().enumerate() {
-        let z = shape.children[index].z + shape_pose.map_or(0.0, |pose| pose.get(*flat));
-        painters.push((z, Painter::Child(index)));
+    // Flat indices follow the children in vector order, so a running counter
+    // avoids allocating an index Vec per shape per frame.
+    let mut child_flat = flat_index + 1;
+    for (index, child) in shape.children.iter().enumerate() {
+        let z = child.z + shape_pose.map_or(0.0, |pose| pose.get(child_flat));
+        painters.push((
+            z,
+            Painter::Child {
+                index,
+                flat_index: child_flat,
+            },
+        ));
+        child_flat += child.subtree_len();
     }
 
     // Children are sorted by context, so two binary searches find the ones
@@ -1765,22 +1773,14 @@ mod tests {
             DrawNode::new(Affine::IDENTITY).with_instance(SceneInstance::new(&child)),
         )];
 
-        let child_flat = child_flat_indices(&host, 0);
         let mut nodes = Vec::new();
-        let painters = painters_in_paint_order(
-            &host,
-            &child_flat,
-            0,
-            None,
-            Affine::IDENTITY,
-            &children,
-            &mut nodes,
-        );
+        let painters =
+            painters_in_paint_order(&host, 0, None, Affine::IDENTITY, &children, &mut nodes);
 
         let names: Vec<&str> = painters
             .iter()
             .map(|(_, painter)| match painter {
-                Painter::Child(index) => host.children[*index].name.as_str(),
+                Painter::Child { index, .. } => host.children[*index].name.as_str(),
                 Painter::NodeShape {
                     node, top_level, ..
                 } => nodes[*node].instance.as_ref().unwrap().asset.shapes[*top_level]
@@ -1887,22 +1887,14 @@ mod tests {
             0,
             SceneFragment::new(1.0, Scene::new()),
         )];
-        let child_flat = child_flat_indices(&host, 0);
         let mut nodes = Vec::new();
-        let painters = painters_in_paint_order(
-            &host,
-            &child_flat,
-            0,
-            None,
-            Affine::IDENTITY,
-            &children,
-            &mut nodes,
-        );
+        let painters =
+            painters_in_paint_order(&host, 0, None, Affine::IDENTITY, &children, &mut nodes);
 
         let order: Vec<&str> = painters
             .iter()
             .map(|(_, painter)| match painter {
-                Painter::Child(index) => host.children[*index].name.as_str(),
+                Painter::Child { index, .. } => host.children[*index].name.as_str(),
                 Painter::Fragment { .. } => "fragment",
                 Painter::NodeShape { .. } => "node",
             })

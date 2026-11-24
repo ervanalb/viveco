@@ -8,7 +8,6 @@ use ::bevy::camera::visibility::{NoFrustumCulling, RenderLayers, VisibilitySyste
 use ::bevy::prelude::*;
 use ::bevy::transform::TransformSystems;
 use ::bevy_vello::prelude::{VelloScene2d, VelloView};
-use ::vello::Scene;
 use ::vello::kurbo::Affine;
 
 use crate::render::{DrawChild, DrawNode, SceneBuilder, SceneFragment, SceneInstance};
@@ -290,9 +289,9 @@ impl VivecoFragments {
             .map(|(shape, fragment)| (*shape, fragment))
     }
 
-    /// Moves the queued scenes out, leaving the buffer empty.
-    pub(crate) fn take(&mut self) -> Vec<(Option<ShapeIndex>, SceneFragment)> {
-        std::mem::take(&mut self.entries)
+    /// Empties the queue while preserving its allocation.
+    pub(crate) fn drain(&mut self) -> std::vec::Drain<'_, (Option<ShapeIndex>, SceneFragment)> {
+        self.entries.drain(..)
     }
 
     /// Empties the queue.
@@ -570,11 +569,12 @@ fn normalize_viveco_stroke_widths(
         ),
         (With<Camera2d>, With<VelloView>),
     >,
+    mut visited: Local<HashSet<Entity>>,
 ) {
     for (scene_transform, scene_layers, scene_pixels, scene_children) in &scenes {
         let scene_scale = max_scale(scene_transform);
         let pixels_per_unit = pixels_per_unit_for(scene_layers, &cameras);
-        let mut visited = HashSet::new();
+        visited.clear();
         let Some(scene_children) = scene_children else {
             continue;
         };
@@ -723,6 +723,7 @@ fn max_affine_scale(affine: &Affine) -> f32 {
 /// Empties every scene's fragment list at the start of the frame.
 fn clear_viveco_scenes(mut scenes: Query<&mut VivecoScene>) {
     for mut scene in &mut scenes {
+        // Keep the fragment vec's capacity.
         scene.fragments.clear();
     }
 }
@@ -752,21 +753,21 @@ fn render_viveco_scenes(
             Option<&mut VivecoFragments>,
             &GlobalTransform,
             &InheritedVisibility,
-            Option<&VivecoChildren>,
         ),
         Without<VivecoScene>,
     >,
+    child_lists: Query<&VivecoChildren>,
     contexts: Query<&VivecoChildOf>,
     assets: Res<Assets<crate::Asset>>,
+    mut visited: Local<HashSet<Entity>>,
 ) {
     for (_, mut scene, scene_children) in &mut scenes {
         let Some(scene_children) = scene_children else {
             continue;
         };
-        let children: Vec<Entity> = scene_children.iter().collect();
         let mut builder = SceneBuilder::new();
-        let mut visited = HashSet::new();
-        for child in children {
+        visited.clear();
+        for child in scene_children.iter() {
             let Ok(child_of) = contexts.get(child) else {
                 continue;
             };
@@ -774,9 +775,15 @@ fn render_viveco_scenes(
                 ::bevy::log::warn!("child {child:?} of a scene must use VivecoContext::Root");
                 continue;
             }
-            if let Some(node) =
-                build_draw_node(child, true, &mut nodes, &contexts, &assets, &mut visited)
-            {
+            if let Some(node) = build_draw_node(
+                child,
+                true,
+                &mut nodes,
+                &child_lists,
+                &contexts,
+                &assets,
+                &mut visited,
+            ) {
                 builder.add_node(node);
             }
         }
@@ -800,10 +807,10 @@ fn build_draw_node<'a>(
             Option<&mut VivecoFragments>,
             &GlobalTransform,
             &InheritedVisibility,
-            Option<&VivecoChildren>,
         ),
         Without<VivecoScene>,
     >,
+    child_lists: &Query<&VivecoChildren>,
     contexts: &Query<&VivecoChildOf>,
     assets: &'a Assets<crate::Asset>,
     visited: &mut HashSet<Entity>,
@@ -812,9 +819,8 @@ fn build_draw_node<'a>(
         return None;
     }
 
-    let (placement, instance, fragments, child_entities, visible) = {
-        let Ok((instance, fragments, transform, visibility, children)) = nodes.get_mut(entity)
-        else {
+    let (mut node, visible) = {
+        let Ok((instance, fragments, transform, visibility)) = nodes.get_mut(entity) else {
             return None;
         };
         let visible = parent_visible && visibility.get();
@@ -829,77 +835,94 @@ fn build_draw_node<'a>(
                     .with_stroke_width(instance.stroke_width)
             })
         });
-        let fragments = fragments
-            .map(|mut fragments| fragments.take())
-            .unwrap_or_default();
-        let children: Vec<Entity> = children
-            .map(|children| children.iter().collect())
-            .unwrap_or_default();
-        (placement, instance, fragments, children, visible)
-    };
 
-    let mut node = DrawNode::new(placement);
-    node.instance = instance;
+        let mut node = DrawNode::new(placement);
+        node.instance = instance;
 
-    // Custom scenes are added before child nodes so equal Z keeps fragment
-    // content ahead of nested nodes.
-    for (shape, fragment) in fragments {
-        match shape {
-            None => node.children.push(DrawChild::root_fragment(fragment)),
-            Some(shape) => {
-                let Some(asset) = node.instance.as_ref().map(|instance| instance.asset) else {
-                    ::bevy::log::warn!(
-                        "fragment on {entity:?} targets a shape, but the entity has no document"
-                    );
-                    continue;
-                };
-                if shape >= asset.shape_count() {
-                    ::bevy::log::warn!(
-                        "fragment on {entity:?} targets shape {shape}, which is missing from \
-                         its document; the fragment is not drawn"
-                    );
-                    continue;
+        // Custom scenes are added before child nodes so equal Z keeps fragment
+        // content ahead of nested nodes. Draining preserves the buffer's
+        // capacity for the next frame.
+        if let Some(mut fragments) = fragments {
+            for (shape, fragment) in fragments.drain() {
+                match shape {
+                    None => node.children.push(DrawChild::root_fragment(fragment)),
+                    Some(shape) => {
+                        let Some(asset) = node.instance.as_ref().map(|instance| instance.asset)
+                        else {
+                            ::bevy::log::warn!(
+                                "fragment on {entity:?} targets a shape, but the entity has no \
+                                 document"
+                            );
+                            continue;
+                        };
+                        if shape >= asset.shape_count() {
+                            ::bevy::log::warn!(
+                                "fragment on {entity:?} targets shape {shape}, which is missing \
+                                 from its document; the fragment is not drawn"
+                            );
+                            continue;
+                        }
+                        node.children
+                            .push(DrawChild::shape_fragment(shape, fragment));
+                    }
                 }
-                node.children
-                    .push(DrawChild::shape_fragment(shape, fragment));
             }
         }
-    }
 
-    for child in child_entities {
-        let Ok(child_of) = contexts.get(child) else {
-            continue;
-        };
-        let context = child_of.context.clone();
-        match context {
-            VivecoContext::Root => {
-                let Some(child_node) =
-                    build_draw_node(child, visible, nodes, contexts, assets, visited)
-                else {
-                    continue;
-                };
-                node.children.push(DrawChild::root_node(child_node));
-            }
-            VivecoContext::Shape(shape) => {
-                let Some(asset) = node.instance.as_ref().map(|instance| instance.asset) else {
-                    ::bevy::log::warn!(
-                        "child {child:?} is attached to a shape, but {entity:?} has no document"
-                    );
-                    continue;
-                };
-                if shape >= asset.shape_count() {
-                    ::bevy::log::warn!(
-                        "child {child:?} targets shape {shape}, which is missing from \
-                         {entity:?}'s document; the child is not drawn"
-                    );
-                    continue;
+        (node, visible)
+    };
+
+    // Read the child list through a separate query so it does not have to be
+    // copied out before recursing.
+    if let Ok(children) = child_lists.get(entity) {
+        for child in children.iter() {
+            let Ok(child_of) = contexts.get(child) else {
+                continue;
+            };
+            match &child_of.context {
+                VivecoContext::Root => {
+                    let Some(child_node) = build_draw_node(
+                        child,
+                        visible,
+                        nodes,
+                        child_lists,
+                        contexts,
+                        assets,
+                        visited,
+                    ) else {
+                        continue;
+                    };
+                    node.children.push(DrawChild::root_node(child_node));
                 }
-                let Some(child_node) =
-                    build_draw_node(child, visible, nodes, contexts, assets, visited)
-                else {
-                    continue;
-                };
-                node.children.push(DrawChild::shape_node(shape, child_node));
+                VivecoContext::Shape(shape) => {
+                    let shape = *shape;
+                    let Some(asset) = node.instance.as_ref().map(|instance| instance.asset) else {
+                        ::bevy::log::warn!(
+                            "child {child:?} is attached to a shape, but {entity:?} has no \
+                             document"
+                        );
+                        continue;
+                    };
+                    if shape >= asset.shape_count() {
+                        ::bevy::log::warn!(
+                            "child {child:?} targets shape {shape}, which is missing from \
+                             {entity:?}'s document; the child is not drawn"
+                        );
+                        continue;
+                    }
+                    let Some(child_node) = build_draw_node(
+                        child,
+                        visible,
+                        nodes,
+                        child_lists,
+                        contexts,
+                        assets,
+                        visited,
+                    ) else {
+                        continue;
+                    };
+                    node.children.push(DrawChild::shape_node(shape, child_node));
+                }
             }
         }
     }
@@ -916,12 +939,13 @@ fn finalize_viveco_scenes(mut scenes: Query<(&mut VivecoScene, &mut VelloScene2d
             .fragments
             .sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(Ordering::Equal));
 
-        let mut painted = Scene::new();
+        // Reset in place so the scene's encoded buffers keep their capacity
+        // across frames instead of allocating a new Scene every frame.
+        vello.reset();
         for fragment in &scene.fragments {
             let transform = (fragment.transform != Affine::IDENTITY).then_some(fragment.transform);
-            painted.append(&fragment.scene, transform);
+            vello.append(&fragment.scene, transform);
         }
-        *vello = VelloScene2d::from(painted);
     }
 }
 
@@ -955,6 +979,7 @@ pub fn scene_affine(transform: &GlobalTransform) -> Affine {
 mod tests {
     use super::*;
     use crate::{Path as VivecoPath, Rgba8, Shape, Style};
+    use ::vello::Scene;
 
     fn test_app() -> App {
         let mut app = App::new();
